@@ -58,6 +58,13 @@ static PEER_W: AtomicI32 = AtomicI32::new(1920);
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
 static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 
+/// Hysteresis buffer in pixels at the left edge of the peer screen. The
+/// user has to drag this much further left than virt_x = 0 before we hand
+/// control back to the local desktop. Without it, any tiny leftward jitter
+/// (or natural left-tracking inside the peer screen) bounces the cursor
+/// back out of Remote mode immediately.
+const EXIT_BUFFER_PX: i32 = 100;
+
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
         && let Some(tx) = s.lock().as_ref()
@@ -199,17 +206,17 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 let dx = x - last_x;
                 let dy = y - last_y;
                 let peer_w = PEER_W.load(Ordering::Relaxed);
-                // Clamp accumulated virt_x to [-1, peer_w-1]. The -1 floor
-                // is exactly the trigger value for `exit_remote`; the upper
-                // bound stops further rightward dx from being absorbed into
-                // ever-growing virt_x (which would force the user to drag
-                // left for thousands of events to escape).
+                // Clamp accumulated virt_x to [-EXIT_BUFFER_PX, peer_w-1].
+                // The lower floor doubles as the exit trigger; the upper
+                // bound stops further rightward dx from being absorbed
+                // into ever-growing virt_x (which would force the user
+                // to drag left for thousands of events to escape).
                 let raw = VIRT_X.load(Ordering::Relaxed) + dx;
-                let new_virt_x = raw.clamp(-1, peer_w - 1);
+                let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w - 1);
                 VIRT_X.store(new_virt_x, Ordering::Relaxed);
                 VIRT_Y.fetch_add(dy, Ordering::Relaxed);
 
-                if new_virt_x < 0 {
+                if new_virt_x <= -EXIT_BUFFER_PX {
                     exit_remote(y);
                 } else {
                     if dx != 0 || dy != 0 {
