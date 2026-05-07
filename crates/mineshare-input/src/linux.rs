@@ -270,29 +270,31 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                     _ => {}
                 },
                 EventSummary::Key(_, key, value) => {
+                    // evdev key value semantics: 0 = release, 1 = press,
+                    // 2 = auto-repeat. The previous code treated 2 as
+                    // "released" which broke modifier tracking — holding
+                    // Ctrl past the auto-repeat threshold flipped
+                    // MOD_CTRL back to false, and the hotkey never saw
+                    // both modifiers held simultaneously.
                     let down = value == 1;
+                    let up = value == 0;
 
-                    // Track modifier state for the emergency-return
-                    // hotkey, regardless of mode.
+                    // Update modifier state ONLY on real press / release,
+                    // not on auto-repeat (which would otherwise overwrite
+                    // a held modifier with `false`).
                     if key == EvKey::KEY_LEFTCTRL || key == EvKey::KEY_RIGHTCTRL {
-                        MOD_CTRL.store(down, Ordering::Relaxed);
+                        if down {
+                            MOD_CTRL.store(true, Ordering::Relaxed);
+                        } else if up {
+                            MOD_CTRL.store(false, Ordering::Relaxed);
+                        }
                     }
                     if key == EvKey::KEY_LEFTALT || key == EvKey::KEY_RIGHTALT {
-                        MOD_ALT.store(down, Ordering::Relaxed);
-                    }
-
-                    // Diagnostic: log every R event with current modifier
-                    // state so we can verify the hotkey path is reaching us
-                    // when the user presses Ctrl+Alt+R.
-                    if key == EvKey::KEY_R {
-                        info!(
-                            down,
-                            ctrl = MOD_CTRL.load(Ordering::Relaxed),
-                            alt = MOD_ALT.load(Ordering::Relaxed),
-                            mode = CURSOR_MODE.load(Ordering::Acquire),
-                            peer_in_remote = super::peer_in_remote(),
-                            "KEY_R event"
-                        );
+                        if down {
+                            MOD_ALT.store(true, Ordering::Relaxed);
+                        } else if up {
+                            MOD_ALT.store(false, Ordering::Relaxed);
+                        }
                     }
 
                     // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks
