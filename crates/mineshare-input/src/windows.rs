@@ -27,6 +27,9 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT,
@@ -122,6 +125,18 @@ impl InputCapture for HookCapture {
             return Ok(());
         }
         self.started = true;
+
+        // Make this process per-monitor-DPI-aware **before** querying
+        // screen geometry. Without it, GetSystemMetrics returns logical
+        // (DPI-virtualised) pixels while WH_MOUSE_LL delivers physical
+        // pixels — a 200% scale display then reports cursor coords up to
+        // 2× our screen-width assumption, producing dx values of 2000+
+        // that warp Ubuntu's cursor straight to the right edge.
+        unsafe {
+            // Best-effort: a process can only set this once, so failure
+            // here usually just means a previous setter already ran.
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
 
         // Probe primary screen geometry once at start. Multi-monitor +
         // hot-plug come in M2 Slice 3.
