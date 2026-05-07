@@ -73,11 +73,15 @@ static VIRT_X: AtomicI32 = AtomicI32::new(0);
 static GRAB_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn enter_remote() {
-    let peer_w = PEER_W.load(Ordering::Relaxed);
-    VIRT_X.store(peer_w - 1, Ordering::Relaxed);
+    // virt_x is "distance dragged INTO the peer from the edge we crossed".
+    // It grows as the user moves further into the peer's screen, and falls
+    // back toward zero (then negative) as they head back toward the entry
+    // edge. Mirrors Win→Ubuntu's meaning so the exit hysteresis is
+    // symmetric: same EXIT_BUFFER_PX of grace before flipping back.
+    VIRT_X.store(0, Ordering::Relaxed);
     GRAB_REQUESTED.store(true, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
-    info!(peer_w, "cursor → remote (linux)");
+    info!("cursor → remote (linux)");
 }
 
 fn exit_remote() {
@@ -273,11 +277,16 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         // No forward in LOCAL — OS already moves the cursor.
     } else {
         let peer_w = PEER_W.load(Ordering::Relaxed);
-        let raw = VIRT_X.load(Ordering::Relaxed) + dx;
-        let new_virt_x = raw.clamp(0, peer_w + EXIT_BUFFER_PX);
+        // For the Ubuntu→Win direction the entry edge is on the *right*
+        // of the user's hand motion (they crossed leftward to enter Win),
+        // so leftward dx (negative) takes the cursor *deeper* into the
+        // peer. Flip the sign so virt_x grows the same way it does in
+        // Slice 1 (Win→Ubuntu).
+        let raw = VIRT_X.load(Ordering::Relaxed) + (-dx);
+        let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
-        if new_virt_x >= peer_w + EXIT_BUFFER_PX {
+        if new_virt_x <= -EXIT_BUFFER_PX {
             exit_remote();
         } else {
             let fdx = dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
