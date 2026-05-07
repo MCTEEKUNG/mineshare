@@ -47,6 +47,14 @@ static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
 static SCREEN_W: AtomicI32 = AtomicI32::new(1920);
 static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
+/// Approximate peer screen width — used to clamp `VIRT_X` so that pushing
+/// past the peer's right edge stops accumulating instead of letting the
+/// virtual cursor race off into infinity (which makes it impossible to
+/// drag back to negative virt_x and exit Remote mode).
+///
+/// 1920 is a sensible default until M2 Slice 2 negotiates the real width
+/// over the encrypted control channel.
+static PEER_W: AtomicI32 = AtomicI32::new(1920);
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
 static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 
@@ -186,10 +194,18 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 }
                 // local: don't forward, OS handles cursor as usual
             } else {
-                // REMOTE: compute delta from anchor and forward
+                // REMOTE: compute delta from anchor, clamp to peer screen,
+                // and forward.
                 let dx = x - last_x;
                 let dy = y - last_y;
-                let new_virt_x = VIRT_X.load(Ordering::Relaxed) + dx;
+                let peer_w = PEER_W.load(Ordering::Relaxed);
+                // Clamp accumulated virt_x to [-1, peer_w-1]. The -1 floor
+                // is exactly the trigger value for `exit_remote`; the upper
+                // bound stops further rightward dx from being absorbed into
+                // ever-growing virt_x (which would force the user to drag
+                // left for thousands of events to escape).
+                let raw = VIRT_X.load(Ordering::Relaxed) + dx;
+                let new_virt_x = raw.clamp(-1, peer_w - 1);
                 VIRT_X.store(new_virt_x, Ordering::Relaxed);
                 VIRT_Y.fetch_add(dy, Ordering::Relaxed);
 
