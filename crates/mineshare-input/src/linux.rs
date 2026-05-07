@@ -274,16 +274,22 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                         MOD_ALT.store(down, Ordering::Relaxed);
                     }
 
-                    // Hotkey: Ctrl+Alt+R forces exit_remote.
+                    // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote.
                     if down
                         && key == EvKey::KEY_R
                         && MOD_CTRL.load(Ordering::Relaxed)
                         && MOD_ALT.load(Ordering::Relaxed)
-                        && CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
                     {
-                        info!("hotkey Ctrl+Alt+R — forcing exit_remote");
-                        exit_remote();
-                        // grab still active until next pump iteration drops it
+                        match CURSOR_MODE.load(Ordering::Acquire) {
+                            MODE_REMOTE => {
+                                info!("hotkey Ctrl+Alt+R — forcing exit_remote");
+                                exit_remote();
+                            }
+                            _ => {
+                                info!("hotkey Ctrl+Alt+R — entering remote");
+                                enter_remote();
+                            }
+                        }
                         continue;
                     }
 
@@ -325,27 +331,15 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
 
     let mode = CURSOR_MODE.load(Ordering::Acquire);
     if mode == MODE_LOCAL {
-        let w = SCREEN_W.load(Ordering::Relaxed);
-        let old_cx = CURSOR_X.load(Ordering::Relaxed);
-        let raw = old_cx + dx;
-        let new_cx = raw.clamp(0, w - 1);
-        CURSOR_X.store(new_cx, Ordering::Relaxed);
-
-        // Pressure-based left-edge detection. Pressure only accumulates
-        // when the estimate has bottomed out at the left edge AND the
-        // user keeps pushing further left. Any rightward motion resets
-        // it, so casual cursor work inside Ubuntu doesn't flip us into
-        // Remote on its own.
-        if new_cx == 0 && dx < 0 {
-            let added = -dx;
-            let prev = LEFT_PRESSURE.fetch_add(added, Ordering::Relaxed);
-            if prev + added >= ENTER_PRESSURE_PX {
-                LEFT_PRESSURE.store(0, Ordering::Relaxed);
-                enter_remote();
-            }
-        } else if dx > 0 {
-            LEFT_PRESSURE.store(0, Ordering::Relaxed);
-        }
+        // Linux Wayland has no portable cursor-position query, so any
+        // estimate-based edge detection eventually drifts and traps the
+        // user (the estimate clamps to zero from accumulated leftward
+        // drift even when the real cursor is happily centered, then any
+        // small leftward push trips REMOTE). For now we rely on the
+        // explicit Ctrl+Alt+R hotkey to enter Remote from Linux. M2 Slice
+        // 3 will swap in a real Wayland/X11 cursor query and re-enable
+        // automatic edge detection.
+        let _ = (dx, dy);
         // No forward in LOCAL — OS already moves the cursor.
     } else {
         let peer_w = PEER_W.load(Ordering::Relaxed);

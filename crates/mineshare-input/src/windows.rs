@@ -26,17 +26,18 @@ use enigo::{
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT,
-    MSG, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, SetWindowsHookExW,
-    TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION,
+    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos,
+    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
@@ -385,16 +386,31 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
 
         let mode = CURSOR_MODE.load(Ordering::Acquire);
 
-        // Hotkey: Ctrl+Alt+R forces exit_remote and consumes the event.
-        if mode == MODE_REMOTE
-            && down
+        // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote.
+        if down
             && scan == SCAN_HOTKEY
             && MOD_CTRL.load(Ordering::Relaxed)
             && MOD_ALT.load(Ordering::Relaxed)
         {
-            info!("hotkey Ctrl+Alt+R — forcing exit_remote");
-            let h = SCREEN_H.load(Ordering::Relaxed);
-            exit_remote(h / 2);
+            match mode {
+                MODE_REMOTE => {
+                    info!("hotkey Ctrl+Alt+R — forcing exit_remote");
+                    let h = SCREEN_H.load(Ordering::Relaxed);
+                    exit_remote(h / 2);
+                }
+                _ => {
+                    info!("hotkey Ctrl+Alt+R — entering remote");
+                    let mut pt = POINT::default();
+                    let entry_y = unsafe {
+                        if GetCursorPos(&mut pt).is_ok() {
+                            pt.y
+                        } else {
+                            SCREEN_H.load(Ordering::Relaxed) / 2
+                        }
+                    };
+                    enter_remote(entry_y);
+                }
+            }
             return LRESULT(1);
         }
 
