@@ -7,5 +7,5 @@ pub mod pairing;
 pub mod proto;
 
 pub use discovery::{Discovery, DiscoveryEvent, PeerAdvert, SERVICE_TYPE};
-pub use pairing::{Initiator, NOISE_PARAMS, NoiseSession, Responder};
+pub use pairing::{EncryptedSession, Initiator, NOISE_PARAMS, NoiseSession, Responder};
 pub use proto::{ControlMsg, FRAME_VERSION, Frame};

@@ -28,6 +28,7 @@ parking_lot = { workspace = true }
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 time = { workspace = true }
+bincode = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hostname = "0.4"

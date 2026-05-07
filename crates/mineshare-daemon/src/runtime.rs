@@ -1,15 +1,26 @@
 //! Daemon runtime — what `mineshare-daemon run` (default) does.
+//!
+//! After mDNS discovery + Noise XX handshake, two peers exchange UDP port
+//! numbers over the encrypted TCP control channel and then forward captured
+//! mouse/keyboard events over UDP. M1 forwards *all* captured events
+//! continuously; M2 will gate forwarding via the source/routing FSMs.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bincode::config::standard;
 use mineshare_core::DeviceId;
-use mineshare_net::{Discovery, DiscoveryEvent, Initiator, PeerAdvert, Responder};
+use mineshare_input::{InputEvent, InputInject, make_capture, make_inject};
+use mineshare_net::{
+    Discovery, DiscoveryEvent, EncryptedSession, Initiator, NoiseSession, PeerAdvert, Responder,
+};
 use parking_lot::Mutex;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::identity::Identity;
@@ -17,12 +28,88 @@ use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 
-pub async fn run() -> Result<()> {
+/// One-shot message exchanged on the encrypted TCP control channel after
+/// the Noise handshake to negotiate the UDP port that each side bound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PortAnnounce {
+    udp_port: u16,
+    daemon_version: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RunOpts {
+    pub capture: bool,
+    pub inject: bool,
+}
+
+pub async fn run(opts: RunOpts) -> Result<()> {
     logs::init()?;
 
     let identity = Identity::load_or_create().context("identity bootstrap failed")?;
-    info!(device_id = %identity.device_id, name = %identity.display_name, os = %identity.os, "MineShare daemon starting");
+    info!(
+        device_id = %identity.device_id,
+        name = %identity.display_name,
+        os = %identity.os,
+        capture = opts.capture,
+        inject = opts.inject,
+        "MineShare daemon starting"
+    );
 
+    // --- Input capture ----------------------------------------------------
+    // Capture starts in passive mode immediately. Events fan out to every
+    // connected peer via a broadcast channel.
+    let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<InputEvent>();
+    let cap_started = if opts.capture {
+        match make_capture() {
+            Ok(mut cap) => match cap.start(cap_tx) {
+                Ok(()) => {
+                    info!("input capture started (passive)");
+                    Some(cap)
+                }
+                Err(e) => {
+                    warn!(error = %e, "input capture failed to start — will run inject-only");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "no input capture available on this platform");
+                None
+            }
+        }
+    } else {
+        info!("capture disabled via --no-capture");
+        None
+    };
+    // keep alive
+    let _cap_alive = cap_started;
+
+    let (event_bcast, _) = broadcast::channel::<InputEvent>(1024);
+    let bcast_for_drain = event_bcast.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = cap_rx.recv().await {
+            let _ = bcast_for_drain.send(ev);
+        }
+        debug!("capture pump terminated");
+    });
+
+    // --- Input injection --------------------------------------------------
+    let inject: Arc<dyn InputInject> = if opts.inject {
+        match make_inject() {
+            Ok(boxed) => {
+                info!("input inject ready");
+                Arc::from(boxed)
+            }
+            Err(e) => {
+                warn!(error = %e, "no input inject available — running capture-only");
+                Arc::new(NullInject)
+            }
+        }
+    } else {
+        info!("inject disabled via --no-inject");
+        Arc::new(NullInject)
+    };
+
+    // --- Control listener -------------------------------------------------
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         DEFAULT_CONTROL_PORT,
@@ -36,10 +123,13 @@ pub async fn run() -> Result<()> {
         Arc::new(Mutex::new(HashMap::new()));
 
     let resp_static = identity.noise_static_priv.clone();
+    let resp_inject = inject.clone();
+    let resp_bcast = event_bcast.clone();
     tokio::spawn(async move {
-        accept_loop(listener, resp_static).await;
+        accept_loop(listener, resp_static, resp_inject, resp_bcast).await;
     });
 
+    // --- mDNS announce + browse ------------------------------------------
     let mut discovery = Discovery::new()?;
     let advert = PeerAdvert {
         device_id: identity.device_id,
@@ -82,13 +172,13 @@ pub async fn run() -> Result<()> {
                     "peer discovered"
                 );
 
-                // Tie-break: only the device with smaller id initiates,
-                // to avoid both sides connecting simultaneously.
                 if local_id.0 < peer.device_id.0 {
                     let init_static = init_static.clone();
+                    let inject = inject.clone();
+                    let bcast = event_bcast.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = try_handshake(&peer, &init_static).await {
-                            warn!(peer = %peer.device_id, error = %e, "handshake to peer failed");
+                        if let Err(e) = dial_and_run(&peer, &init_static, inject, bcast).await {
+                            warn!(peer = %peer.device_id, error = %e, "outbound peer session ended");
                         }
                     });
                 } else {
@@ -105,15 +195,22 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn accept_loop(listener: TcpListener, static_priv: Vec<u8>) {
+async fn accept_loop(
+    listener: TcpListener,
+    static_priv: Vec<u8>,
+    inject: Arc<dyn InputInject>,
+    bcast: broadcast::Sender<InputEvent>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 debug!(%addr, "incoming connection");
                 let key = static_priv.clone();
+                let inject = inject.clone();
+                let bcast = bcast.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_incoming(stream, &key).await {
-                        warn!(%addr, error = %e, "incoming handshake failed");
+                    if let Err(e) = handle_inbound(stream, &key, inject, bcast).await {
+                        warn!(%addr, error = %e, "inbound peer session ended");
                     }
                 });
             }
@@ -125,19 +222,29 @@ async fn accept_loop(listener: TcpListener, static_priv: Vec<u8>) {
     }
 }
 
-async fn handle_incoming(mut stream: TcpStream, static_priv: &[u8]) -> Result<()> {
+async fn handle_inbound(
+    mut stream: TcpStream,
+    static_priv: &[u8],
+    inject: Arc<dyn InputInject>,
+    bcast: broadcast::Sender<InputEvent>,
+) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
     let mut resp = Responder::new(static_priv)?;
-    let peer_pub = resp.handshake(&mut stream).await?;
+    let session = resp.handshake(&mut stream).await?;
     info!(
         %peer_addr,
-        peer_pub = %hex_short(&peer_pub),
+        peer_pub = %hex_short(&session.remote_static),
         "inbound Noise XX handshake completed"
     );
-    Ok(())
+    run_peer_session(stream, session, inject, bcast).await
 }
 
-async fn try_handshake(peer: &PeerAdvert, static_priv: &[u8]) -> Result<()> {
+async fn dial_and_run(
+    peer: &PeerAdvert,
+    static_priv: &[u8],
+    inject: Arc<dyn InputInject>,
+    bcast: broadcast::Sender<InputEvent>,
+) -> Result<()> {
     let addr = peer
         .addresses
         .iter()
@@ -148,13 +255,139 @@ async fn try_handshake(peer: &PeerAdvert, static_priv: &[u8]) -> Result<()> {
     debug!(%sock, "dialing peer");
     let mut stream = TcpStream::connect(sock).await?;
     let mut init = Initiator::new(static_priv)?;
-    let peer_pub = init.handshake(&mut stream).await?;
+    let session = init.handshake(&mut stream).await?;
     info!(
         peer = %peer.device_id,
-        peer_pub = %hex_short(&peer_pub),
+        peer_pub = %hex_short(&session.remote_static),
         "outbound Noise XX handshake completed"
     );
+    run_peer_session(stream, session, inject, bcast).await
+}
+
+/// Drives one peer connection after the Noise handshake.
+///
+/// 1. Bind a UDP socket and announce its port over the encrypted TCP channel.
+/// 2. Receive the peer's UDP port.
+/// 3. Spawn UDP-recv → decrypt → inject loop.
+/// 4. Spawn capture-bcast-recv → encrypt → UDP-send loop.
+async fn run_peer_session(
+    mut stream: TcpStream,
+    session: NoiseSession,
+    inject: Arc<dyn InputInject>,
+    bcast: broadcast::Sender<InputEvent>,
+) -> Result<()> {
+    let aead = EncryptedSession::from(session);
+    let peer_addr = stream.peer_addr()?;
+
+    let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
+    let local_udp_port = udp.local_addr()?.port();
+    debug!(local_udp_port, "local UDP socket bound for peer");
+
+    let announce = PortAnnounce {
+        udp_port: local_udp_port,
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    write_encrypted(&mut stream, &aead, &announce).await?;
+    let peer_announce: PortAnnounce = read_encrypted(&mut stream, &aead).await?;
+    let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
+    info!(
+        %peer_addr,
+        local_udp = local_udp_port,
+        peer_udp = %peer_udp,
+        peer_ver = %peer_announce.daemon_version,
+        "input UDP channel established"
+    );
+
+    let udp = Arc::new(udp);
+
+    // --- recv → inject ----------------------------------------------------
+    let aead_recv = aead.clone_handle();
+    let udp_recv = udp.clone();
+    let inject_recv = inject.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match udp_recv.recv_from(&mut buf).await {
+                Ok((n, src)) if src == peer_udp => match aead_recv.open(&buf[..n]) {
+                    Ok(pt) => {
+                        match bincode::serde::decode_from_slice::<InputEvent, _>(&pt, standard()) {
+                            Ok((ev, _)) => {
+                                if let Err(e) = inject_recv.dispatch(ev) {
+                                    warn!(error = %e, "inject failed");
+                                }
+                            }
+                            Err(e) => warn!(error = %e, "decode failed"),
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "decrypt failed"),
+                },
+                Ok((_, src)) => debug!(%src, "UDP from unexpected source — ignoring"),
+                Err(e) => {
+                    warn!(error = %e, "UDP recv error");
+                    break;
+                }
+            }
+        }
+    });
+
+    // --- capture broadcast → send ---------------------------------------
+    let mut sub = bcast.subscribe();
+    loop {
+        match sub.recv().await {
+            Ok(ev) => {
+                let pt = match bincode::serde::encode_to_vec(ev, standard()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(error = %e, "encode failed");
+                        continue;
+                    }
+                };
+                let ct = match aead.seal(&pt) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(error = %e, "encrypt failed");
+                        continue;
+                    }
+                };
+                if let Err(e) = udp.send_to(&ct, peer_udp).await {
+                    warn!(error = %e, "UDP send failed — ending session");
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!(skipped = n, "broadcast subscriber lagged — events dropped");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
     Ok(())
+}
+
+async fn write_encrypted<T: Serialize>(
+    stream: &mut TcpStream,
+    aead: &EncryptedSession,
+    msg: &T,
+) -> Result<()> {
+    let pt = bincode::serde::encode_to_vec(msg, standard())?;
+    let ct = aead.seal(&pt)?;
+    let len = u32::try_from(ct.len()).context("frame too large")?;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&ct).await?;
+    Ok(())
+}
+
+async fn read_encrypted<T: for<'de> Deserialize<'de>>(
+    stream: &mut TcpStream,
+    aead: &EncryptedSession,
+) -> Result<T> {
+    let mut hdr = [0u8; 4];
+    stream.read_exact(&mut hdr).await?;
+    let len = u32::from_be_bytes(hdr) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    let pt = aead.open(&buf)?;
+    let (val, _) = bincode::serde::decode_from_slice::<T, _>(&pt, standard())?;
+    Ok(val)
 }
 
 fn hex_short(bytes: &[u8]) -> String {
@@ -178,4 +411,23 @@ fn detect_local_addresses() -> Vec<IpAddr> {
         addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     addrs
+}
+
+/// No-op inject used as a fallback when the platform implementation can't
+/// initialise (e.g. no GUI session, or `/dev/uinput` permission denied).
+struct NullInject;
+
+impl InputInject for NullInject {
+    fn mouse_move_rel(&self, _dx: i32, _dy: i32) -> Result<()> {
+        Ok(())
+    }
+    fn mouse_button(&self, _btn: mineshare_input::Button, _down: bool) -> Result<()> {
+        Ok(())
+    }
+    fn key(&self, _code: mineshare_input::KeyCode, _down: bool) -> Result<()> {
+        Ok(())
+    }
+    fn scroll(&self, _dx: f32, _dy: f32) -> Result<()> {
+        Ok(())
+    }
 }

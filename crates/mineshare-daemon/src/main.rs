@@ -27,7 +27,14 @@ struct Cli {
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Run the daemon. Default if no subcommand is given.
-    Run,
+    Run {
+        /// Don't capture local mouse/keyboard input (peer-receive only).
+        #[arg(long)]
+        no_capture: bool,
+        /// Don't inject events received from peers (capture-only diagnostic).
+        #[arg(long)]
+        no_inject: bool,
+    },
     /// Bundle recent log files + system info for sharing.
     Collect {
         /// After writing logs/<hostname>.log, run `git add/commit/push` in cwd.
@@ -39,8 +46,20 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Run) {
-        Command::Run => runtime::run().await,
+    match cli.command.unwrap_or(Command::Run {
+        no_capture: false,
+        no_inject: false,
+    }) {
+        Command::Run {
+            no_capture,
+            no_inject,
+        } => {
+            runtime::run(runtime::RunOpts {
+                capture: !no_capture,
+                inject: !no_inject,
+            })
+            .await
+        }
         Command::Collect { push } => collect::run(push),
     }
 }

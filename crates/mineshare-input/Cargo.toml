@@ -11,6 +11,20 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# evdev/uinput crates added in M1
+evdev = "0.13"
+nix = { version = "0.30", features = ["fs"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = "0.6"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }

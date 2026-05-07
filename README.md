@@ -21,7 +21,7 @@ crates/
 ui/                    Tauri 2 + React settings app
 ```
 
-## Build (M0)
+## Build & run
 
 Requires Rust 1.94+.
 
@@ -31,7 +31,39 @@ cargo test  --workspace
 cargo run   --bin mineshare-daemon
 ```
 
-Run the daemon on two machines on the same LAN — they will discover each other via mDNS (`_mineshare._tcp.local.`) and complete a Noise XX handshake.
+Run the daemon on two machines on the same LAN. They discover each other
+via mDNS (`_mineshare._tcp.local.`), complete a Noise XX handshake,
+exchange UDP ports over the encrypted control channel, and start
+forwarding mouse + keyboard input.
+
+### M1 caveats
+
+M1 forwards **all** captured events to the peer continuously — there is
+no edge detection or source FSM yet (those land in M2). When two daemons
+are connected, moving the mouse on either machine will move the cursor on
+both. Use the safety flags during testing:
+
+```sh
+cargo run --bin mineshare-daemon -- run --no-inject     # capture, but don't inject received events
+cargo run --bin mineshare-daemon -- run --no-capture    # only inject what the peer sends
+```
+
+### Linux setup
+
+Capture reads `/dev/input/event*`, injection writes `/dev/uinput`. Add
+your user to the `input` group (recommended) or apply a udev rule:
+
+```sh
+sudo usermod -aG input "$USER"
+# log out + back in for the group change to take effect
+```
+
+### Windows setup
+
+Capture uses low-level hooks (`SetWindowsHookEx`) which require an
+interactive desktop session — this works when running the daemon from a
+normal terminal. Hooks ignore events flagged `LLMHF_INJECTED` so events
+synthesised by our own injection don't loop back.
 
 ## Collecting logs from both machines
 
