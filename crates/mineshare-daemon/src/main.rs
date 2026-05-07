@@ -1,206 +1,46 @@
-//! MineShare daemon — M0 milestone.
+//! MineShare daemon — M0.
 //!
-//! Responsibilities for M0:
-//!   1. Generate / load device identity + Noise static key
-//!   2. Listen on TCP for incoming pairing handshakes
-//!   3. Announce + browse via mDNS
-//!   4. When a peer is discovered, attempt a Noise XX handshake to it
-//!
-//! No input or audio yet (M1 / M3).
+//! Subcommands:
+//!   (default) / `run`      Run the daemon (mDNS announce + browse + Noise XX handshake)
+//!   `collect [--push]`     Bundle recent logs + system info into `logs/<hostname>.log`,
+//!                          optionally git-add/commit/push to the current repo.
 
+mod collect;
 mod identity;
+mod logs;
+mod runtime;
 
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use anyhow::Result;
+use clap::Parser;
 
-use anyhow::{Context, Result};
-use mineshare_core::DeviceId;
-use mineshare_net::{Discovery, DiscoveryEvent, Initiator, PeerAdvert, Responder};
-use parking_lot::Mutex;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+#[derive(Parser, Debug)]
+#[command(
+    name = "mineshare-daemon",
+    version,
+    about = "MineShare KVM-over-IP daemon"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-use identity::Identity;
-
-const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Run the daemon. Default if no subcommand is given.
+    Run,
+    /// Bundle recent log files + system info for sharing.
+    Collect {
+        /// After writing logs/<hostname>.log, run `git add/commit/push` in cwd.
+        #[arg(long)]
+        push: bool,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
-
-    let identity = Identity::load_or_create().context("identity bootstrap failed")?;
-    info!(device_id = %identity.device_id, name = %identity.display_name, "MineShare daemon starting");
-
-    // 1) Bind TCP listener for incoming handshakes
-    let listener = TcpListener::bind(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        DEFAULT_CONTROL_PORT,
-    ))
-    .await
-    .context("failed to bind control listener")?;
-    let local_port = listener.local_addr()?.port();
-    info!(port = local_port, "control listener bound");
-
-    // 2) Track known peers (by device id)
-    let known_peers: Arc<Mutex<HashMap<DeviceId, PeerAdvert>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // 3) Spawn TCP accept loop
-    let resp_static = identity.noise_static_priv.clone();
-    tokio::spawn(async move {
-        accept_loop(listener, resp_static).await;
-    });
-
-    // 4) mDNS announce + browse
-    let mut discovery = Discovery::new()?;
-    let advert = PeerAdvert {
-        device_id: identity.device_id,
-        display_name: identity.display_name.clone(),
-        os: identity.os.clone(),
-        control_port: local_port,
-        addresses: detect_local_addresses(),
-    };
-    discovery.announce(&advert)?;
-
-    let (tx, mut rx) = mpsc::channel::<DiscoveryEvent>(32);
-    discovery.browse(tx)?;
-
-    let init_static = identity.noise_static_priv.clone();
-    let known = known_peers.clone();
-    let local_id = identity.device_id;
-
-    while let Some(evt) = rx.recv().await {
-        match evt {
-            DiscoveryEvent::PeerOnline(peer) => {
-                if peer.device_id == local_id {
-                    debug!("ignoring own advert");
-                    continue;
-                }
-                let already_known = {
-                    let mut k = known.lock();
-                    let new = !k.contains_key(&peer.device_id);
-                    k.insert(peer.device_id, peer.clone());
-                    !new
-                };
-                if already_known {
-                    continue;
-                }
-                info!(
-                    peer = %peer.device_id,
-                    name = %peer.display_name,
-                    os = %peer.os,
-                    addrs = ?peer.addresses,
-                    port = peer.control_port,
-                    "peer discovered"
-                );
-
-                // tie-break: only the device with smaller id initiates, to avoid both sides connecting simultaneously
-                if local_id.0 < peer.device_id.0 {
-                    let init_static = init_static.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = try_handshake(&peer, &init_static).await {
-                            warn!(peer = %peer.device_id, error = %e, "handshake to peer failed");
-                        }
-                    });
-                } else {
-                    debug!(peer = %peer.device_id, "deferring handshake — peer will initiate");
-                }
-            }
-            DiscoveryEvent::PeerOffline(id) => {
-                known.lock().remove(&id);
-                info!(peer = %id, "peer offline");
-            }
-        }
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Run) {
+        Command::Run => runtime::run().await,
+        Command::Collect { push } => collect::run(push),
     }
-
-    Ok(())
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,mineshare=debug"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .init();
-}
-
-async fn accept_loop(listener: TcpListener, static_priv: Vec<u8>) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                debug!(%addr, "incoming connection");
-                let key = static_priv.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_incoming(stream, &key).await {
-                        warn!(%addr, error = %e, "incoming handshake failed");
-                    }
-                });
-            }
-            Err(e) => {
-                error!(error = %e, "accept error");
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
-        }
-    }
-}
-
-async fn handle_incoming(mut stream: TcpStream, static_priv: &[u8]) -> Result<()> {
-    let peer_addr = stream.peer_addr()?;
-    let mut resp = Responder::new(static_priv)?;
-    let peer_pub = resp.handshake(&mut stream).await?;
-    info!(
-        %peer_addr,
-        peer_pub = %hex_short(&peer_pub),
-        "✅ inbound Noise XX handshake completed"
-    );
-    Ok(())
-}
-
-async fn try_handshake(peer: &PeerAdvert, static_priv: &[u8]) -> Result<()> {
-    let addr = peer
-        .addresses
-        .iter()
-        .copied()
-        .next()
-        .context("peer has no addresses")?;
-    let sock = SocketAddr::new(addr, peer.control_port);
-    debug!(%sock, "dialing peer");
-    let mut stream = TcpStream::connect(sock).await?;
-    let mut init = Initiator::new(static_priv)?;
-    let peer_pub = init.handshake(&mut stream).await?;
-    info!(
-        peer = %peer.device_id,
-        peer_pub = %hex_short(&peer_pub),
-        "✅ outbound Noise XX handshake completed"
-    );
-    Ok(())
-}
-
-fn hex_short(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-}
-
-fn detect_local_addresses() -> Vec<IpAddr> {
-    use std::net::UdpSocket;
-    // Trick: open a UDP socket to a public IP and read the local addr the OS picked.
-    // No packet is actually sent.
-    let mut addrs = Vec::new();
-    if let Ok(s) = UdpSocket::bind("0.0.0.0:0")
-        && s.connect("8.8.8.8:80").is_ok()
-        && let Ok(local) = s.local_addr()
-    {
-        addrs.push(local.ip());
-    }
-    if addrs.is_empty() {
-        addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    }
-    addrs
 }

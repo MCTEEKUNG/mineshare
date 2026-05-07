@@ -33,6 +33,24 @@ cargo run   --bin mineshare-daemon
 
 Run the daemon on two machines on the same LAN — they will discover each other via mDNS (`_mineshare._tcp.local.`) and complete a Noise XX handshake.
 
+## Collecting logs from both machines
+
+Each daemon writes a daily-rotating log to `<config_dir>/MineShare/logs/`
+(`%APPDATA%\MineShare\logs` on Windows, `~/.config/MineShare/logs` on Linux).
+
+To bundle the recent log + system info into the repo's `logs/` folder so we
+can compare both sides:
+
+```sh
+# Capture a snapshot
+cargo run --bin mineshare-daemon -- collect
+
+# …and push it to GitHub in one go
+cargo run --bin mineshare-daemon -- collect --push
+```
+
+The bundle ends up at `logs/<hostname>-<os>.log` (one file per machine).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
