@@ -51,8 +51,9 @@ const MODE_REMOTE: u8 = 1;
 /// Hysteresis past the peer's right edge before we hand control back.
 const EXIT_BUFFER_PX: i32 = 100;
 /// Maximum forwarded delta per `SYN_REPORT` so coalesced fast motion
-/// can't teleport the peer cursor across its screen.
-const MAX_DELTA_PX: i32 = 100;
+/// can't teleport the peer cursor across its screen. 30px keeps the
+/// cursor smooth even with high-DPI peers and aggressive acceleration.
+const MAX_DELTA_PX: i32 = 30;
 /// Cumulative leftward motion at the estimated left edge before we enter
 /// Remote. Without a reliable Wayland cursor-pos query we work from a
 /// best-effort estimate; the pressure threshold guards against the
@@ -83,9 +84,8 @@ static VIRT_X: AtomicI32 = AtomicI32::new(0);
 /// Cumulative leftward overshoot once `CURSOR_X` has clamped to zero.
 /// Resets on rightward motion. When it reaches `ENTER_PRESSURE_PX` we
 /// transition to Remote.
+#[allow(dead_code)]
 static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
-/// Set when the daemon wants every pump thread to `EVIOCGRAB` its device.
-static GRAB_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn local_screen_geometry() -> (u32, u32) {
     let w = env_i32("MINESHARE_SCREEN_W").unwrap_or(1920).max(1) as u32;
@@ -112,14 +112,12 @@ fn enter_remote() {
     // edge. Mirrors Win→Ubuntu's meaning so the exit hysteresis is
     // symmetric: same EXIT_BUFFER_PX of grace before flipping back.
     VIRT_X.store(0, Ordering::Relaxed);
-    GRAB_REQUESTED.store(true, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
     info!("cursor → remote (linux)");
     super::fire_remote_event(super::RemoteEvent::Entered);
 }
 
 fn exit_remote() {
-    GRAB_REQUESTED.store(false, Ordering::Relaxed);
     // Reset cursor estimate to "near left edge" so the user can drag right
     // freely without us mis-detecting another edge crossing.
     CURSOR_X.store(40, Ordering::Relaxed);
@@ -211,10 +209,12 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
     let mut grabbed = false;
 
     loop {
-        // Sync grab state with the shared atomic. Each pump thread grabs
-        // its own device exclusively, which together prevents the OS
-        // compositor from seeing any HW input while we're in Remote.
-        let want_grab = GRAB_REQUESTED.load(Ordering::Relaxed);
+        // Grab whenever EITHER side is in Remote — when local capture is
+        // forwarding to the peer, OR when the peer is forwarding to us
+        // (so the user's real HW doesn't fight the injected cursor on
+        // Ubuntu's compositor).
+        let want_grab =
+            CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::peer_in_remote();
         if want_grab != grabbed {
             if want_grab {
                 match device.grab() {

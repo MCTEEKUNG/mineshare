@@ -84,9 +84,9 @@ static MOD_ALT: AtomicBool = AtomicBool::new(false);
 /// `WM_MOUSEMOVE` whose pt-delta can be hundreds or thousands of pixels —
 /// large enough to throw the peer cursor straight to a screen edge in one
 /// frame. Cap each forwarded delta so the peer sees a smooth stream of
-/// reasonable steps. (M5 Raw Input upgrade will give us true HID mickeys
-/// without coalescing.)
-const MAX_DELTA_PX: i32 = 100;
+/// reasonable steps. 30px keeps Ubuntu cursor smooth even with Win at
+/// 200% DPI and Linux's default acceleration profile.
+const MAX_DELTA_PX: i32 = 30;
 
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
