@@ -68,6 +68,14 @@ static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 /// back out of Remote mode immediately.
 const EXIT_BUFFER_PX: i32 = 100;
 
+/// Per-event delta cap. Windows coalesces fast HW motion into a single
+/// `WM_MOUSEMOVE` whose pt-delta can be hundreds or thousands of pixels —
+/// large enough to throw the peer cursor straight to a screen edge in one
+/// frame. Cap each forwarded delta so the peer sees a smooth stream of
+/// reasonable steps. (M5 Raw Input upgrade will give us true HID mickeys
+/// without coalescing.)
+const MAX_DELTA_PX: i32 = 100;
+
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
         && let Some(tx) = s.lock().as_ref()
@@ -234,15 +242,25 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 if new_virt_x <= -EXIT_BUFFER_PX {
                     exit_remote(y);
                 } else {
-                    if dx != 0 || dy != 0 {
-                        // Sample every ~200th forwarded motion event for
-                        // diagnostics. Uses a static counter to limit spam.
+                    // Cap each forwarded step so coalesced HW motion can't
+                    // teleport the peer cursor across its screen.
+                    let fdx = dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    let fdy = dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    if fdx != 0 || fdy != 0 {
                         static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
                         let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
                         if n % 200 == 0 {
-                            info!(dx, dy, virt_x = new_virt_x, n, "sample motion forward");
+                            info!(
+                                raw_dx = dx,
+                                raw_dy = dy,
+                                fdx,
+                                fdy,
+                                virt_x = new_virt_x,
+                                n,
+                                "sample motion forward"
+                            );
                         }
-                        sink_send(InputEvent::MouseMove { dx, dy });
+                        sink_send(InputEvent::MouseMove { dx: fdx, dy: fdy });
                     }
                     let (ax, ay) = anchor();
                     unsafe {
@@ -251,6 +269,8 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     LAST_X.store(ax, Ordering::Relaxed);
                     LAST_Y.store(ay, Ordering::Relaxed);
                 }
+                // Consume the event so the OS doesn't process it locally.
+                return LRESULT(1);
             }
         }
         WM_LBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
@@ -296,6 +316,11 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         }
         _ => {}
     }
+    // In remote mode every mouse event has been forwarded; consume it so
+    // the OS doesn't double-process it locally.
+    if mode == MODE_REMOTE {
+        return LRESULT(1);
+    }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
@@ -316,6 +341,9 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
                     down,
                 });
             }
+            // Consume so Windows doesn't also act on the keystroke (no
+            // more "Alt+Tab fires on both machines simultaneously").
+            return LRESULT(1);
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
