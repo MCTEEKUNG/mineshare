@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mineshare-core",
+    "crates/mineshare-net",
+    "crates/mineshare-input",
+    "crates/mineshare-audio",
+    "crates/mineshare-ipc",
+    "crates/mineshare-daemon",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+authors = ["MineShare Contributors"]
+repository = "https://github.com/local/mineshare"
+
+[workspace.dependencies]
+# internal
+mineshare-core = { path = "crates/mineshare-core" }
+mineshare-net = { path = "crates/mineshare-net" }
+mineshare-input = { path = "crates/mineshare-input" }
+mineshare-audio = { path = "crates/mineshare-audio" }
+mineshare-ipc = { path = "crates/mineshare-ipc" }
+
+# async runtime
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+# serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2.0", features = ["serde"] }
+
+# error/logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+
+# ids / time
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+# crypto / network
+mdns-sd = "0.13"
+snow = { version = "0.10", features = ["default-resolver"] }
+chacha20poly1305 = "0.10"
+rand = "0.9"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+
+# misc
+parking_lot = "0.12"
+bytes = "1"
+once_cell = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1

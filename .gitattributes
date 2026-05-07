@@ -1,0 +1,22 @@
+# Default: normalize text on commit, native EOL on checkout
+* text=auto eol=lf
+
+# Force LF for everything cross-platform — avoid CRLF issues on Linux scripts
+*.rs        text eol=lf
+*.toml      text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.md        text eol=lf
+*.tsx       text eol=lf
+*.ts        text eol=lf
+*.js        text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.sh        text eol=lf
+
+# Binary files — never touch
+*.png       binary
+*.jpg       binary
+*.ico       binary
+*.icns      binary

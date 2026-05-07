@@ -1,0 +1,34 @@
+# Opt out of the parent workspace — Tauri keeps its own lockfile and target dir.
+[workspace]
+
+[package]
+name = "mineshare-app"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[lib]
+name = "mineshare_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+# Wire the workspace crates so the Tauri backend can drive the daemon directly
+# (single-process for M0; split into separate daemon process in M4).
+mineshare-core = { path = "../../crates/mineshare-core" }
+mineshare-net  = { path = "../../crates/mineshare-net" }
+mineshare-ipc  = { path = "../../crates/mineshare-ipc" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "macros", "net", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"

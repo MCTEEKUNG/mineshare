@@ -1,0 +1,37 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri
+ui/src-tauri/target
+ui/dist
+ui/node_modules
+ui/.vite
+
+# Node
+node_modules/
+*.log
+.npm
+.pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local config
+.env
+.env.local
+
+# Identity files (contain private key)
+identity.json
+
+# Claude Code local config
+.claude/
