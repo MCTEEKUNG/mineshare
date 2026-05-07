@@ -174,12 +174,25 @@ pub struct UinputInject {
 
 impl UinputInject {
     pub fn new() -> Result<Self> {
-        // Advertise the full set of keys + mouse buttons + rel axes that we
-        // might need to inject. Over-advertising is harmless.
+        // Advertise enough keys + buttons + rel axes that libinput
+        // classifies the virtual device as a real pointer.
+        //
+        // ⚠ Subtle but critical: mouse buttons (BTN_LEFT = 0x110) live above
+        // 255, so a `1..=255` range silently dropped them. Without BTN_LEFT
+        // libinput labels the device "tablet pad / joystick" and discards
+        // its REL_X/REL_Y motion entirely, breaking Win→Linux cursor moves.
         let mut keys = AttributeSet::<EvKey>::new();
-        for code in 1..=255u16 {
+        // Regular keyboard keys (KEY_RESERVED..KEY_MICMUTE) plus the mouse-
+        // button range (BTN_MISC..BTN_GEAR_UP). 0..=767 = KEY_MAX, but we
+        // skip the unused FF/POWER ranges to keep the device's capability
+        // advertisement focused.
+        for code in 1u16..=255u16 {
             keys.insert(EvKey(code));
         }
+        for code in 0x100u16..=0x151u16 {
+            keys.insert(EvKey(code));
+        }
+
         let mut rel = AttributeSet::<RelativeAxisCode>::new();
         rel.insert(RelativeAxisCode::REL_X);
         rel.insert(RelativeAxisCode::REL_Y);
