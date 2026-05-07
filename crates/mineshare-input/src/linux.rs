@@ -356,13 +356,21 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
     if mode == MODE_LOCAL {
         // Linux Wayland has no portable cursor-position query, so any
         // estimate-based edge detection eventually drifts and traps the
-        // user (the estimate clamps to zero from accumulated leftward
-        // drift even when the real cursor is happily centered, then any
-        // small leftward push trips REMOTE). For now we rely on the
-        // explicit Ctrl+Alt+R hotkey to enter Remote from Linux. M2 Slice
-        // 3 will swap in a real Wayland/X11 cursor query and re-enable
-        // automatic edge detection.
-        let _ = (dx, dy);
+        // user. Until Slice 3 brings in a real cursor query we rely on
+        // the explicit Ctrl+Alt+R hotkey to enter Remote from Linux.
+        //
+        // When the peer is currently driving (peer_in_remote) we *do*
+        // see the real HW events (the device is grabbed for us), so any
+        // meaningful motion means the local user is trying to take
+        // control back. Forward that intent as `RequestPeerExit` so
+        // the peer's daemon will exit_remote and unfreeze our cursor.
+        if super::peer_in_remote() && (dx.abs() + dy.abs()) > 5 {
+            info!(
+                dx,
+                dy, "local HW motion while peer holds Remote — requesting peer release"
+            );
+            super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+        }
         // No forward in LOCAL — OS already moves the cursor.
     } else {
         let peer_w = PEER_W.load(Ordering::Relaxed);

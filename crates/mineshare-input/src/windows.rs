@@ -266,6 +266,21 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         WM_MOUSEMOVE => {
             if mode == MODE_LOCAL {
                 let w = SCREEN_W.load(Ordering::Relaxed);
+                // Auto-release peer Remote on real local HW motion (the
+                // user is moving Win HW while Ubuntu is driving). Same
+                // pattern as Synergy: any local input on the passive
+                // side reclaims the cursor.
+                if super::peer_in_remote()
+                    && last_x != i32::MIN
+                    && (x - last_x).abs() + (y - last_y).abs() > 5
+                {
+                    info!(
+                        dx = x - last_x,
+                        dy = y - last_y,
+                        "local HW motion while peer holds Remote — requesting peer release"
+                    );
+                    super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+                }
                 LAST_X.store(x, Ordering::Relaxed);
                 LAST_Y.store(y, Ordering::Relaxed);
                 if last_x != i32::MIN && last_x < w - 1 && x >= w - 1 {
