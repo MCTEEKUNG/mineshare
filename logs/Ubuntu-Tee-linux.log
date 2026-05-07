@@ -2,7 +2,7 @@
 host:        Ubuntu-Tee-linux
 os:          linux
 arch:        x86_64
-collected:   2026-05-07T12:43:56.420214258Z
+collected:   2026-05-07T16:22:25.139239053Z
 daemon ver:  0.0.1
 log dir:     /home/tee/.config/MineShare/logs
 device id:   c59b98d5-fec4-4aa0-8855-37a6dbd6f372
@@ -11,7 +11,7 @@ local addrs: [192.168.1.106]
 
 === Daemon log (most recent first) ===
 
---- /home/tee/.config/MineShare/logs/daemon.2026-05-07 (242274 bytes) ---
+--- /home/tee/.config/MineShare/logs/daemon.2026-05-07 (262721 bytes) ---
 2026-05-07T10:57:43.814569Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
 2026-05-07T10:57:43.814608Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
 2026-05-07T10:57:43.814615Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=false
@@ -1550,4 +1550,161 @@ local addrs: [192.168.1.106]
 2026-05-07T12:42:29.244945Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=38329
 2026-05-07T12:42:29.244974Z  INFO mineshare_input::linux: peer screen geometry stored peer_w=2880
 2026-05-07T12:42:29.244988Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:53527 local_udp=38329 peer_udp=192.168.1.108:60295 peer_ver=0.0.1 local_screen=(1920, 1080) peer_screen=(2880, 1800)
+2026-05-07T16:17:23.580542Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T16:17:23.581685Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T16:17:23.581697Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=true
+2026-05-07T16:17:23.581708Z  INFO mineshare_input::linux: evdev capture: screen geometry screen_w=1920 screen_h=1080 peer_w=2880
+2026-05-07T16:17:23.799561Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event10 name="Logitech G502 X Keyboard"
+2026-05-07T16:17:23.799595Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event9 name="Logitech G502 X"
+2026-05-07T16:17:23.799616Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event8 name="SEMICO USB Keyboard"
+2026-05-07T16:17:23.822570Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event5 name="SEMICO USB Keyboard"
+2026-05-07T16:17:23.859617Z  INFO mineshare_input::linux: evdev capture initialised count=4
+2026-05-07T16:17:23.859752Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:17:23.860270Z  INFO mineshare_input::linux: uinput virtual device created name="MineShare Virtual Input"
+2026-05-07T16:17:23.860277Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:17:23.860306Z  INFO mineshare_daemon::runtime: control listener bound port=40037
+2026-05-07T16:17:23.860433Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T16:17:24.791720Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T16:17:24.791788Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T16:19:09.570850Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:19:09.570869Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:19:09.571815Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=-1 fdx=-3 fdy=-1 virt_x=3 n=0
+2026-05-07T16:19:09.771864Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=1 fdx=-3 fdy=1 virt_x=1088 n=200
+2026-05-07T16:19:09.971843Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=0 fdx=-3 fdy=0 virt_x=1646 n=400
+2026-05-07T16:19:10.210776Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=2 raw_dy=-1 fdx=2 fdy=-1 virt_x=1887 n=600
+2026-05-07T16:19:10.415676Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=0 fdx=1 fdy=0 virt_x=1536 n=800
+2026-05-07T16:19:10.615689Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=4 raw_dy=-1 fdx=4 fdy=-1 virt_x=920 n=1000
+2026-05-07T16:19:10.816684Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-5 raw_dy=-4 fdx=-5 fdy=-4 virt_x=988 n=1200
+2026-05-07T16:19:11.016603Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-4 raw_dy=0 fdx=-4 fdy=0 virt_x=2001 n=1400
+2026-05-07T16:19:11.216564Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=3 fdx=0 fdy=3 virt_x=2421 n=1600
+2026-05-07T16:19:11.416556Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=5 raw_dy=0 fdx=5 fdy=0 virt_x=1594 n=1800
+2026-05-07T16:19:11.616621Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=3 raw_dy=-2 fdx=3 fdy=-2 virt_x=723 n=2000
+2026-05-07T16:19:11.816562Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=-1 fdx=1 fdy=-1 virt_x=-26 n=2200
+2026-05-07T16:19:12.053596Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=1 fdx=-1 fdy=1 virt_x=957 n=2400
+2026-05-07T16:19:12.307451Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=-1 fdx=-3 fdy=-1 virt_x=1306 n=2600
+2026-05-07T16:19:12.508456Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=-2 fdx=-1 fdy=-2 virt_x=1918 n=2800
+2026-05-07T16:19:12.708531Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=9 raw_dy=0 fdx=9 fdy=0 virt_x=1154 n=3000
+2026-05-07T16:19:12.861420Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:19:12.870514Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:19:12.994430Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:19:12.994443Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:19:13.042353Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-4 raw_dy=0 fdx=-4 fdy=0 virt_x=132 n=3200
+2026-05-07T16:19:13.322558Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event5
+2026-05-07T16:19:13.423312Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=1 fdx=-1 fdy=1 virt_x=814 n=3400
+2026-05-07T16:19:13.624309Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=0 fdx=-1 fdy=0 virt_x=1316 n=3600
+2026-05-07T16:19:13.828249Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=-2 fdx=-1 fdy=-2 virt_x=1802 n=3800
+2026-05-07T16:19:14.376262Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=0 fdx=1 fdy=0 virt_x=1758 n=4000
+2026-05-07T16:19:14.579152Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=2 raw_dy=-1 fdx=2 fdy=-1 virt_x=1431 n=4200
+2026-05-07T16:19:14.782148Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=-1 fdx=0 fdy=-1 virt_x=1128 n=4400
+2026-05-07T16:19:15.925103Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-7 raw_dy=1 fdx=-7 fdy=1 virt_x=1941 n=4600
+2026-05-07T16:19:16.125050Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-5 raw_dy=-3 fdx=-5 fdy=-3 virt_x=2880 n=4800
+2026-05-07T16:19:16.324942Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=-2 fdx=-1 fdy=-2 virt_x=2880 n=5000
+2026-05-07T16:19:16.525042Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=6 fdx=1 fdy=6 virt_x=2877 n=5200
+2026-05-07T16:19:16.724876Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=4 raw_dy=0 fdx=4 fdy=0 virt_x=1544 n=5400
+2026-05-07T16:19:16.925951Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=-1 fdx=1 fdy=-1 virt_x=378 n=5600
+2026-05-07T16:19:17.132051Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-2 raw_dy=2 fdx=-2 fdy=2 virt_x=2880 n=5800
+2026-05-07T16:19:18.071746Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-19 raw_dy=-2 fdx=-19 fdy=-2 virt_x=2880 n=6000
+2026-05-07T16:19:18.784686Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=-2 fdx=-3 fdy=-2 virt_x=2880 n=6200
+2026-05-07T16:19:18.984658Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=6 raw_dy=3 fdx=6 fdy=3 virt_x=2503 n=6400
+2026-05-07T16:19:19.184651Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-5 raw_dy=-9 fdx=-5 fdy=-9 virt_x=540 n=6600
+2026-05-07T16:19:19.384648Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=2 fdx=0 fdy=2 virt_x=2461 n=6800
+2026-05-07T16:19:19.774555Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=10 raw_dy=3 fdx=10 fdy=3 virt_x=1401 n=7000
+2026-05-07T16:19:19.974630Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-5 raw_dy=-4 fdx=-5 fdy=-4 virt_x=767 n=7200
+2026-05-07T16:19:23.277160Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-2 raw_dy=0 fdx=-2 fdy=0 virt_x=1148 n=7400
+2026-05-07T16:19:23.477100Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-4 raw_dy=0 fdx=-4 fdy=0 virt_x=2181 n=7600
+2026-05-07T16:19:23.677104Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=7 raw_dy=4 fdx=7 fdy=4 virt_x=2406 n=7800
+2026-05-07T16:19:23.877148Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=5 raw_dy=-4 fdx=5 fdy=-4 virt_x=265 n=8000
+2026-05-07T16:19:24.077143Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-15 raw_dy=0 fdx=-15 fdy=0 virt_x=1159 n=8200
+2026-05-07T16:19:24.277016Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=6 raw_dy=3 fdx=6 fdy=3 virt_x=1637 n=8400
+2026-05-07T16:19:24.477064Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=3 raw_dy=-2 fdx=3 fdy=-2 virt_x=154 n=8600
+2026-05-07T16:19:24.839975Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=-2 fdx=-3 fdy=-2 virt_x=398 n=8800
+2026-05-07T16:19:25.041023Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=2 fdx=0 fdy=2 virt_x=1782 n=9000
+2026-05-07T16:19:25.240898Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=3 raw_dy=2 fdx=3 fdy=2 virt_x=1337 n=9200
+2026-05-07T16:19:25.440895Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=-1 fdx=1 fdy=-1 virt_x=609 n=9400
+2026-05-07T16:19:25.711857Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-7 raw_dy=-2 fdx=-7 fdy=-2 virt_x=871 n=9600
+2026-05-07T16:19:25.966936Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-6 raw_dy=0 fdx=-6 fdy=0 virt_x=1638 n=9800
+2026-05-07T16:19:26.166912Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=0 fdx=-1 fdy=0 virt_x=2548 n=10000
+2026-05-07T16:21:30.697159Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T16:21:30.697198Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T16:21:30.697207Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=true
+2026-05-07T16:21:30.697216Z  INFO mineshare_input::linux: evdev capture: screen geometry screen_w=1920 screen_h=1080 peer_w=2880
+2026-05-07T16:21:30.875617Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event10 name="Logitech G502 X Keyboard"
+2026-05-07T16:21:30.875649Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event9 name="Logitech G502 X"
+2026-05-07T16:21:30.875669Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event8 name="SEMICO USB Keyboard"
+2026-05-07T16:21:30.891624Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event5 name="SEMICO USB Keyboard"
+2026-05-07T16:21:30.921600Z  INFO mineshare_input::linux: evdev capture initialised count=4
+2026-05-07T16:21:30.921775Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:21:30.922236Z  INFO mineshare_input::linux: uinput virtual device created name="MineShare Virtual Input"
+2026-05-07T16:21:30.922244Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:21:30.922273Z  INFO mineshare_daemon::runtime: control listener bound port=39967
+2026-05-07T16:21:30.922404Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T16:21:31.816734Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T16:21:31.816834Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T16:21:40.815973Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:52682
+2026-05-07T16:21:40.916243Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:52682 peer_pub=3c533fe3edff
+2026-05-07T16:21:40.916280Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=51720
+2026-05-07T16:21:40.916315Z  INFO mineshare_input::linux: peer screen geometry stored peer_w=2880
+2026-05-07T16:21:40.916324Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:52682 local_udp=51720 peer_udp=192.168.1.108:63734 peer_ver=0.0.1 local_screen=(1920, 1080) peer_screen=(2880, 1800)
+2026-05-07T16:21:41.594740Z  INFO mineshare_daemon::runtime: peer discovered peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows addrs=[192.168.1.108] port=52681
+2026-05-07T16:21:41.594754Z DEBUG mineshare_daemon::runtime: deferring handshake — peer will initiate peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
+2026-05-07T16:21:54.318582Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:21:54.318598Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:21:54.319582Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=0 fdx=-3 fdy=0 virt_x=3 n=0
+2026-05-07T16:21:54.684596Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=-1 fdx=0 fdy=-1 virt_x=311 n=200
+2026-05-07T16:21:54.917615Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=389 sent_bytes=10503 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:21:54.928524Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=-1 fdx=1 fdy=-1 virt_x=40 n=400
+2026-05-07T16:21:55.068530Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:21:55.075715Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:21:55.917696Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=123 sent_bytes=3321 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:21:57.949612Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:21:57.949625Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:21:58.038533Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-2 raw_dy=0 fdx=-2 fdy=0 virt_x=221 n=600
+2026-05-07T16:21:58.249593Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=2 raw_dy=-2 fdx=2 fdy=-2 virt_x=368 n=800
+2026-05-07T16:21:58.419596Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:21:58.431656Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:21:58.857509Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:21:58.857521Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:21:58.888579Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-5 raw_dy=-1 fdx=-5 fdy=-1 virt_x=131 n=1000
+2026-05-07T16:21:58.917490Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=517 sent_bytes=13959 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:21:59.117599Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=1 fdx=0 fdy=1 virt_x=636 n=1200
+2026-05-07T16:21:59.319568Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=1 fdx=1 fdy=1 virt_x=604 n=1400
+2026-05-07T16:21:59.519422Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-1 raw_dy=-2 fdx=-1 fdy=-2 virt_x=243 n=1600
+2026-05-07T16:21:59.720560Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=3 fdx=0 fdy=3 virt_x=583 n=1800
+2026-05-07T16:21:59.917508Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=968 sent_bytes=26136 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:21:59.921419Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=2 raw_dy=0 fdx=2 fdy=0 virt_x=309 n=2000
+2026-05-07T16:22:00.043527Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:22:00.052606Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:22:00.811516Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:22:00.811527Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:22:00.890470Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-2 raw_dy=0 fdx=-2 fdy=0 virt_x=301 n=2200
+2026-05-07T16:22:00.917505Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=230 sent_bytes=6210 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:01.119546Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=1 raw_dy=-1 fdx=1 fdy=-1 virt_x=449 n=2400
+2026-05-07T16:22:01.284426Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:22:01.298535Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:22:01.917361Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=338 sent_bytes=9126 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:02.069482Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:22:02.069506Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:22:02.105507Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-4 raw_dy=0 fdx=-4 fdy=0 virt_x=115 n=2600
+2026-05-07T16:22:02.426401Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=-1 fdx=0 fdy=-1 virt_x=574 n=2800
+2026-05-07T16:22:02.565406Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:22:02.576587Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:22:02.917024Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=373 sent_bytes=10071 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:05.099363Z  INFO mineshare_input::linux: cursor → remote (linux)
+2026-05-07T16:22:05.099378Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event9
+2026-05-07T16:22:05.162493Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=-3 raw_dy=1 fdx=-3 fdy=1 virt_x=228 n=3000
+2026-05-07T16:22:05.362362Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=1 fdx=0 fdy=1 virt_x=392 n=3200
+2026-05-07T16:22:05.564384Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=2 fdx=0 fdy=2 virt_x=350 n=3400
+2026-05-07T16:22:05.917489Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=631 sent_bytes=17037 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:05.969334Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=-1 fdx=0 fdy=-1 virt_x=355 n=3600
+2026-05-07T16:22:06.448495Z DEBUG mineshare_input::linux: evdev grabbed path=/dev/input/event5
+2026-05-07T16:22:06.917536Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=84 sent_bytes=2268 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:07.917849Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=32 sent_bytes=864 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:09.916991Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=8 sent_bytes=216 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:10.917551Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=16 sent_bytes=432 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:11.917616Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=81 sent_bytes=2187 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:12.363391Z  INFO mineshare_input::linux: linux sample motion forward raw_dx=0 raw_dy=-1 fdx=0 fdy=-1 virt_x=252 n=3800
+2026-05-07T16:22:12.515371Z  INFO mineshare_input::linux: cursor → local (linux) restore_x=40
+2026-05-07T16:22:12.525507Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event9
+2026-05-07T16:22:12.917585Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52682 sent_pkts=177 sent_bytes=4779 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:22:18.233570Z DEBUG mineshare_input::linux: evdev ungrabbed path=/dev/input/event5
 
