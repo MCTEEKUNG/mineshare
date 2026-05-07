@@ -1,0 +1,49 @@
+=== MineShare log bundle ===
+host:        Ubuntu-Tee-linux
+os:          linux
+arch:        x86_64
+collected:   2026-05-07T11:00:46.380899063Z
+daemon ver:  0.0.1
+log dir:     /home/tee/.config/MineShare/logs
+device id:   c59b98d5-fec4-4aa0-8855-37a6dbd6f372
+display:     Ubuntu-Tee
+local addrs: [192.168.1.106]
+
+=== Daemon log (most recent first) ===
+
+--- /home/tee/.config/MineShare/logs/daemon.2026-05-07 (4407 bytes) ---
+2026-05-07T10:57:43.814569Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T10:57:43.814608Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T10:57:43.814615Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=false
+2026-05-07T10:57:43.967250Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event10 name="Logitech G502 X Keyboard"
+2026-05-07T10:57:43.967279Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event9 name="Logitech G502 X"
+2026-05-07T10:57:43.967296Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event8 name="SEMICO USB Keyboard"
+2026-05-07T10:57:43.981211Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event5 name="SEMICO USB Keyboard"
+2026-05-07T10:57:44.006204Z  INFO mineshare_input::linux: evdev capture initialised count=4
+2026-05-07T10:57:44.006341Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T10:57:44.006391Z  INFO mineshare_daemon::runtime: inject disabled via --no-inject
+2026-05-07T10:57:44.006439Z  INFO mineshare_daemon::runtime: control listener bound port=42463
+2026-05-07T10:57:44.006598Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T10:57:44.990890Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T10:57:44.990946Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T10:58:43.174201Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T10:58:43.174237Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T10:58:43.174246Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=false
+2026-05-07T10:58:43.366241Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event10 name="Logitech G502 X Keyboard"
+2026-05-07T10:58:43.366267Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event9 name="Logitech G502 X"
+2026-05-07T10:58:43.366286Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event8 name="SEMICO USB Keyboard"
+2026-05-07T10:58:43.377152Z DEBUG mineshare_input::linux: evdev capture: opened device path=/dev/input/event5 name="SEMICO USB Keyboard"
+2026-05-07T10:58:43.397237Z  INFO mineshare_input::linux: evdev capture initialised count=4
+2026-05-07T10:58:43.397368Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T10:58:43.397432Z  INFO mineshare_daemon::runtime: inject disabled via --no-inject
+2026-05-07T10:58:43.397461Z  INFO mineshare_daemon::runtime: control listener bound port=38465
+2026-05-07T10:58:43.397584Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T10:58:44.174824Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T10:58:44.174903Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T10:59:19.580280Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:57774
+2026-05-07T10:59:19.674851Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:57774 peer_pub=3c533fe3edff
+2026-05-07T10:59:19.674888Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=53630
+2026-05-07T10:59:19.674920Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:57774 local_udp=53630 peer_udp=192.168.1.108:53076 peer_ver=0.0.1
+2026-05-07T10:59:20.469111Z  INFO mineshare_daemon::runtime: peer discovered peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows addrs=[192.168.1.108] port=57773
+2026-05-07T10:59:20.469133Z DEBUG mineshare_daemon::runtime: deferring handshake — peer will initiate peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
+
