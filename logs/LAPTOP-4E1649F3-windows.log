@@ -2,7 +2,7 @@
 host:        LAPTOP-4E1649F3-windows
 os:          windows
 arch:        x86_64
-collected:   2026-05-07T16:22:19.5273048Z
+collected:   2026-05-07T17:13:59.3733849Z
 daemon ver:  0.0.1
 log dir:     C:\Users\ASUS\AppData\Roaming\MineShare\logs
 device id:   5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
@@ -11,7 +11,7 @@ local addrs: [192.168.1.108]
 
 === Daemon log (most recent first) ===
 
---- C:\Users\ASUS\AppData\Roaming\MineShare\logs\daemon.2026-05-07 (231726 bytes) ---
+--- C:\Users\ASUS\AppData\Roaming\MineShare\logs\daemon.2026-05-07 (300234 bytes) ---
 2026-05-07T10:22:07.494467Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
 2026-05-07T10:22:07.494863Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
 2026-05-07T10:22:07.495050Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows
@@ -1479,4 +1479,500 @@ local addrs: [192.168.1.108]
 2026-05-07T16:22:06.369207Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: -1 } n=3600
 2026-05-07T16:22:06.370300Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:39967 sent_pkts=0 sent_bytes=0 recv_pkts=663 recv_bytes=17901 injected=663 inject_errs=0 decrypt_errs=0
 2026-05-07T16:22:07.366505Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:39967 sent_pkts=0 sent_bytes=0 recv_pkts=59 recv_bytes=1593 injected=59 inject_errs=0 decrypt_errs=0
+2026-05-07T16:27:54.499755Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T16:27:54.502409Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T16:27:54.502915Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T16:27:54.505259Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T16:27:54.505540Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:27:54.505850Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T16:27:54.506064Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T16:27:54.506305Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:27:54.511584Z  INFO mineshare_daemon::runtime: control listener bound port=62143
+2026-05-07T16:27:54.513316Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T16:27:54.550676Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=43357
+2026-05-07T16:27:54.551517Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:43357
+2026-05-07T16:27:54.605644Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T16:27:54.606623Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=56157
+2026-05-07T16:27:54.695875Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T16:27:54.696268Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:43357 local_udp=56157 peer_udp=192.168.1.106:40353 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T16:27:55.404526Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T16:30:51.245643Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: 1 } n=0
+2026-05-07T16:30:51.470624Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: 2 } n=200
+2026-05-07T16:30:51.708645Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=274 recv_bytes=7398 injected=274 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:53.678229Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: -5 } n=400
+2026-05-07T16:30:53.699086Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=149 recv_bytes=4023 injected=148 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:53.873073Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 7, dy: 1 } n=600
+2026-05-07T16:30:54.708946Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=331 recv_bytes=8937 injected=332 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:55.631701Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: 0 } n=800
+2026-05-07T16:30:55.715817Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=129 recv_bytes=3483 injected=128 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:55.843884Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: 4 } n=1000
+2026-05-07T16:30:56.700522Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=270 recv_bytes=7290 injected=271 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:57.377158Z  INFO mineshare_input::windows: cursor → remote entry_y=988 anchor=(1440, 900)
+2026-05-07T16:30:57.377688Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:30:57.381072Z  INFO mineshare_input::windows: sample motion forward raw_dx=1456 raw_dy=83 fdx=100 fdy=83 virt_x=1456 n=0
+2026-05-07T16:30:57.701161Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=78 sent_bytes=2106 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:58.527951Z  INFO mineshare_input::windows: sample motion forward raw_dx=26 raw_dy=-5 fdx=26 fdy=-5 virt_x=1919 n=200
+2026-05-07T16:30:58.699842Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=164 sent_bytes=4428 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:59.699786Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=148 sent_bytes=3996 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:30:59.741329Z  INFO mineshare_input::windows: sample motion forward raw_dx=8 raw_dy=-2 fdx=8 fdy=-2 virt_x=1919 n=400
+2026-05-07T16:31:00.702221Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=144 sent_bytes=3888 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:00.779900Z  INFO mineshare_input::windows: cursor → local restore=(2879, 903)
+2026-05-07T16:31:00.780214Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:31:01.352813Z  INFO mineshare_input::windows: cursor → remote entry_y=650 anchor=(1440, 900)
+2026-05-07T16:31:01.353391Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:31:01.556095Z  INFO mineshare_input::windows: sample motion forward raw_dx=16 raw_dy=0 fdx=16 fdy=0 virt_x=1919 n=600
+2026-05-07T16:31:01.701462Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=101 sent_bytes=2727 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:02.713119Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=149 sent_bytes=4023 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:02.781796Z  INFO mineshare_input::windows: sample motion forward raw_dx=-39 raw_dy=-3 fdx=-39 fdy=-3 virt_x=685 n=800
+2026-05-07T16:31:02.865084Z  INFO mineshare_input::windows: cursor → local restore=(2879, 891)
+2026-05-07T16:31:02.865367Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:31:03.450995Z  INFO mineshare_input::windows: cursor → remote entry_y=648 anchor=(1440, 900)
+2026-05-07T16:31:03.451622Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:31:03.699760Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=95 sent_bytes=2565 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:04.671893Z  INFO mineshare_input::windows: sample motion forward raw_dx=0 raw_dy=1 fdx=0 fdy=1 virt_x=1919 n=1000
+2026-05-07T16:31:04.703892Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=125 sent_bytes=3375 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:05.698259Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=151 sent_bytes=4077 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:05.885093Z  INFO mineshare_input::windows: sample motion forward raw_dx=-47 raw_dy=0 fdx=-47 fdy=0 virt_x=17 n=1200
+2026-05-07T16:31:05.897796Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:31:05.898317Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:31:06.710440Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=48 sent_bytes=1296 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:07.777639Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -4, dy: 4 } n=1200
+2026-05-07T16:31:08.697632Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=209 recv_bytes=5643 injected=209 inject_errs=0 decrypt_errs=0
+2026-05-07T16:31:08.741341Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -4 } n=1400
+2026-05-07T16:31:08.999069Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: -4 } n=1600
+2026-05-07T16:31:09.711191Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=300 recv_bytes=8100 injected=300 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:04.623804Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 13, dy: 6 } n=1800
+2026-05-07T16:32:04.710894Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=146 recv_bytes=3942 injected=146 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:05.807075Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=129 recv_bytes=3483 injected=128 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:06.698963Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=49 recv_bytes=1323 injected=50 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:09.612637Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -22, dy: -2 } n=2000
+2026-05-07T16:32:09.700829Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=81 recv_bytes=2187 injected=80 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:09.826114Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: -9 } n=2200
+2026-05-07T16:32:10.005824Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 8, dy: 1 } n=2400
+2026-05-07T16:32:10.233423Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 7, dy: 3 } n=2600
+2026-05-07T16:32:10.699840Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=564 recv_bytes=15228 injected=565 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:12.419364Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 5, dy: 10 } n=2800
+2026-05-07T16:32:12.697943Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=302 recv_bytes=8154 injected=302 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:13.708269Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=53 recv_bytes=1431 injected=53 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:13.882081Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: -5 } n=3000
+2026-05-07T16:32:14.096928Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -6, dy: -2 } n=3200
+2026-05-07T16:32:14.415648Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: 2 } n=3400
+2026-05-07T16:32:14.701393Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=542 recv_bytes=14634 injected=542 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:15.505317Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: -1 } n=3600
+2026-05-07T16:32:15.698641Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=235 recv_bytes=6345 injected=234 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:15.740944Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 4, dy: 0 } n=3800
+2026-05-07T16:32:16.096758Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: -1 } n=4000
+2026-05-07T16:32:16.347288Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: -1 } n=4200
+2026-05-07T16:32:16.708167Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=487 recv_bytes=13149 injected=488 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:16.909450Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: -2 } n=4400
+2026-05-07T16:32:17.109095Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: 0 } n=4600
+2026-05-07T16:32:17.708064Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=419 recv_bytes=11313 injected=419 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:18.334820Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: -2 } n=4800
+2026-05-07T16:32:18.564629Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: 3 } n=5000
+2026-05-07T16:32:18.710841Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=476 recv_bytes=12852 injected=475 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:18.763942Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 0 } n=5200
+2026-05-07T16:32:19.707566Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=134 recv_bytes=3618 injected=135 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:20.097951Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: -2 } n=5400
+2026-05-07T16:32:20.328189Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2, dy: 4 } n=5600
+2026-05-07T16:32:20.538402Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 5, dy: -1 } n=5800
+2026-05-07T16:32:20.706420Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=560 recv_bytes=15120 injected=560 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:23.711885Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=97 recv_bytes=2619 injected=97 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:25.661180Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 6 } n=6000
+2026-05-07T16:32:25.735720Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:43357 sent_pkts=0 sent_bytes=0 recv_pkts=120 recv_bytes=3240 injected=120 inject_errs=0 decrypt_errs=0
+2026-05-07T16:32:51.182780Z DEBUG mineshare_daemon::runtime: control reader ended error=An existing connection was forcibly closed by the remote host. (os error 10054)
+2026-05-07T16:35:15.619504Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T16:35:15.620696Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T16:35:15.621050Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T16:35:15.624052Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T16:35:15.624679Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:35:15.625377Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T16:35:15.625724Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T16:35:15.625935Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:35:15.630267Z  INFO mineshare_daemon::runtime: control listener bound port=62825
+2026-05-07T16:35:15.632840Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T16:35:15.668975Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=37879
+2026-05-07T16:35:15.669440Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:37879
+2026-05-07T16:35:15.720866Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T16:35:15.721437Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=59650
+2026-05-07T16:35:15.813923Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T16:35:15.814705Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:37879 local_udp=59650 peer_udp=192.168.1.106:35237 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T16:35:16.609772Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T16:36:07.076454Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -6, dy: -1 } n=0
+2026-05-07T16:36:07.453780Z DEBUG mineshare_daemon::runtime: control reader ended error=replay or out-of-window nonce 1
+2026-05-07T16:36:07.693777Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -12, dy: -5 } n=200
+2026-05-07T16:36:07.830333Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=262 recv_bytes=7074 injected=261 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:08.235327Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 8, dy: -7 } n=400
+2026-05-07T16:36:08.672151Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 0 } n=600
+2026-05-07T16:36:08.820942Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=403 recv_bytes=10881 injected=403 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:09.163373Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 6, dy: 2 } n=800
+2026-05-07T16:36:09.646661Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: 0 } n=1000
+2026-05-07T16:36:10.001083Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=495 recv_bytes=13365 injected=495 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:10.084868Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -1 } n=1200
+2026-05-07T16:36:10.819598Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=164 recv_bytes=4428 injected=165 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:11.817685Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=71 recv_bytes=1917 injected=71 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:14.486240Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -8, dy: 1 } n=1400
+2026-05-07T16:36:14.721496Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -4, dy: -1 } n=1600
+2026-05-07T16:36:14.824318Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=293 recv_bytes=7911 injected=292 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:14.958749Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: 3 } n=1800
+2026-05-07T16:36:15.248253Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -9, dy: -4 } n=2000
+2026-05-07T16:36:15.556946Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 1 } n=2200
+2026-05-07T16:36:15.831996Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=678 recv_bytes=18306 injected=678 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:15.896417Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: -2 } n=2400
+2026-05-07T16:36:16.379481Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 5, dy: 1 } n=2600
+2026-05-07T16:36:16.828731Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=393 recv_bytes=10611 injected=393 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:16.947569Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: -1 } n=2800
+2026-05-07T16:36:17.486818Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -2 } n=3000
+2026-05-07T16:36:17.824398Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=395 recv_bytes=10665 injected=395 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:18.822427Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=21 recv_bytes=567 injected=22 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:24.824341Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:25.702444Z  INFO mineshare_daemon::runtime: sample inject event ev=Key { code: KeyCode(19), down: true } n=3200
+2026-05-07T16:36:25.824597Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=25 recv_bytes=675 injected=25 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:26.884185Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=132 recv_bytes=3564 injected=131 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:27.061077Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 0 } n=3400
+2026-05-07T16:36:27.822699Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=251 recv_bytes=6777 injected=252 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:28.439266Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: 0 } n=3600
+2026-05-07T16:36:28.643572Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -1 } n=3800
+2026-05-07T16:36:28.844597Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=397 recv_bytes=10719 injected=397 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:28.862685Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: 6 } n=4000
+2026-05-07T16:36:29.269763Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -4, dy: -2 } n=4200
+2026-05-07T16:36:29.464877Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 7, dy: 3 } n=4400
+2026-05-07T16:36:29.687672Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -6, dy: -1 } n=4600
+2026-05-07T16:36:29.830133Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=756 recv_bytes=20412 injected=755 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:29.898262Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 9, dy: -1 } n=4800
+2026-05-07T16:36:30.111935Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -7, dy: 4 } n=5000
+2026-05-07T16:36:30.318822Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: -1 } n=5200
+2026-05-07T16:36:30.824344Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=591 recv_bytes=15957 injected=592 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:30.920171Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: 1 } n=5400
+2026-05-07T16:36:31.639685Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=5600
+2026-05-07T16:36:31.821160Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=403 recv_bytes=10881 injected=403 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:32.175824Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: 0 } n=5800
+2026-05-07T16:36:32.816724Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=268 recv_bytes=7236 injected=268 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:32.818772Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=6000
+2026-05-07T16:36:33.829206Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=116 recv_bytes=3132 injected=116 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:34.823356Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=26 recv_bytes=702 injected=26 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:34.968876Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=6200
+2026-05-07T16:36:35.180009Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -3 } n=6400
+2026-05-07T16:36:35.381421Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 1 } n=6600
+2026-05-07T16:36:35.612738Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: 0 } n=6800
+2026-05-07T16:36:35.827045Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=853 recv_bytes=23031 injected=852 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:35.833212Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: -1 } n=7000
+2026-05-07T16:36:36.417218Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=7200
+2026-05-07T16:36:36.654679Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -4, dy: 0 } n=7400
+2026-05-07T16:36:36.821633Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=506 recv_bytes=13662 injected=507 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:36.955138Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 1 } n=7600
+2026-05-07T16:36:37.767891Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: 0 } n=7800
+2026-05-07T16:36:37.816960Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=334 recv_bytes=9018 injected=334 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:37.998294Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: 2 } n=8000
+2026-05-07T16:36:38.324964Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: 1 } n=8200
+2026-05-07T16:36:38.816306Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=406 recv_bytes=10962 injected=406 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:39.825247Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=115 recv_bytes=3105 injected=115 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:40.817283Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=22 recv_bytes=594 injected=22 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:41.358039Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=8400
+2026-05-07T16:36:41.817912Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=77 recv_bytes=2079 injected=77 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:42.826273Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T16:36:49.831069Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37879 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T16:39:47.838427Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T16:39:47.839551Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T16:39:47.839936Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T16:39:47.842769Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T16:39:47.843510Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:39:47.844117Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T16:39:47.844646Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T16:39:47.844979Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:39:47.848486Z  INFO mineshare_daemon::runtime: control listener bound port=61732
+2026-05-07T16:39:47.850396Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T16:39:47.882976Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=33471
+2026-05-07T16:39:47.883912Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:33471
+2026-05-07T16:39:47.943093Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T16:39:47.944085Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=50160
+2026-05-07T16:39:48.037349Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T16:39:48.037733Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:33471 local_udp=50160 peer_udp=192.168.1.106:52949 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T16:39:48.676858Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T16:40:13.089075Z  INFO mineshare_input::windows: cursor → remote entry_y=616 anchor=(1440, 900)
+2026-05-07T16:40:13.090140Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:40:13.092661Z  INFO mineshare_input::windows: sample motion forward raw_dx=1458 raw_dy=-284 fdx=100 fdy=-100 virt_x=1458 n=0
+2026-05-07T16:40:14.040222Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=141 sent_bytes=3807 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:14.339300Z  INFO mineshare_input::windows: sample motion forward raw_dx=-17 raw_dy=0 fdx=-17 fdy=0 virt_x=1336 n=200
+2026-05-07T16:40:15.032525Z  INFO mineshare_input::windows: cursor → local restore=(2879, 908)
+2026-05-07T16:40:15.033288Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:40:15.044818Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=151 sent_bytes=4077 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:15.705379Z  INFO mineshare_input::windows: cursor → remote entry_y=603 anchor=(1440, 900)
+2026-05-07T16:40:15.706227Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:40:16.041114Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=80 sent_bytes=2160 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:16.174222Z  INFO mineshare_input::windows: sample motion forward raw_dx=1 raw_dy=0 fdx=1 fdy=0 virt_x=1919 n=400
+2026-05-07T16:40:17.051903Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=69 sent_bytes=1863 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:36.054894Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=40 sent_bytes=1080 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:36.618189Z  INFO mineshare_input::windows: sample motion forward raw_dx=0 raw_dy=20 fdx=0 fdy=20 virt_x=1576 n=600
+2026-05-07T16:40:37.041950Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=182 sent_bytes=4914 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:40:37.618475Z  INFO mineshare_input::windows: sample motion forward raw_dx=7 raw_dy=2 fdx=7 fdy=2 virt_x=1919 n=800
+2026-05-07T16:40:37.951114Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:40:37.952267Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:40:38.041336Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=211 sent_bytes=5697 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:42:54.026590Z  INFO mineshare_input::windows: cursor → remote entry_y=661 anchor=(1440, 900)
+2026-05-07T16:42:54.027414Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:42:54.041369Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=3 sent_bytes=81 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:42:54.744702Z  INFO mineshare_input::windows: sample motion forward raw_dx=1 raw_dy=0 fdx=1 fdy=0 virt_x=1919 n=1000
+2026-05-07T16:42:55.040170Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=187 sent_bytes=5049 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:42:55.181438Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:42:55.182307Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:42:56.048499Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=34 sent_bytes=918 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:42:56.215643Z  INFO mineshare_input::windows: cursor → remote entry_y=733 anchor=(1440, 900)
+2026-05-07T16:42:56.216141Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:42:56.706024Z  INFO mineshare_input::windows: sample motion forward raw_dx=-22 raw_dy=0 fdx=-22 fdy=0 virt_x=1428 n=1200
+2026-05-07T16:42:57.041437Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=183 sent_bytes=4941 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:42:57.058940Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:42:57.059285Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:42:58.046700Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:33471 sent_pkts=4 sent_bytes=108 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:50:50.328837Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T16:50:50.344842Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T16:50:50.345367Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T16:50:50.348934Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T16:50:50.349610Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:50:50.350172Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T16:50:50.350605Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T16:50:50.351208Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:50:50.354866Z  INFO mineshare_daemon::runtime: control listener bound port=61946
+2026-05-07T16:50:50.356764Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T16:50:50.395836Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=37389
+2026-05-07T16:50:50.396236Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:37389
+2026-05-07T16:50:50.441053Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T16:50:50.442435Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=56315
+2026-05-07T16:50:50.534280Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T16:50:50.534930Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:37389 local_udp=56315 peer_udp=192.168.1.106:46812 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T16:50:51.315699Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T16:52:54.172529Z  INFO mineshare_input::windows: cursor → remote entry_y=402 anchor=(1440, 900)
+2026-05-07T16:52:54.173624Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:52:54.177089Z  INFO mineshare_input::windows: sample motion forward raw_dx=1484 raw_dy=-488 fdx=30 fdy=-30 virt_x=1484 n=0
+2026-05-07T16:52:54.547872Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=28 sent_bytes=756 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:52:55.526071Z  INFO mineshare_input::windows: sample motion forward raw_dx=-4 raw_dy=-5 fdx=-4 fdy=-5 virt_x=-97 n=200
+2026-05-07T16:52:55.530200Z  INFO mineshare_input::windows: cursor → local restore=(2879, 895)
+2026-05-07T16:52:55.530608Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:52:55.540544Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=173 sent_bytes=4671 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:52:55.563611Z  INFO mineshare_input::windows: cursor → remote entry_y=786 anchor=(1440, 900)
+2026-05-07T16:52:55.564289Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:52:56.542214Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=155 sent_bytes=4185 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:52:56.983947Z  INFO mineshare_input::windows: sample motion forward raw_dx=-29 raw_dy=-5 fdx=-29 fdy=-5 virt_x=-27 n=400
+2026-05-07T16:52:56.996408Z  INFO mineshare_input::windows: cursor → local restore=(2879, 897)
+2026-05-07T16:52:56.996696Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:52:57.544917Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=47 sent_bytes=1269 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:05.910633Z  INFO mineshare_input::windows: hotkey Ctrl+Alt+R — entering remote
+2026-05-07T16:53:05.911366Z  INFO mineshare_input::windows: cursor → remote entry_y=867 anchor=(1440, 900)
+2026-05-07T16:53:05.912128Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:53:06.546223Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=3 sent_bytes=81 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:07.453991Z  INFO mineshare_input::windows: cursor → local restore=(2879, 898)
+2026-05-07T16:53:07.454307Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:53:07.542435Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=178 sent_bytes=4806 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:08.309281Z  INFO mineshare_input::windows: cursor → remote entry_y=682 anchor=(1440, 900)
+2026-05-07T16:53:08.309734Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:53:08.391939Z  INFO mineshare_input::windows: sample motion forward raw_dx=25 raw_dy=0 fdx=25 fdy=0 virt_x=1919 n=600
+2026-05-07T16:53:08.537273Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=54 sent_bytes=1458 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:09.249122Z  INFO mineshare_input::windows: hotkey Ctrl+Alt+R — forcing exit_remote
+2026-05-07T16:53:09.249611Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:53:09.250100Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:53:09.543765Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=18 sent_bytes=486 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:10.917115Z  INFO mineshare_input::windows: cursor → remote entry_y=1170 anchor=(1440, 900)
+2026-05-07T16:53:10.917623Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:53:11.539967Z  INFO mineshare_input::windows: sample motion forward raw_dx=-3 raw_dy=3 fdx=-3 fdy=3 virt_x=1565 n=800
+2026-05-07T16:53:11.540287Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=149 sent_bytes=4023 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:12.329140Z  INFO mineshare_input::windows: cursor → local restore=(2879, 908)
+2026-05-07T16:53:12.329464Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:53:12.537255Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=178 sent_bytes=4806 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:53:17.020890Z DEBUG mineshare_daemon::runtime: control reader ended error=early eof
+2026-05-07T16:55:08.138115Z  INFO mineshare_input::windows: cursor → remote entry_y=656 anchor=(1440, 900)
+2026-05-07T16:55:08.233585Z  INFO mineshare_input::windows: sample motion forward raw_dx=22 raw_dy=-3 fdx=22 fdy=-3 virt_x=1919 n=1000
+2026-05-07T16:55:08.539607Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=80 sent_bytes=2160 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:55:09.123128Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:55:09.538879Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=137 sent_bytes=3699 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:55:09.696541Z  INFO mineshare_input::windows: cursor → remote entry_y=732 anchor=(1440, 900)
+2026-05-07T16:55:09.721272Z  INFO mineshare_input::windows: sample motion forward raw_dx=26 raw_dy=-3 fdx=26 fdy=-3 virt_x=1615 n=1200
+2026-05-07T16:55:10.490300Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:55:10.548400Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=174 sent_bytes=4698 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:56:10.226309Z  INFO mineshare_input::windows: cursor → remote entry_y=871 anchor=(1440, 900)
+2026-05-07T16:56:10.358914Z  INFO mineshare_input::windows: sample motion forward raw_dx=5 raw_dy=0 fdx=5 fdy=0 virt_x=1711 n=1400
+2026-05-07T16:56:10.537900Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=73 sent_bytes=1971 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:56:11.533974Z  INFO mineshare_input::windows: sample motion forward raw_dx=2 raw_dy=0 fdx=2 fdy=0 virt_x=1919 n=1600
+2026-05-07T16:56:11.537882Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=160 sent_bytes=4320 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:56:11.978398Z  INFO mineshare_input::windows: cursor → local restore=(2879, 898)
+2026-05-07T16:56:12.537691Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37389 sent_pkts=96 sent_bytes=2592 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:57:25.982186Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T16:57:25.983232Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T16:57:25.983544Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T16:57:25.985810Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T16:57:25.986171Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T16:57:25.987154Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T16:57:25.987647Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T16:57:25.987882Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T16:57:25.992825Z  INFO mineshare_daemon::runtime: control listener bound port=63585
+2026-05-07T16:57:25.995321Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T16:57:26.029621Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=36883
+2026-05-07T16:57:26.030318Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:36883
+2026-05-07T16:57:26.080945Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T16:57:26.081928Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=52818
+2026-05-07T16:57:26.172012Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T16:57:26.172358Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:36883 local_udp=52818 peer_udp=192.168.1.106:34305 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T16:57:26.827311Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T16:57:53.291100Z  INFO mineshare_input::windows: cursor → remote entry_y=487 anchor=(1440, 900)
+2026-05-07T16:57:53.291654Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:57:53.294940Z  INFO mineshare_input::windows: sample motion forward raw_dx=1445 raw_dy=-410 fdx=30 fdy=-30 virt_x=1445 n=0
+2026-05-07T16:57:54.175719Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=129 sent_bytes=3483 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:57:55.187457Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=21 sent_bytes=567 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:57:58.883780Z  INFO mineshare_input::windows: sample motion forward raw_dx=-3 raw_dy=-3 fdx=-3 fdy=-3 virt_x=1907 n=200
+2026-05-07T16:57:59.174488Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=120 sent_bytes=3240 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:57:59.714610Z  INFO mineshare_input::windows: sample motion forward raw_dx=-11 raw_dy=2 fdx=-11 fdy=2 virt_x=651 n=400
+2026-05-07T16:58:00.039215Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:58:00.039874Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:58:00.181580Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=208 sent_bytes=5616 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:10.128864Z  INFO mineshare_input::windows: cursor → remote entry_y=901 anchor=(1440, 900)
+2026-05-07T16:58:10.129744Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:58:10.174454Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=10 sent_bytes=270 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:11.182112Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=59 sent_bytes=1593 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:12.183348Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=46 sent_bytes=1242 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:12.948230Z  INFO mineshare_input::windows: sample motion forward raw_dx=-43 raw_dy=-6 fdx=-30 fdy=-6 virt_x=658 n=600
+2026-05-07T16:58:13.027874Z  INFO mineshare_input::windows: cursor → local restore=(2879, 897)
+2026-05-07T16:58:13.028131Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:58:13.182948Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=26 sent_bytes=702 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:21.981904Z  INFO mineshare_input::windows: hotkey Ctrl+Alt+R — entering remote
+2026-05-07T16:58:21.982481Z  INFO mineshare_input::windows: cursor → remote entry_y=1041 anchor=(1440, 900)
+2026-05-07T16:58:21.983206Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:58:22.176655Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=1 sent_bytes=27 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:22.827100Z  INFO mineshare_input::windows: cursor → local restore=(2879, 885)
+2026-05-07T16:58:22.827581Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:58:23.001285Z  INFO mineshare_input::windows: cursor → remote entry_y=691 anchor=(1440, 900)
+2026-05-07T16:58:23.001986Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T16:58:23.175512Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=57 sent_bytes=1539 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:23.769509Z  INFO mineshare_input::windows: sample motion forward raw_dx=9 raw_dy=6 fdx=9 fdy=6 virt_x=1086 n=800
+2026-05-07T16:58:24.183355Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=223 sent_bytes=6021 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:25.186493Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=58 sent_bytes=1566 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T16:58:25.407691Z  INFO mineshare_input::windows: hotkey Ctrl+Alt+R — forcing exit_remote
+2026-05-07T16:58:25.408137Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T16:58:25.408699Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T16:58:26.180774Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=1 sent_bytes=27 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:00:23.755644Z  INFO mineshare_input::windows: cursor → remote entry_y=1267 anchor=(1440, 900)
+2026-05-07T17:00:23.756406Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:00:24.041884Z  INFO mineshare_input::windows: sample motion forward raw_dx=-2 raw_dy=-1 fdx=-2 fdy=-1 virt_x=1909 n=1000
+2026-05-07T17:00:24.175115Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=77 sent_bytes=2079 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:00:24.623660Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T17:00:24.624207Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:00:24.868733Z  INFO mineshare_input::windows: cursor → remote entry_y=1058 anchor=(1440, 900)
+2026-05-07T17:00:24.869641Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:00:25.173991Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=168 sent_bytes=4536 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:00:25.179795Z  INFO mineshare_input::windows: sample motion forward raw_dx=-11 raw_dy=-7 fdx=-11 fdy=-7 virt_x=1529 n=1200
+2026-05-07T17:00:26.031163Z  INFO mineshare_input::windows: sample motion forward raw_dx=-3 raw_dy=-1 fdx=-3 fdy=-1 virt_x=46 n=1400
+2026-05-07T17:00:26.186968Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=221 sent_bytes=5967 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:00:26.629080Z  INFO mineshare_input::windows: cursor → local restore=(2879, 895)
+2026-05-07T17:00:26.629817Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:00:27.186180Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:36883 sent_pkts=10 sent_bytes=270 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:05:18.063411Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T17:05:18.064526Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T17:05:18.064838Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T17:05:18.068042Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T17:05:18.068605Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T17:05:18.069224Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T17:05:18.069777Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T17:05:18.070035Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T17:05:18.073822Z  INFO mineshare_daemon::runtime: control listener bound port=64394
+2026-05-07T17:05:18.077211Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T17:05:18.114974Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=37589
+2026-05-07T17:05:18.115742Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:37589
+2026-05-07T17:05:18.164559Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T17:05:18.165115Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=56181
+2026-05-07T17:05:18.256144Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T17:05:18.256456Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:37589 local_udp=56181 peer_udp=192.168.1.106:57089 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T17:05:19.120022Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T17:06:20.580288Z  INFO mineshare_input::windows: cursor → remote entry_y=607 anchor=(1440, 900)
+2026-05-07T17:06:20.581506Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:06:20.584708Z  INFO mineshare_input::windows: sample motion forward raw_dx=1491 raw_dy=-307 fdx=30 fdy=-30 virt_x=1491 n=0
+2026-05-07T17:06:21.258696Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=143 sent_bytes=3861 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:21.514159Z  INFO mineshare_input::windows: sample motion forward raw_dx=19 raw_dy=-3 fdx=19 fdy=-3 virt_x=1291 n=200
+2026-05-07T17:06:22.259402Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=232 sent_bytes=6264 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:23.270904Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=22 sent_bytes=594 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:25.413017Z  INFO mineshare_input::windows: sample motion forward raw_dx=-23 raw_dy=-5 fdx=-23 fdy=-5 virt_x=997 n=400
+2026-05-07T17:06:25.557972Z  INFO mineshare_input::windows: cursor → local restore=(2879, 907)
+2026-05-07T17:06:25.558665Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:06:26.169929Z  INFO mineshare_input::windows: cursor → remote entry_y=589 anchor=(1440, 900)
+2026-05-07T17:06:26.170553Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:06:26.260785Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=59 sent_bytes=1593 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:26.797844Z  INFO mineshare_input::windows: cursor → local restore=(2879, 896)
+2026-05-07T17:06:26.798544Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:06:27.271754Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=116 sent_bytes=3132 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:51.519061Z  INFO mineshare_input::windows: cursor → remote entry_y=667 anchor=(1440, 900)
+2026-05-07T17:06:51.519601Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:06:51.638460Z  INFO mineshare_input::windows: sample motion forward raw_dx=3 raw_dy=0 fdx=3 fdy=0 virt_x=1632 n=600
+2026-05-07T17:06:52.260942Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=158 sent_bytes=4266 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:52.551347Z  INFO mineshare_input::windows: sample motion forward raw_dx=-5 raw_dy=0 fdx=-5 fdy=0 virt_x=330 n=800
+2026-05-07T17:06:52.895930Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T17:06:52.896302Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:06:53.262081Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=153 sent_bytes=4131 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:53.995473Z  INFO mineshare_input::windows: cursor → remote entry_y=580 anchor=(1440, 900)
+2026-05-07T17:06:53.995885Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:06:54.269026Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=41 sent_bytes=1107 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:55.259329Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=9 sent_bytes=243 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:58.261270Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=29 sent_bytes=783 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:06:58.336237Z  INFO mineshare_input::windows: cursor → local restore=(2879, 897)
+2026-05-07T17:06:58.337059Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:06:59.271251Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:37589 sent_pkts=18 sent_bytes=486 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:10:08.265190Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T17:10:08.266669Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T17:10:08.267157Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=true
+2026-05-07T17:10:08.269534Z  INFO mineshare_input::windows: primary screen geometry width=2880 height=1800
+2026-05-07T17:10:08.269824Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T17:10:08.270229Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T17:10:08.270356Z DEBUG mineshare_input::windows: enigo inject ready
+2026-05-07T17:10:08.270846Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T17:10:08.274846Z  INFO mineshare_daemon::runtime: control listener bound port=51118
+2026-05-07T17:10:08.276826Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T17:10:08.308255Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=38711
+2026-05-07T17:10:08.309071Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:38711
+2026-05-07T17:10:08.353860Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T17:10:08.354808Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=63020
+2026-05-07T17:10:08.445851Z  INFO mineshare_input::windows: peer screen geometry stored peer_w=1920
+2026-05-07T17:10:08.446211Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:38711 local_udp=63020 peer_udp=192.168.1.106:35338 peer_ver=0.0.1 local_screen=(2880, 1800) peer_screen=(1920, 1080)
+2026-05-07T17:10:09.318272Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T17:11:47.913081Z  INFO mineshare_input::windows: cursor → remote entry_y=621 anchor=(1440, 900)
+2026-05-07T17:11:47.913510Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:11:47.916791Z  INFO mineshare_input::windows: sample motion forward raw_dx=1445 raw_dy=-281 fdx=30 fdy=-30 virt_x=1445 n=0
+2026-05-07T17:11:48.448606Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=66 sent_bytes=1782 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:11:49.448854Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=100 sent_bytes=2700 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:11:51.977368Z  INFO mineshare_input::windows: sample motion forward raw_dx=8 raw_dy=-2 fdx=8 fdy=-2 virt_x=1060 n=200
+2026-05-07T17:11:52.449436Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=147 sent_bytes=3969 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:11:52.820433Z  INFO mineshare_input::windows: sample motion forward raw_dx=-10 raw_dy=-2 fdx=-10 fdy=-2 virt_x=366 n=400
+2026-05-07T17:11:52.970030Z  INFO mineshare_input::windows: cursor → local restore=(2879, 902)
+2026-05-07T17:11:52.970432Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:11:53.448824Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=123 sent_bytes=3321 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:12:23.143707Z  INFO mineshare_input::windows: cursor → remote entry_y=573 anchor=(1440, 900)
+2026-05-07T17:12:23.144981Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:12:23.454504Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=63 sent_bytes=1701 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:12:23.961288Z  INFO mineshare_input::windows: sample motion forward raw_dx=-24 raw_dy=-8 fdx=-24 fdy=-8 virt_x=1720 n=600
+2026-05-07T17:12:24.448477Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=211 sent_bytes=5697 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:12:24.878555Z  INFO mineshare_input::windows: sample motion forward raw_dx=-3 raw_dy=0 fdx=-3 fdy=0 virt_x=745 n=800
+2026-05-07T17:12:25.463346Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=122 sent_bytes=3294 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:12:30.211860Z  INFO mineshare_input::windows: cursor → local restore=(2879, 913)
+2026-05-07T17:12:30.212250Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:12:30.450854Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=14 sent_bytes=378 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:07.126282Z  INFO mineshare_input::windows: cursor → remote entry_y=776 anchor=(1440, 900)
+2026-05-07T17:13:07.126853Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:13:07.448969Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=46 sent_bytes=1242 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:08.330190Z  INFO mineshare_input::windows: sample motion forward raw_dx=2 raw_dy=0 fdx=2 fdy=0 virt_x=1541 n=1000
+2026-05-07T17:13:08.461088Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=131 sent_bytes=3537 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:09.447810Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=169 sent_bytes=4563 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:09.480572Z  INFO mineshare_input::windows: sample motion forward raw_dx=-7 raw_dy=2 fdx=-7 fdy=2 virt_x=683 n=1200
+2026-05-07T17:13:10.049155Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T17:13:10.049488Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:13:10.448394Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=145 sent_bytes=3915 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:11.003889Z  INFO mineshare_input::windows: cursor → remote entry_y=735 anchor=(1440, 900)
+2026-05-07T17:13:11.004471Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:13:11.269516Z  INFO mineshare_input::windows: sample motion forward raw_dx=14 raw_dy=-5 fdx=14 fdy=-5 virt_x=1919 n=1400
+2026-05-07T17:13:11.448913Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=103 sent_bytes=2781 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:12.162134Z  INFO mineshare_input::windows: sample motion forward raw_dx=-4 raw_dy=2 fdx=-4 fdy=2 virt_x=773 n=1600
+2026-05-07T17:13:12.454018Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=184 sent_bytes=4968 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:14.429447Z  INFO mineshare_input::windows: cursor → local restore=(2879, 902)
+2026-05-07T17:13:14.429812Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:13:14.457055Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=68 sent_bytes=1836 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:15.168569Z  INFO mineshare_input::windows: cursor → remote entry_y=835 anchor=(1440, 900)
+2026-05-07T17:13:15.169166Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=TakeControl
+2026-05-07T17:13:15.448990Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=48 sent_bytes=1296 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:16.456179Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=7 sent_bytes=189 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
+2026-05-07T17:13:18.357935Z  INFO mineshare_input::windows: cursor → local restore=(2879, 900)
+2026-05-07T17:13:18.358510Z DEBUG mineshare_daemon::runtime: sent ControlMsg msg=ReleaseControl
+2026-05-07T17:13:18.452398Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.106:38711 sent_pkts=32 sent_bytes=864 recv_pkts=0 recv_bytes=0 injected=0 inject_errs=0 decrypt_errs=0
 
