@@ -1,17 +1,22 @@
 //! Windows input via low-level hooks (capture) and enigo (inject).
 //!
-//! Capture uses `SetWindowsHookEx(WH_MOUSE_LL/WH_KEYBOARD_LL)` running on a
-//! dedicated thread with a message pump. The hook delivers mouse positions
-//! in screen coordinates — we convert to relative deltas by tracking the
-//! previous position. (For true raw deltas we'd want `RegisterRawInputDevices`
-//! + `WM_INPUT`; that's an M5 polish item.)
+//! M2 layer adds **edge-triggered cursor handover**: when the cursor reaches
+//! the right edge of the local screen we enter a "remote" mode where
+//!  * the local cursor is warped to a centre anchor every event so subsequent
+//!    HW motion keeps producing fresh deltas (the WH_MOUSE_LL hook needs
+//!    cursor position changes to fire);
+//!  * captured deltas, button events, and keystrokes are forwarded to the
+//!    peer instead of being processed locally;
+//!  * a virtual `(virt_x, virt_y)` cursor position is tracked in remote
+//!    space — when `virt_x` falls below zero we hand control back and the
+//!    real Windows cursor is restored at the right edge.
 //!
-//! Inject uses `enigo` 0.6 for cross-platform consistency. We can swap in
-//! native `SendInput` later if precision becomes a problem.
+//! `SetCursorPos` does not trigger `WH_MOUSE_LL` (only HW interrupts do), so
+//! the warp is invisible to the hook.
 
 use std::mem;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -24,17 +29,26 @@ use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT,
+    MSG, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, SetWindowsHookExW,
+    TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+const MODE_LOCAL: u8 = 0;
+const MODE_REMOTE: u8 = 1;
+
 static EVENT_SINK: OnceLock<Mutex<Option<UnboundedSender<InputEvent>>>> = OnceLock::new();
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
+static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
+static SCREEN_W: AtomicI32 = AtomicI32::new(1920);
+static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
+static VIRT_X: AtomicI32 = AtomicI32::new(0);
+static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
@@ -42,6 +56,39 @@ fn sink_send(ev: InputEvent) {
     {
         let _ = tx.send(ev);
     }
+}
+
+fn anchor() -> (i32, i32) {
+    (
+        SCREEN_W.load(Ordering::Relaxed) / 2,
+        SCREEN_H.load(Ordering::Relaxed) / 2,
+    )
+}
+
+fn enter_remote(entry_y: i32) {
+    let (ax, ay) = anchor();
+    VIRT_X.store(0, Ordering::Relaxed);
+    VIRT_Y.store(entry_y, Ordering::Relaxed);
+    unsafe {
+        let _ = SetCursorPos(ax, ay);
+    }
+    LAST_X.store(ax, Ordering::Relaxed);
+    LAST_Y.store(ay, Ordering::Relaxed);
+    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+    info!(entry_y, anchor = ?(ax, ay), "cursor → remote");
+}
+
+fn exit_remote(restore_y: i32) {
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    let y = restore_y.clamp(0, h - 1);
+    unsafe {
+        let _ = SetCursorPos(w - 1, y);
+    }
+    LAST_X.store(w - 1, Ordering::Relaxed);
+    LAST_Y.store(y, Ordering::Relaxed);
+    CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+    info!(restore = ?(w - 1, y), "cursor → local");
 }
 
 pub struct HookCapture {
@@ -61,6 +108,18 @@ impl InputCapture for HookCapture {
         }
         self.started = true;
 
+        // Probe primary screen geometry once at start. Multi-monitor +
+        // hot-plug come in M2 Slice 3.
+        let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        if w > 0 && h > 0 {
+            SCREEN_W.store(w, Ordering::Relaxed);
+            SCREEN_H.store(h, Ordering::Relaxed);
+            info!(width = w, height = h, "primary screen geometry");
+        } else {
+            warn!("GetSystemMetrics returned 0 — falling back to 1920x1080");
+        }
+
         let cell = EVENT_SINK.get_or_init(|| Mutex::new(None));
         *cell.lock() = Some(sink);
 
@@ -73,7 +132,6 @@ impl InputCapture for HookCapture {
 }
 
 unsafe fn hook_thread() {
-    // Install hooks on this thread.
     let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(low_mouse_hook), None, 0) };
     let kb = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) };
     let mouse_ok = matches!(&mouse, Ok(h) if !h.0.is_null());
@@ -84,7 +142,6 @@ unsafe fn hook_thread() {
     }
     info!("Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)");
 
-    // Pump messages forever — the OS calls our hook procs from this thread.
     let mut msg = MSG::default();
     loop {
         let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -98,80 +155,101 @@ unsafe fn hook_thread() {
     }
 }
 
-// MSLLHOOKSTRUCT::flags — these aren't directly exported as constants
-// in `windows-rs`; values match the Win32 SDK (winuser.h).
 const LLMHF_INJECTED: u32 = 0x00000001;
 const LLMHF_LOWER_IL_INJECTED: u32 = 0x00000002;
 const LLKHF_INJECTED: u32 = 0x00000010;
 const LLKHF_LOWER_IL_INJECTED: u32 = 0x00000002;
 
 unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-        // Skip events synthesised by SendInput / our own enigo inject —
-        // otherwise the hook captures what we just injected and we feed
-        // the network into a self-perpetuating loop.
-        if info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 {
-            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-        }
-        let x = info.pt.x;
-        let y = info.pt.y;
+    if code != HC_ACTION as i32 {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    if info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
 
-        match wparam.0 as u32 {
-            WM_MOUSEMOVE => {
-                let lx = LAST_X.swap(x, Ordering::Relaxed);
-                let ly = LAST_Y.swap(y, Ordering::Relaxed);
-                if lx != i32::MIN && ly != i32::MIN {
-                    let dx = x - lx;
-                    let dy = y - ly;
+    let x = info.pt.x;
+    let y = info.pt.y;
+    let mode = CURSOR_MODE.load(Ordering::Acquire);
+    let last_x = LAST_X.load(Ordering::Relaxed);
+    let last_y = LAST_Y.load(Ordering::Relaxed);
+
+    match wparam.0 as u32 {
+        WM_MOUSEMOVE => {
+            if mode == MODE_LOCAL {
+                let w = SCREEN_W.load(Ordering::Relaxed);
+                LAST_X.store(x, Ordering::Relaxed);
+                LAST_Y.store(y, Ordering::Relaxed);
+                if last_x != i32::MIN && last_x < w - 1 && x >= w - 1 {
+                    enter_remote(y);
+                }
+                // local: don't forward, OS handles cursor as usual
+            } else {
+                // REMOTE: compute delta from anchor and forward
+                let dx = x - last_x;
+                let dy = y - last_y;
+                let new_virt_x = VIRT_X.load(Ordering::Relaxed) + dx;
+                VIRT_X.store(new_virt_x, Ordering::Relaxed);
+                VIRT_Y.fetch_add(dy, Ordering::Relaxed);
+
+                if new_virt_x < 0 {
+                    exit_remote(y);
+                } else {
                     if dx != 0 || dy != 0 {
                         sink_send(InputEvent::MouseMove { dx, dy });
                     }
+                    let (ax, ay) = anchor();
+                    unsafe {
+                        let _ = SetCursorPos(ax, ay);
+                    }
+                    LAST_X.store(ax, Ordering::Relaxed);
+                    LAST_Y.store(ay, Ordering::Relaxed);
                 }
             }
-            WM_LBUTTONDOWN => sink_send(InputEvent::MouseButton {
-                btn: Button::Left,
-                down: true,
-            }),
-            WM_LBUTTONUP => sink_send(InputEvent::MouseButton {
-                btn: Button::Left,
-                down: false,
-            }),
-            WM_RBUTTONDOWN => sink_send(InputEvent::MouseButton {
-                btn: Button::Right,
-                down: true,
-            }),
-            WM_RBUTTONUP => sink_send(InputEvent::MouseButton {
-                btn: Button::Right,
-                down: false,
-            }),
-            WM_MBUTTONDOWN => sink_send(InputEvent::MouseButton {
-                btn: Button::Middle,
-                down: true,
-            }),
-            WM_MBUTTONUP => sink_send(InputEvent::MouseButton {
-                btn: Button::Middle,
-                down: false,
-            }),
-            WM_XBUTTONDOWN | WM_XBUTTONUP => {
-                // Which X button is in high word of mouseData
-                let high = (info.mouseData >> 16) as u16;
-                let btn = match high {
-                    1 => Button::X1,
-                    2 => Button::X2,
-                    _ => return unsafe { CallNextHookEx(None, code, wparam, lparam) },
-                };
+        }
+        WM_LBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Left,
+            down: true,
+        }),
+        WM_LBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Left,
+            down: false,
+        }),
+        WM_RBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Right,
+            down: true,
+        }),
+        WM_RBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Right,
+            down: false,
+        }),
+        WM_MBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Middle,
+            down: true,
+        }),
+        WM_MBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
+            btn: Button::Middle,
+            down: false,
+        }),
+        WM_XBUTTONDOWN | WM_XBUTTONUP if mode == MODE_REMOTE => {
+            let high = (info.mouseData >> 16) as u16;
+            if let Some(btn) = match high {
+                1 => Some(Button::X1),
+                2 => Some(Button::X2),
+                _ => None,
+            } {
                 sink_send(InputEvent::MouseButton {
                     btn,
                     down: wparam.0 as u32 == WM_XBUTTONDOWN,
                 });
             }
-            WM_MOUSEWHEEL => {
-                let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
-                sink_send(InputEvent::Scroll { dx: 0.0, dy: delta });
-            }
-            _ => {}
         }
+        WM_MOUSEWHEEL if mode == MODE_REMOTE => {
+            let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
+            sink_send(InputEvent::Scroll { dx: 0.0, dy: delta });
+        }
+        _ => {}
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
@@ -182,14 +260,17 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         if info.flags.0 & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) != 0 {
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
-        let scan = info.scanCode as u16; // PS/2 set-1 ≈ Linux KEY_*
-        let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-        let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
-        if down || up {
-            sink_send(InputEvent::Key {
-                code: KeyCode(scan),
-                down,
-            });
+        // Keystrokes follow the cursor — only forward when remote.
+        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+            let scan = info.scanCode as u16;
+            let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+            let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+            if down || up {
+                sink_send(InputEvent::Key {
+                    code: KeyCode(scan),
+                    down,
+                });
+            }
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -236,9 +317,6 @@ impl InputInject for EnigoInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
-        // Use enigo's raw scancode pathway. enigo on Windows interprets
-        // `Key::Other(u32)` as a virtual-key code; we map our KeyCode (PS/2
-        // scan code, equal to Linux KEY_*) to a virtual key via OS API.
         let vk = scancode_to_vk(code.0);
         let dir = if down {
             Direction::Press
@@ -264,23 +342,14 @@ impl InputInject for EnigoInject {
 }
 
 fn scancode_to_vk(scan: u16) -> u16 {
-    // MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX) on Windows; we re-import
-    // from `windows` crate.
     use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VSC_TO_VK_EX, MapVirtualKeyW};
     unsafe {
         let vk = MapVirtualKeyW(scan as u32, MAPVK_VSC_TO_VK_EX);
-        if vk == 0 {
-            // fallback — reinterpret scan as VK
-            scan
-        } else {
-            (vk & 0xFFFF) as u16
-        }
+        if vk == 0 { scan } else { (vk & 0xFFFF) as u16 }
     }
 }
 
-// Silence unused warning for VIRTUAL_KEY (used implicitly via MapVirtualKeyW).
 #[allow(dead_code)]
 fn _force_vk_use(_v: VIRTUAL_KEY) {}
 
-// Ensure mem types are pulled in.
 const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();

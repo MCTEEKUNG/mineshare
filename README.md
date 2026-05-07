@@ -36,17 +36,33 @@ via mDNS (`_mineshare._tcp.local.`), complete a Noise XX handshake,
 exchange UDP ports over the encrypted control channel, and start
 forwarding mouse + keyboard input.
 
-### M1 caveats
+### M2 Slice 1 — edge-triggered cursor handover
 
-M1 forwards **all** captured events to the peer continuously — there is
-no edge detection or source FSM yet (those land in M2). When two daemons
-are connected, moving the mouse on either machine will move the cursor on
-both. Use the safety flags during testing:
+The Windows side now gates forwarding by cursor location. When the cursor
+reaches the **right edge** of the primary screen, the daemon enters
+*remote* mode: the local cursor is warped to a centre anchor, mouse and
+keyboard events are forwarded to the peer instead of being processed
+locally, and a virtual `(virt_x, virt_y)` is tracked. When `virt_x` falls
+back below zero, control is released and the Windows cursor is restored
+at the right edge.
+
+**Hardcoded layout**: Ubuntu sits to the right of Windows (single
+monitor each). Multi-monitor and a draggable layout editor land in later
+M2 slices.
+
+For the test you'll want:
 
 ```sh
-cargo run --bin mineshare-daemon -- run --no-inject     # capture, but don't inject received events
-cargo run --bin mineshare-daemon -- run --no-capture    # only inject what the peer sends
+# Windows (the side with the physical mouse / keyboard)
+cargo run --bin mineshare-daemon -- run
+
+# Ubuntu (cursor target only — no forwarding back to Windows yet)
+cargo run --bin mineshare-daemon -- run --no-capture
 ```
+
+Push the cursor against the right edge of Windows; it should disappear
+and the Ubuntu cursor should start moving. Drag back left until the
+Windows cursor reappears at the right edge.
 
 ### Linux setup
 
