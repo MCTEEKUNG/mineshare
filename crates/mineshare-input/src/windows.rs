@@ -72,9 +72,9 @@ const EXIT_BUFFER_PX: i32 = 100;
 // the same scancode here, so we ignore the LLKHF_EXTENDED bit).
 const SCAN_CTRL: u32 = 0x1D;
 const SCAN_ALT: u32 = 0x38;
-/// Hotkey: Ctrl+Alt+F12 forces exit_remote regardless of cursor position.
+/// Hotkey: Ctrl+Alt+R forces exit_remote regardless of cursor position.
 /// Useful when remote-mode gets stuck (e.g. peer disconnected mid-session).
-const SCAN_HOTKEY: u32 = 0x58; // F12
+const SCAN_HOTKEY: u32 = 0x13; // R
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -385,14 +385,14 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
 
         let mode = CURSOR_MODE.load(Ordering::Acquire);
 
-        // Hotkey: Ctrl+Alt+F12 forces exit_remote and consumes the event.
+        // Hotkey: Ctrl+Alt+R forces exit_remote and consumes the event.
         if mode == MODE_REMOTE
             && down
             && scan == SCAN_HOTKEY
             && MOD_CTRL.load(Ordering::Relaxed)
             && MOD_ALT.load(Ordering::Relaxed)
         {
-            info!("hotkey Ctrl+Alt+F12 — forcing exit_remote");
+            info!("hotkey Ctrl+Alt+R — forcing exit_remote");
             let h = SCREEN_H.load(Ordering::Relaxed);
             exit_remote(h / 2);
             return LRESULT(1);

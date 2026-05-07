@@ -54,7 +54,7 @@ const EXIT_BUFFER_PX: i32 = 100;
 /// can't teleport the peer cursor across its screen.
 const MAX_DELTA_PX: i32 = 100;
 
-// Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+F12).
+// Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
 
@@ -262,14 +262,14 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                         MOD_ALT.store(down, Ordering::Relaxed);
                     }
 
-                    // Hotkey: Ctrl+Alt+F12 forces exit_remote.
+                    // Hotkey: Ctrl+Alt+R forces exit_remote.
                     if down
-                        && key == EvKey::KEY_F12
+                        && key == EvKey::KEY_R
                         && MOD_CTRL.load(Ordering::Relaxed)
                         && MOD_ALT.load(Ordering::Relaxed)
                         && CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
                     {
-                        info!("hotkey Ctrl+Alt+F12 — forcing exit_remote");
+                        info!("hotkey Ctrl+Alt+R — forcing exit_remote");
                         exit_remote();
                         // grab still active until next pump iteration drops it
                         continue;
