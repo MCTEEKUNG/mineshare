@@ -321,6 +321,12 @@ async fn run_peer_session(
                                 standard(),
                             ) {
                                 Ok((ev, _)) => {
+                                    // Log every 200th event so we can spot-check
+                                    // what's actually arriving without spamming.
+                                    let n = stats_recv.injected.load(Ordering::Relaxed);
+                                    if n % 200 == 0 {
+                                        tracing::info!(?ev, n, "sample inject event");
+                                    }
                                     if let Err(e) = inject_recv.dispatch(ev) {
                                         warn!(error = %e, "inject failed");
                                         stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);

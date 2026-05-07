@@ -220,6 +220,16 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     exit_remote(y);
                 } else {
                     if dx != 0 || dy != 0 {
+                        // Sample every ~200th forwarded motion event for
+                        // diagnostics. Uses a static counter to limit spam.
+                        static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+                        let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n.is_multiple_of(200) {
+                            info!(
+                                dx, dy, virt_x = new_virt_x, n,
+                                "sample motion forward"
+                            );
+                        }
                         sink_send(InputEvent::MouseMove { dx, dy });
                     }
                     let (ax, ay) = anchor();
