@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use bincode::config::standard;
@@ -299,34 +300,76 @@ async fn run_peer_session(
     );
 
     let udp = Arc::new(udp);
+    let stats = Arc::new(SessionStats::default());
 
     // --- recv → inject ----------------------------------------------------
     let aead_recv = aead.clone_handle();
     let udp_recv = udp.clone();
     let inject_recv = inject.clone();
+    let stats_recv = stats.clone();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
             match udp_recv.recv_from(&mut buf).await {
-                Ok((n, src)) if src == peer_udp => match aead_recv.open(&buf[..n]) {
-                    Ok(pt) => {
-                        match bincode::serde::decode_from_slice::<InputEvent, _>(&pt, standard()) {
-                            Ok((ev, _)) => {
-                                if let Err(e) = inject_recv.dispatch(ev) {
-                                    warn!(error = %e, "inject failed");
+                Ok((n, src)) if src == peer_udp => {
+                    stats_recv.recv_pkts.fetch_add(1, Ordering::Relaxed);
+                    stats_recv.recv_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                    match aead_recv.open(&buf[..n]) {
+                        Ok(pt) => {
+                            match bincode::serde::decode_from_slice::<InputEvent, _>(
+                                &pt,
+                                standard(),
+                            ) {
+                                Ok((ev, _)) => {
+                                    if let Err(e) = inject_recv.dispatch(ev) {
+                                        warn!(error = %e, "inject failed");
+                                        stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        stats_recv.injected.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
+                                Err(e) => warn!(error = %e, "decode failed"),
                             }
-                            Err(e) => warn!(error = %e, "decode failed"),
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "decrypt failed");
+                            stats_recv.decrypt_errs.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Err(e) => warn!(error = %e, "decrypt failed"),
-                },
+                }
                 Ok((_, src)) => debug!(%src, "UDP from unexpected source — ignoring"),
                 Err(e) => {
                     warn!(error = %e, "UDP recv error");
                     break;
                 }
             }
+        }
+    });
+
+    // --- 1-Hz stats logger ----------------------------------------------
+    let stats_tick = stats.clone();
+    let peer_label = peer_addr.to_string();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut prev = StatsSnapshot::default();
+        loop {
+            interval.tick().await;
+            let curr = stats_tick.snapshot();
+            let delta = curr.delta(&prev);
+            if delta.sent_pkts != 0 || delta.recv_pkts != 0 {
+                info!(
+                    peer = %peer_label,
+                    sent_pkts = delta.sent_pkts,
+                    sent_bytes = delta.sent_bytes,
+                    recv_pkts = delta.recv_pkts,
+                    recv_bytes = delta.recv_bytes,
+                    injected = delta.injected,
+                    inject_errs = delta.inject_errs,
+                    decrypt_errs = delta.decrypt_errs,
+                    "1-Hz stats"
+                );
+            }
+            prev = curr;
         }
     });
 
@@ -349,10 +392,13 @@ async fn run_peer_session(
                         continue;
                     }
                 };
+                let len = ct.len();
                 if let Err(e) = udp.send_to(&ct, peer_udp).await {
                     warn!(error = %e, "UDP send failed — ending session");
                     break;
                 }
+                stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
+                stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!(skipped = n, "broadcast subscriber lagged — events dropped");
@@ -411,6 +457,56 @@ fn detect_local_addresses() -> Vec<IpAddr> {
         addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     addrs
+}
+
+#[derive(Default)]
+struct SessionStats {
+    sent_pkts: AtomicU64,
+    sent_bytes: AtomicU64,
+    recv_pkts: AtomicU64,
+    recv_bytes: AtomicU64,
+    injected: AtomicU64,
+    inject_errs: AtomicU64,
+    decrypt_errs: AtomicU64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct StatsSnapshot {
+    sent_pkts: u64,
+    sent_bytes: u64,
+    recv_pkts: u64,
+    recv_bytes: u64,
+    injected: u64,
+    inject_errs: u64,
+    decrypt_errs: u64,
+}
+
+impl SessionStats {
+    fn snapshot(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            sent_pkts: self.sent_pkts.load(Ordering::Relaxed),
+            sent_bytes: self.sent_bytes.load(Ordering::Relaxed),
+            recv_pkts: self.recv_pkts.load(Ordering::Relaxed),
+            recv_bytes: self.recv_bytes.load(Ordering::Relaxed),
+            injected: self.injected.load(Ordering::Relaxed),
+            inject_errs: self.inject_errs.load(Ordering::Relaxed),
+            decrypt_errs: self.decrypt_errs.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl StatsSnapshot {
+    fn delta(&self, prev: &StatsSnapshot) -> StatsSnapshot {
+        StatsSnapshot {
+            sent_pkts: self.sent_pkts.saturating_sub(prev.sent_pkts),
+            sent_bytes: self.sent_bytes.saturating_sub(prev.sent_bytes),
+            recv_pkts: self.recv_pkts.saturating_sub(prev.recv_pkts),
+            recv_bytes: self.recv_bytes.saturating_sub(prev.recv_bytes),
+            injected: self.injected.saturating_sub(prev.injected),
+            inject_errs: self.inject_errs.saturating_sub(prev.inject_errs),
+            decrypt_errs: self.decrypt_errs.saturating_sub(prev.decrypt_errs),
+        }
+    }
 }
 
 /// No-op inject used as a fallback when the platform implementation can't
