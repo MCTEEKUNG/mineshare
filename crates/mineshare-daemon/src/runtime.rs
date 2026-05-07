@@ -54,6 +54,11 @@ struct PortAnnounce {
 enum ControlMsg {
     TakeControl,
     ReleaseControl,
+    /// Peer is requesting that *we* leave Remote (their hotkey was
+    /// pressed while we held Remote). We should call
+    /// `force_local_exit_remote()` and then send `ReleaseControl`
+    /// from the resulting `Exited` event.
+    ForceRelease,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -339,6 +344,7 @@ async fn run_peer_session(
             let msg = match ev {
                 mineshare_input::RemoteEvent::Entered => ControlMsg::TakeControl,
                 mineshare_input::RemoteEvent::Exited => ControlMsg::ReleaseControl,
+                mineshare_input::RemoteEvent::RequestPeerExit => ControlMsg::ForceRelease,
             };
             if let Err(e) = write_encrypted(&mut tcp_write, &aead_writer, &msg).await {
                 warn!(error = %e, "control writer failed — peer probably disconnected");
@@ -348,7 +354,7 @@ async fn run_peer_session(
         }
     });
 
-    // Reader task: peer's ControlMsg → set_peer_in_remote.
+    // Reader task: peer's ControlMsg → coordination state updates.
     let aead_reader = aead.clone_handle();
     tokio::spawn(async move {
         loop {
@@ -360,6 +366,10 @@ async fn run_peer_session(
                 Ok(ControlMsg::ReleaseControl) => {
                     info!("peer released Remote control");
                     mineshare_input::set_peer_in_remote(false);
+                }
+                Ok(ControlMsg::ForceRelease) => {
+                    info!("peer asked us to release Remote");
+                    mineshare_input::force_local_exit_remote();
                 }
                 Err(e) => {
                     debug!(error = %e, "control reader ended");

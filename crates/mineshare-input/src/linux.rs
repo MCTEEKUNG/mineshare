@@ -127,6 +127,13 @@ fn exit_remote() {
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
+pub fn force_exit_remote() {
+    if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+        info!("force_exit_remote — peer asked us to release");
+        exit_remote();
+    }
+}
+
 pub struct EvdevCapture {
     devices: Vec<(PathBuf, Device)>,
 }
@@ -274,21 +281,37 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                         MOD_ALT.store(down, Ordering::Relaxed);
                     }
 
-                    // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote.
+                    // Diagnostic: log every R event with current modifier
+                    // state so we can verify the hotkey path is reaching us
+                    // when the user presses Ctrl+Alt+R.
+                    if key == EvKey::KEY_R {
+                        info!(
+                            down,
+                            ctrl = MOD_CTRL.load(Ordering::Relaxed),
+                            alt = MOD_ALT.load(Ordering::Relaxed),
+                            mode = CURSOR_MODE.load(Ordering::Acquire),
+                            peer_in_remote = super::peer_in_remote(),
+                            "KEY_R event"
+                        );
+                    }
+
+                    // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks
+                    // the peer to release if the peer holds Remote.
                     if down
                         && key == EvKey::KEY_R
                         && MOD_CTRL.load(Ordering::Relaxed)
                         && MOD_ALT.load(Ordering::Relaxed)
                     {
-                        match CURSOR_MODE.load(Ordering::Acquire) {
-                            MODE_REMOTE => {
-                                info!("hotkey Ctrl+Alt+R — forcing exit_remote");
-                                exit_remote();
-                            }
-                            _ => {
-                                info!("hotkey Ctrl+Alt+R — entering remote");
-                                enter_remote();
-                            }
+                        let mode = CURSOR_MODE.load(Ordering::Acquire);
+                        if mode == MODE_REMOTE {
+                            info!("hotkey Ctrl+Alt+R — forcing exit_remote");
+                            exit_remote();
+                        } else if super::peer_in_remote() {
+                            info!("hotkey Ctrl+Alt+R — requesting peer to release");
+                            super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+                        } else {
+                            info!("hotkey Ctrl+Alt+R — entering remote");
+                            enter_remote();
                         }
                         continue;
                     }

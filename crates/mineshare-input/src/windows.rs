@@ -158,6 +158,14 @@ fn exit_remote(restore_y: i32) {
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
+pub fn force_exit_remote() {
+    if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+        let h = SCREEN_H.load(Ordering::Relaxed);
+        info!("force_exit_remote — peer asked us to release");
+        exit_remote(h / 2);
+    }
+}
+
 pub struct HookCapture {
     started: bool,
 }
@@ -386,30 +394,31 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
 
         let mode = CURSOR_MODE.load(Ordering::Acquire);
 
-        // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote.
+        // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks the peer to
+        // release if the peer is the one currently driving.
         if down
             && scan == SCAN_HOTKEY
             && MOD_CTRL.load(Ordering::Relaxed)
             && MOD_ALT.load(Ordering::Relaxed)
         {
-            match mode {
-                MODE_REMOTE => {
-                    info!("hotkey Ctrl+Alt+R — forcing exit_remote");
-                    let h = SCREEN_H.load(Ordering::Relaxed);
-                    exit_remote(h / 2);
-                }
-                _ => {
-                    info!("hotkey Ctrl+Alt+R — entering remote");
-                    let mut pt = POINT::default();
-                    let entry_y = unsafe {
-                        if GetCursorPos(&mut pt).is_ok() {
-                            pt.y
-                        } else {
-                            SCREEN_H.load(Ordering::Relaxed) / 2
-                        }
-                    };
-                    enter_remote(entry_y);
-                }
+            if mode == MODE_REMOTE {
+                info!("hotkey Ctrl+Alt+R — forcing exit_remote");
+                let h = SCREEN_H.load(Ordering::Relaxed);
+                exit_remote(h / 2);
+            } else if super::peer_in_remote() {
+                info!("hotkey Ctrl+Alt+R — requesting peer to release");
+                super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+            } else {
+                info!("hotkey Ctrl+Alt+R — entering remote");
+                let mut pt = POINT::default();
+                let entry_y = unsafe {
+                    if GetCursorPos(&mut pt).is_ok() {
+                        pt.y
+                    } else {
+                        SCREEN_H.load(Ordering::Relaxed) / 2
+                    }
+                };
+                enter_remote(entry_y);
             }
             return LRESULT(1);
         }

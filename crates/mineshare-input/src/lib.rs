@@ -94,13 +94,20 @@ pub fn local_screen_geometry() -> (u32, u32) {
 
 /// Lifecycle events the platform-specific capture modules emit when they
 /// switch into or out of Remote mode. The daemon listens for these and
-/// translates them into `ControlMsg::TakeControl`/`ReleaseControl` over
-/// the encrypted TCP control channel so the two peers can coordinate
-/// (and avoid both ends entering Remote at the same time).
+/// translates them into `ControlMsg`s over the encrypted TCP control
+/// channel so the two peers can coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteEvent {
+    /// Local capture has just entered Remote mode. Translates to
+    /// `ControlMsg::TakeControl`.
     Entered,
+    /// Local capture has just left Remote mode. Translates to
+    /// `ControlMsg::ReleaseControl`.
     Exited,
+    /// User asked the *peer* to leave Remote (hotkey pressed locally
+    /// while the peer holds Remote). Translates to
+    /// `ControlMsg::ForceRelease`.
+    RequestPeerExit,
 }
 
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
@@ -131,6 +138,19 @@ pub fn set_peer_in_remote(v: bool) {
 pub(crate) fn fire_remote_event(ev: RemoteEvent) {
     if let Some(tx) = REMOTE_EVT_TX.lock().as_ref() {
         let _ = tx.send(ev);
+    }
+}
+
+/// Forces the local capture to leave Remote mode (used when the peer
+/// asks us to release control via `ControlMsg::ForceRelease`).
+pub fn force_local_exit_remote() {
+    #[cfg(target_os = "windows")]
+    {
+        windows::force_exit_remote();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::force_exit_remote();
     }
 }
 
