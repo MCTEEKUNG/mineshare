@@ -15,7 +15,7 @@ use std::thread;
 use anyhow::{Context, Result};
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AttributeSet, Device, EventSummary, EventType, KeyCode as EvKey, RelativeAxisCode,
+    AttributeSet, Device, EventSummary, EventType, KeyCode as EvKey, PropType, RelativeAxisCode,
     SynchronizationCode,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -199,11 +199,20 @@ impl UinputInject {
         rel.insert(RelativeAxisCode::REL_WHEEL);
         rel.insert(RelativeAxisCode::REL_HWHEEL);
 
+        // Tell libinput "I am a pointer device". Without INPUT_PROP_POINTER
+        // (visible as `B: PROP=0` in /proc/bus/input/devices) Wayland
+        // compositors classify the node as a generic keyboard-with-rel-axes
+        // and silently discard cursor motion — Win→Linux looked dead even
+        // with handshake/UDP/inject all healthy.
+        let mut props = AttributeSet::<PropType>::new();
+        props.insert(PropType::POINTER);
+
         let device = VirtualDevice::builder()
             .context("uinput builder — need /dev/uinput access (group `input`)")?
             .name(VIRTUAL_DEVICE_NAME)
             .with_keys(&keys)?
             .with_relative_axes(&rel)?
+            .with_properties(&props)?
             .build()
             .context("create uinput device")?;
         info!(name = VIRTUAL_DEVICE_NAME, "uinput virtual device created");
