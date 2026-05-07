@@ -16,7 +16,7 @@
 
 use std::mem;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -67,6 +67,17 @@ static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 /// (or natural left-tracking inside the peer screen) bounces the cursor
 /// back out of Remote mode immediately.
 const EXIT_BUFFER_PX: i32 = 100;
+
+// Modifier-key tracking (PS/2 set-1 scan codes — left/right both produce
+// the same scancode here, so we ignore the LLKHF_EXTENDED bit).
+const SCAN_CTRL: u32 = 0x1D;
+const SCAN_ALT: u32 = 0x38;
+/// Hotkey: Ctrl+Alt+F12 forces exit_remote regardless of cursor position.
+/// Useful when remote-mode gets stuck (e.g. peer disconnected mid-session).
+const SCAN_HOTKEY: u32 = 0x58; // F12
+
+static MOD_CTRL: AtomicBool = AtomicBool::new(false);
+static MOD_ALT: AtomicBool = AtomicBool::new(false);
 
 /// Per-event delta cap. Windows coalesces fast HW motion into a single
 /// `WM_MOUSEMOVE` whose pt-delta can be hundreds or thousands of pixels —
@@ -350,19 +361,41 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         if info.flags.0 & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) != 0 {
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
+        let scan = info.scanCode;
+        let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+
+        // Track modifier state regardless of mode so the hotkey works
+        // even after a half-pressed transition.
+        if scan == SCAN_CTRL && (down || up) {
+            MOD_CTRL.store(down, Ordering::Relaxed);
+        }
+        if scan == SCAN_ALT && (down || up) {
+            MOD_ALT.store(down, Ordering::Relaxed);
+        }
+
+        let mode = CURSOR_MODE.load(Ordering::Acquire);
+
+        // Hotkey: Ctrl+Alt+F12 forces exit_remote and consumes the event.
+        if mode == MODE_REMOTE
+            && down
+            && scan == SCAN_HOTKEY
+            && MOD_CTRL.load(Ordering::Relaxed)
+            && MOD_ALT.load(Ordering::Relaxed)
+        {
+            info!("hotkey Ctrl+Alt+F12 — forcing exit_remote");
+            let h = SCREEN_H.load(Ordering::Relaxed);
+            exit_remote(h / 2);
+            return LRESULT(1);
+        }
+
         // Keystrokes follow the cursor — only forward when remote.
-        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-            let scan = info.scanCode as u16;
-            let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-            let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
-            if down || up {
-                sink_send(InputEvent::Key {
-                    code: KeyCode(scan),
-                    down,
-                });
-            }
-            // Consume so Windows doesn't also act on the keystroke (no
-            // more "Alt+Tab fires on both machines simultaneously").
+        if mode == MODE_REMOTE && (down || up) {
+            sink_send(InputEvent::Key {
+                code: KeyCode(scan as u16),
+                down,
+            });
+            // Consume so Windows doesn't also act on the keystroke.
             return LRESULT(1);
         }
     }

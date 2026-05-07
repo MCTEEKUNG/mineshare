@@ -54,6 +54,10 @@ const EXIT_BUFFER_PX: i32 = 100;
 /// can't teleport the peer cursor across its screen.
 const MAX_DELTA_PX: i32 = 100;
 
+// Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+F12).
+static MOD_CTRL: AtomicBool = AtomicBool::new(false);
+static MOD_ALT: AtomicBool = AtomicBool::new(false);
+
 // --- shared cursor / grab state across all evdev pump threads ---------
 
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
@@ -240,6 +244,30 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                     _ => {}
                 },
                 EventSummary::Key(_, key, value) => {
+                    let down = value == 1;
+
+                    // Track modifier state for the emergency-return
+                    // hotkey, regardless of mode.
+                    if key == EvKey::KEY_LEFTCTRL || key == EvKey::KEY_RIGHTCTRL {
+                        MOD_CTRL.store(down, Ordering::Relaxed);
+                    }
+                    if key == EvKey::KEY_LEFTALT || key == EvKey::KEY_RIGHTALT {
+                        MOD_ALT.store(down, Ordering::Relaxed);
+                    }
+
+                    // Hotkey: Ctrl+Alt+F12 forces exit_remote.
+                    if down
+                        && key == EvKey::KEY_F12
+                        && MOD_CTRL.load(Ordering::Relaxed)
+                        && MOD_ALT.load(Ordering::Relaxed)
+                        && CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+                    {
+                        info!("hotkey Ctrl+Alt+F12 — forcing exit_remote");
+                        exit_remote();
+                        // grab still active until next pump iteration drops it
+                        continue;
+                    }
+
                     // Keystrokes and mouse buttons follow the cursor.
                     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
                         if let Some(btn) = button_from_key(key) {
