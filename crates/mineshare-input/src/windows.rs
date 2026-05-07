@@ -123,6 +123,13 @@ fn anchor() -> (i32, i32) {
 }
 
 fn enter_remote(entry_y: i32) {
+    // Refuse if the peer signalled it's already driving Remote — otherwise
+    // both ends forward each other's HW input simultaneously and we end
+    // up with cursors fighting on both screens.
+    if super::peer_in_remote() {
+        debug!("enter_remote refused — peer holds Remote");
+        return;
+    }
     let (ax, ay) = anchor();
     VIRT_X.store(0, Ordering::Relaxed);
     VIRT_Y.store(entry_y, Ordering::Relaxed);
@@ -133,6 +140,7 @@ fn enter_remote(entry_y: i32) {
     LAST_Y.store(ay, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
     info!(entry_y, anchor = ?(ax, ay), "cursor → remote");
+    super::fire_remote_event(super::RemoteEvent::Entered);
 }
 
 fn exit_remote(restore_y: i32) {
@@ -146,6 +154,7 @@ fn exit_remote(restore_y: i32) {
     LAST_Y.store(y, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     info!(restore = ?(w - 1, y), "cursor → local");
+    super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
 pub struct HookCapture {

@@ -6,7 +6,11 @@
 //! keys — Windows side translates virtual keys to scan codes on the way in
 //! and back to virtual keys on the way out.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -85,6 +89,48 @@ pub fn local_screen_geometry() -> (u32, u32) {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         (1920, 1080)
+    }
+}
+
+/// Lifecycle events the platform-specific capture modules emit when they
+/// switch into or out of Remote mode. The daemon listens for these and
+/// translates them into `ControlMsg::TakeControl`/`ReleaseControl` over
+/// the encrypted TCP control channel so the two peers can coordinate
+/// (and avoid both ends entering Remote at the same time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteEvent {
+    Entered,
+    Exited,
+}
+
+static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
+static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
+
+/// Daemon registers a channel here once the encrypted control session is
+/// up. Capture modules call `fire_remote_event` on each transition.
+pub fn set_remote_event_sender(tx: UnboundedSender<RemoteEvent>) {
+    *REMOTE_EVT_TX.lock() = Some(tx);
+}
+
+pub fn clear_remote_event_sender() {
+    *REMOTE_EVT_TX.lock() = None;
+}
+
+/// Returns true if the peer has signalled it is currently driving Remote
+/// mode, in which case the local capture must refuse to enter Remote
+/// itself (otherwise both ends would forward each other's HW input and
+/// the cursors fight on both screens).
+pub fn peer_in_remote() -> bool {
+    PEER_IN_REMOTE.load(Ordering::Acquire)
+}
+
+pub fn set_peer_in_remote(v: bool) {
+    PEER_IN_REMOTE.store(v, Ordering::Release);
+}
+
+pub(crate) fn fire_remote_event(ev: RemoteEvent) {
+    if let Some(tx) = REMOTE_EVT_TX.lock().as_ref() {
+        let _ = tx.send(ev);
     }
 }
 

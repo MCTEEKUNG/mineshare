@@ -45,6 +45,17 @@ struct PortAnnounce {
     screen_h: u32,
 }
 
+/// Streamed messages on the encrypted TCP control channel after the
+/// initial PortAnnounce exchange. Used to coordinate which peer holds
+/// Remote mode at any given moment so the local capture can refuse to
+/// also enter Remote (which would have both ends fighting for the
+/// cursor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ControlMsg {
+    TakeControl,
+    ReleaseControl,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
     pub capture: bool,
@@ -313,6 +324,55 @@ async fn run_peer_session(
         "input UDP channel established"
     );
 
+    // Split the TCP stream so we can run a writer task (forwarding
+    // RemoteEvent → ControlMsg) and a reader task (receiving the peer's
+    // ControlMsg → set_peer_in_remote) in parallel after PortAnnounce.
+    let (mut tcp_read, mut tcp_write) = stream.into_split();
+
+    // Writer task: capture-side RemoteEvent → ControlMsg over TCP.
+    let (rev_tx, mut rev_rx) =
+        tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
+    mineshare_input::set_remote_event_sender(rev_tx);
+    let aead_writer = aead.clone_handle();
+    tokio::spawn(async move {
+        while let Some(ev) = rev_rx.recv().await {
+            let msg = match ev {
+                mineshare_input::RemoteEvent::Entered => ControlMsg::TakeControl,
+                mineshare_input::RemoteEvent::Exited => ControlMsg::ReleaseControl,
+            };
+            if let Err(e) = write_encrypted(&mut tcp_write, &aead_writer, &msg).await {
+                warn!(error = %e, "control writer failed — peer probably disconnected");
+                break;
+            }
+            debug!(?msg, "sent ControlMsg");
+        }
+    });
+
+    // Reader task: peer's ControlMsg → set_peer_in_remote.
+    let aead_reader = aead.clone_handle();
+    tokio::spawn(async move {
+        loop {
+            match read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader).await {
+                Ok(ControlMsg::TakeControl) => {
+                    info!("peer took Remote control");
+                    mineshare_input::set_peer_in_remote(true);
+                }
+                Ok(ControlMsg::ReleaseControl) => {
+                    info!("peer released Remote control");
+                    mineshare_input::set_peer_in_remote(false);
+                }
+                Err(e) => {
+                    debug!(error = %e, "control reader ended");
+                    break;
+                }
+            }
+        }
+        // Connection lost — clear stale state so a future reconnection
+        // doesn't start with the wrong belief.
+        mineshare_input::set_peer_in_remote(false);
+        mineshare_input::clear_remote_event_sender();
+    });
+
     let udp = Arc::new(udp);
     let stats = Arc::new(SessionStats::default());
 
@@ -429,11 +489,11 @@ async fn run_peer_session(
     Ok(())
 }
 
-async fn write_encrypted<T: Serialize>(
-    stream: &mut TcpStream,
-    aead: &EncryptedSession,
-    msg: &T,
-) -> Result<()> {
+async fn write_encrypted<W, T>(stream: &mut W, aead: &EncryptedSession, msg: &T) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    T: Serialize,
+{
     let pt = bincode::serde::encode_to_vec(msg, standard())?;
     let ct = aead.seal(&pt)?;
     let len = u32::try_from(ct.len()).context("frame too large")?;
@@ -442,10 +502,11 @@ async fn write_encrypted<T: Serialize>(
     Ok(())
 }
 
-async fn read_encrypted<T: for<'de> Deserialize<'de>>(
-    stream: &mut TcpStream,
-    aead: &EncryptedSession,
-) -> Result<T> {
+async fn read_encrypted<R, T>(stream: &mut R, aead: &EncryptedSession) -> Result<T>
+where
+    R: AsyncReadExt + Unpin,
+    T: for<'de> Deserialize<'de>,
+{
     let mut hdr = [0u8; 4];
     stream.read_exact(&mut hdr).await?;
     let len = u32::from_be_bytes(hdr) as usize;

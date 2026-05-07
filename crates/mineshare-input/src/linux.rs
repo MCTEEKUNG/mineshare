@@ -90,6 +90,11 @@ pub fn set_peer_screen(w: u32, _h: u32) {
 }
 
 fn enter_remote() {
+    // Refuse if the peer signalled it's already driving Remote.
+    if super::peer_in_remote() {
+        debug!("enter_remote refused — peer holds Remote");
+        return;
+    }
     // virt_x is "distance dragged INTO the peer from the edge we crossed".
     // It grows as the user moves further into the peer's screen, and falls
     // back toward zero (then negative) as they head back toward the entry
@@ -99,6 +104,7 @@ fn enter_remote() {
     GRAB_REQUESTED.store(true, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
     info!("cursor → remote (linux)");
+    super::fire_remote_event(super::RemoteEvent::Entered);
 }
 
 fn exit_remote() {
@@ -108,6 +114,7 @@ fn exit_remote() {
     CURSOR_X.store(40, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     info!(restore_x = 40, "cursor → local (linux)");
+    super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
 pub struct EvdevCapture {
