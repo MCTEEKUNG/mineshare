@@ -2,7 +2,7 @@
 host:        Ubuntu-Tee-linux
 os:          linux
 arch:        x86_64
-collected:   2026-05-07T16:22:25.139239053Z
+collected:   2026-05-07T16:22:37.142281914Z
 daemon ver:  0.0.1
 log dir:     /home/tee/.config/MineShare/logs
 device id:   c59b98d5-fec4-4aa0-8855-37a6dbd6f372
