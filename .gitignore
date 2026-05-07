@@ -39,3 +39,5 @@ identity.json
 
 # Claude Code local config
 .claude/
+mineshare-test.err
+mineshare-test.log
