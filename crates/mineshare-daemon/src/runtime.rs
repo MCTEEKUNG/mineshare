@@ -30,11 +30,19 @@ use crate::logs;
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 
 /// One-shot message exchanged on the encrypted TCP control channel after
-/// the Noise handshake to negotiate the UDP port that each side bound.
+/// the Noise handshake. Carries the peer-side UDP port (so we know where
+/// to send the input/audio streams) plus the peer's primary screen
+/// geometry in physical pixels — used by both sides to clamp `virt_x`
+/// against the real peer width instead of hardcoded constants.
+///
+/// Wire format is positional (bincode), so adding fields is a breaking
+/// protocol change. Both daemons must run the same version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PortAnnounce {
     udp_port: u16,
     daemon_version: String,
+    screen_w: u32,
+    screen_h: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -284,18 +292,24 @@ async fn run_peer_session(
     let local_udp_port = udp.local_addr()?.port();
     debug!(local_udp_port, "local UDP socket bound for peer");
 
+    let (local_w, local_h) = mineshare_input::local_screen_geometry();
     let announce = PortAnnounce {
         udp_port: local_udp_port,
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        screen_w: local_w,
+        screen_h: local_h,
     };
     write_encrypted(&mut stream, &aead, &announce).await?;
     let peer_announce: PortAnnounce = read_encrypted(&mut stream, &aead).await?;
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
+    mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
     info!(
         %peer_addr,
         local_udp = local_udp_port,
         peer_udp = %peer_udp,
         peer_ver = %peer_announce.daemon_version,
+        local_screen = ?(local_w, local_h),
+        peer_screen = ?(peer_announce.screen_w, peer_announce.screen_h),
         "input UDP channel established"
     );
 

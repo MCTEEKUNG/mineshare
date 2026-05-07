@@ -72,6 +72,19 @@ static VIRT_X: AtomicI32 = AtomicI32::new(0);
 /// Set when the daemon wants every pump thread to `EVIOCGRAB` its device.
 static GRAB_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+pub fn local_screen_geometry() -> (u32, u32) {
+    let w = env_i32("MINESHARE_SCREEN_W").unwrap_or(1920).max(1) as u32;
+    let h = env_i32("MINESHARE_SCREEN_H").unwrap_or(1080).max(1) as u32;
+    SCREEN_W.store(w as i32, Ordering::Relaxed);
+    SCREEN_H.store(h as i32, Ordering::Relaxed);
+    (w, h)
+}
+
+pub fn set_peer_screen(w: u32, _h: u32) {
+    PEER_W.store(w.max(1) as i32, Ordering::Relaxed);
+    info!(peer_w = w, "peer screen geometry stored");
+}
+
 fn enter_remote() {
     // virt_x is "distance dragged INTO the peer from the edge we crossed".
     // It grows as the user moves further into the peer's screen, and falls

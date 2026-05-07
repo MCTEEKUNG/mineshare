@@ -84,6 +84,26 @@ fn sink_send(ev: InputEvent) {
     }
 }
 
+pub fn local_screen_geometry() -> (u32, u32) {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| unsafe {
+        // Idempotent — failures here just mean DPI awareness is already
+        // set. Calling before HookCapture::start() lets a `--no-capture`
+        // daemon still report DPI-aware physical pixels.
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    });
+    let w = unsafe { GetSystemMetrics(SM_CXSCREEN).max(1) as u32 };
+    let h = unsafe { GetSystemMetrics(SM_CYSCREEN).max(1) as u32 };
+    SCREEN_W.store(w as i32, Ordering::Relaxed);
+    SCREEN_H.store(h as i32, Ordering::Relaxed);
+    (w, h)
+}
+
+pub fn set_peer_screen(w: u32, _h: u32) {
+    PEER_W.store(w.max(1) as i32, Ordering::Relaxed);
+    info!(peer_w = w, "peer screen geometry stored");
+}
+
 fn anchor() -> (i32, i32) {
     (
         SCREEN_W.load(Ordering::Relaxed) / 2,

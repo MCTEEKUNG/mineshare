@@ -65,6 +65,47 @@ pub trait InputInject: Send + Sync {
     }
 }
 
+/// Returns the local primary screen geometry in **physical** pixels.
+///
+/// Platform notes:
+///   * Windows: triggers per-monitor DPI awareness on first call, then
+///     reads `GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)`. Subsequent calls
+///     return the same DPI-aware value.
+///   * Linux: read from `MINESHARE_SCREEN_W` / `MINESHARE_SCREEN_H` env
+///     vars (defaults `1920x1080`). Slice 3 will query Wayland/X11 directly.
+pub fn local_screen_geometry() -> (u32, u32) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::local_screen_geometry()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::local_screen_geometry()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        (1920, 1080)
+    }
+}
+
+/// Stores the peer's primary screen geometry (received via the encrypted
+/// control channel) so the platform-specific edge/hysteresis logic can
+/// clamp `virt_x` against the real peer width.
+pub fn set_peer_screen(w: u32, h: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::set_peer_screen(w, h);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::set_peer_screen(w, h);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (w, h);
+    }
+}
+
 /// Construct the platform-specific capture implementation.
 pub fn make_capture() -> anyhow::Result<Box<dyn InputCapture>> {
     #[cfg(target_os = "linux")]
