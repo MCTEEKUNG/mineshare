@@ -53,6 +53,13 @@ const EXIT_BUFFER_PX: i32 = 100;
 /// Maximum forwarded delta per `SYN_REPORT` so coalesced fast motion
 /// can't teleport the peer cursor across its screen.
 const MAX_DELTA_PX: i32 = 100;
+/// Cumulative leftward motion at the estimated left edge before we enter
+/// Remote. Without a reliable Wayland cursor-pos query we work from a
+/// best-effort estimate; the pressure threshold guards against the
+/// estimate being off (e.g. the real cursor is already at the left edge
+/// when the daemon starts) — the user has to deliberately push past the
+/// estimated edge for this many extra pixels to trip a transition.
+const ENTER_PRESSURE_PX: i32 = 100;
 
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
@@ -73,6 +80,10 @@ static PEER_W: AtomicI32 = AtomicI32::new(2880);
 static CURSOR_X: AtomicI32 = AtomicI32::new(960);
 /// Virtual cursor X on the peer's screen while we're in `REMOTE`.
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
+/// Cumulative leftward overshoot once `CURSOR_X` has clamped to zero.
+/// Resets on rightward motion. When it reaches `ENTER_PRESSURE_PX` we
+/// transition to Remote.
+static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 /// Set when the daemon wants every pump thread to `EVIOCGRAB` its device.
 static GRAB_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -112,6 +123,7 @@ fn exit_remote() {
     // Reset cursor estimate to "near left edge" so the user can drag right
     // freely without us mis-detecting another edge crossing.
     CURSOR_X.store(40, Ordering::Relaxed);
+    LEFT_PRESSURE.store(0, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     info!(restore_x = 40, "cursor → local (linux)");
     super::fire_remote_event(super::RemoteEvent::Exited);
@@ -318,9 +330,21 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         let raw = old_cx + dx;
         let new_cx = raw.clamp(0, w - 1);
         CURSOR_X.store(new_cx, Ordering::Relaxed);
-        // Edge crossing: previously interior, this batch crossed into x ≤ 0.
-        if old_cx > 0 && raw <= 0 {
-            enter_remote();
+
+        // Pressure-based left-edge detection. Pressure only accumulates
+        // when the estimate has bottomed out at the left edge AND the
+        // user keeps pushing further left. Any rightward motion resets
+        // it, so casual cursor work inside Ubuntu doesn't flip us into
+        // Remote on its own.
+        if new_cx == 0 && dx < 0 {
+            let added = -dx;
+            let prev = LEFT_PRESSURE.fetch_add(added, Ordering::Relaxed);
+            if prev + added >= ENTER_PRESSURE_PX {
+                LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                enter_remote();
+            }
+        } else if dx > 0 {
+            LEFT_PRESSURE.store(0, Ordering::Relaxed);
         }
         // No forward in LOCAL — OS already moves the cursor.
     } else {
