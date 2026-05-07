@@ -15,6 +15,10 @@ node_modules/
 .npm
 .pnpm-debug.log*
 
+# …but keep MineShare log bundles produced by `mineshare-daemon collect --push`
+!logs/
+!logs/*.log
+
 # OS
 .DS_Store
 Thumbs.db
