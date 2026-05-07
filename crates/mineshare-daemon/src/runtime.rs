@@ -201,9 +201,29 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     let init_static = init_static.clone();
                     let inject = inject.clone();
                     let bcast = event_bcast.clone();
+                    let known_for_loop = known.clone();
+                    let peer_id = peer.device_id;
+                    // Reconnect loop: redial after each session ends as long
+                    // as the peer is still in `known_peers` (mDNS hasn't
+                    // observed it dropping). This is what keeps us
+                    // reconnecting after the peer's daemon restarts.
                     tokio::spawn(async move {
-                        if let Err(e) = dial_and_run(&peer, &init_static, inject, bcast).await {
-                            warn!(peer = %peer.device_id, error = %e, "outbound peer session ended");
+                        loop {
+                            let peer_now = {
+                                let k = known_for_loop.lock();
+                                match k.get(&peer_id) {
+                                    Some(p) => p.clone(),
+                                    None => {
+                                        debug!(peer = %peer_id, "peer offline — exiting reconnect loop");
+                                        return;
+                                    }
+                                }
+                            };
+                            match dial_and_run(&peer_now, &init_static, inject.clone(), bcast.clone()).await {
+                                Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
+                                Err(e) => warn!(peer = %peer_id, error = %e, "session error — will reconnect"),
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     });
                 } else {
@@ -339,7 +359,7 @@ async fn run_peer_session(
         tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
     mineshare_input::set_remote_event_sender(rev_tx);
     let aead_writer = aead.clone_handle();
-    tokio::spawn(async move {
+    let writer_handle = tokio::spawn(async move {
         while let Some(ev) = rev_rx.recv().await {
             let msg = match ev {
                 mineshare_input::RemoteEvent::Entered => ControlMsg::TakeControl,
@@ -355,13 +375,23 @@ async fn run_peer_session(
     });
 
     // Reader task: peer's ControlMsg → coordination state updates.
+    // Returns when the TCP control channel closes — the main loop
+    // watches this handle in `select!` so it can shut the whole peer
+    // session down (forward loop, UDP recv, stats) and let the caller's
+    // reconnect loop run.
     let aead_reader = aead.clone_handle();
-    tokio::spawn(async move {
+    let inject_for_reader = inject.clone();
+    let reader_handle = tokio::spawn(async move {
         loop {
             match read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader).await {
                 Ok(ControlMsg::TakeControl) => {
                     info!("peer took Remote control");
                     mineshare_input::set_peer_in_remote(true);
+                    // Warp our cursor to the boundary edge so the peer's
+                    // virt_x model lines up with the real cursor position
+                    // — otherwise their exit threshold fires after a tiny
+                    // rightward motion even though the cursor is mid-screen.
+                    mineshare_input::on_peer_take_control(&*inject_for_reader);
                 }
                 Ok(ControlMsg::ReleaseControl) => {
                     info!("peer released Remote control");
@@ -377,10 +407,6 @@ async fn run_peer_session(
                 }
             }
         }
-        // Connection lost — clear stale state so a future reconnection
-        // doesn't start with the wrong belief.
-        mineshare_input::set_peer_in_remote(false);
-        mineshare_input::clear_remote_event_sender();
     });
 
     let udp = Arc::new(udp);
@@ -391,7 +417,7 @@ async fn run_peer_session(
     let udp_recv = udp.clone();
     let inject_recv = inject.clone();
     let stats_recv = stats.clone();
-    tokio::spawn(async move {
+    let recv_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
             match udp_recv.recv_from(&mut buf).await {
@@ -439,7 +465,7 @@ async fn run_peer_session(
     // --- 1-Hz stats logger ----------------------------------------------
     let stats_tick = stats.clone();
     let peer_label = peer_addr.to_string();
-    tokio::spawn(async move {
+    let stats_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut prev = StatsSnapshot::default();
         loop {
@@ -464,38 +490,58 @@ async fn run_peer_session(
     });
 
     // --- capture broadcast → send ---------------------------------------
+    // We pin the reader handle so `select!` can poll it without consuming
+    // it; when the TCP control channel closes the reader returns and we
+    // break out, tearing down every other task in the session so the
+    // caller's reconnect loop can redial.
     let mut sub = bcast.subscribe();
-    loop {
-        match sub.recv().await {
-            Ok(ev) => {
-                let pt = match bincode::serde::encode_to_vec(ev, standard()) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(error = %e, "encode failed");
-                        continue;
+    tokio::pin!(reader_handle);
+    let exit_reason = loop {
+        tokio::select! {
+            biased;
+            _ = &mut reader_handle => {
+                break "TCP control reader ended";
+            }
+            recv = sub.recv() => match recv {
+                Ok(ev) => {
+                    let pt = match bincode::serde::encode_to_vec(ev, standard()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(error = %e, "encode failed");
+                            continue;
+                        }
+                    };
+                    let ct = match aead.seal(&pt) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(error = %e, "encrypt failed");
+                            continue;
+                        }
+                    };
+                    let len = ct.len();
+                    if let Err(e) = udp.send_to(&ct, peer_udp).await {
+                        warn!(error = %e, "UDP send failed — ending session");
+                        break "UDP send error";
                     }
-                };
-                let ct = match aead.seal(&pt) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(error = %e, "encrypt failed");
-                        continue;
-                    }
-                };
-                let len = ct.len();
-                if let Err(e) = udp.send_to(&ct, peer_udp).await {
-                    warn!(error = %e, "UDP send failed — ending session");
-                    break;
+                    stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
+                    stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
                 }
-                stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
-                stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "broadcast subscriber lagged — events dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "broadcast subscriber lagged — events dropped");
+                }
+                Err(broadcast::error::RecvError::Closed) => break "broadcast closed",
+            },
         }
-    }
+    };
+
+    info!(reason = exit_reason, %peer_addr, "peer session ending");
+    writer_handle.abort();
+    recv_handle.abort();
+    stats_handle.abort();
+    // Reset cross-session coordination state so the next handshake
+    // doesn't inherit a stale belief that the peer holds Remote.
+    mineshare_input::set_peer_in_remote(false);
+    mineshare_input::clear_remote_event_sender();
     Ok(())
 }
 

@@ -154,6 +154,29 @@ pub fn force_local_exit_remote() {
     }
 }
 
+/// Called when the peer signals it has taken Remote control of us
+/// (`ControlMsg::TakeControl`). Warps the local cursor to the boundary
+/// edge that faces the peer so the peer's `virt_x` model matches the
+/// real cursor position — without this the peer's exit hysteresis
+/// fires after a few pixels of rightward motion because their model
+/// thinks we're already at the boundary while reality has the cursor
+/// somewhere mid-screen.
+pub fn on_peer_take_control(inject: &dyn InputInject) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = inject;
+        windows::on_peer_take_control();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::on_peer_take_control(inject);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = inject;
+    }
+}
+
 /// Stores the peer's primary screen geometry (received via the encrypted
 /// control channel) so the platform-specific edge/hysteresis logic can
 /// clamp `virt_x` against the real peer width.

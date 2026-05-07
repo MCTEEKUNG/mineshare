@@ -166,6 +166,27 @@ pub fn force_exit_remote() {
     }
 }
 
+/// Called when the peer signals it has taken Remote control of us.
+/// Warps the local cursor to the right-edge boundary (the side facing
+/// the peer in the hardcoded Win-LEFT / Ubuntu-RIGHT layout) so the
+/// peer's virt_x model matches the real cursor position — without this
+/// the peer's exit threshold fires after a tiny rightward motion even
+/// though the cursor is mid-screen.
+pub fn on_peer_take_control() {
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    let x = (w - 1).max(0);
+    let y = (h / 2).clamp(0, (h - 1).max(0));
+    unsafe {
+        let _ = SetCursorPos(x, y);
+    }
+    // Update the hook's "last seen" so HW-motion auto-release doesn't
+    // mis-fire on the first injected motion arriving from the peer.
+    LAST_X.store(x, Ordering::Relaxed);
+    LAST_Y.store(y, Ordering::Relaxed);
+    info!(boundary = ?(x, y), "warped cursor to peer-facing edge (right)");
+}
+
 pub struct HookCapture {
     started: bool,
 }

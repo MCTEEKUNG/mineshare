@@ -8,12 +8,17 @@
 //! Inject: a virtual `uinput` device that the OS treats as a real HID. Needs
 //! `/dev/uinput` to be writable by the daemon's user.
 //!
-//! M2 Slice 2 adds **edge-triggered cursor handover** in the other
+//! M2 Slice 2 adds **edge-press cursor handover** in the other
 //! direction (Ubuntu→Win). Each pump thread maintains a `MODE` state:
 //!
-//!   * `LOCAL` — events flow to the OS unchanged. We watch our own
-//!     accumulated `REL_X` to estimate cursor position and detect when
-//!     the user has dragged into the left edge.
+//!   * `LOCAL` — events flow to the OS unchanged. We integrate the
+//!     `REL_X` deltas into a clamped `CURSOR_X` estimate; the OS
+//!     clamps the real cursor at the screen edge while evdev keeps
+//!     reporting the overshoot, so any time the user drags into the
+//!     real left edge our estimate self-syncs to 0. Sustained leftward
+//!     overshoot past 0 (≥ `ENTER_PRESSURE_PX`) is the signal that the
+//!     user is actively pushing into the edge → enter `REMOTE`. Any
+//!     rightward dx cancels an in-flight press.
 //!   * `REMOTE` — every relevant device is `EVIOCGRAB`-ed so the OS no
 //!     longer sees motion or keystrokes; we forward them to the peer
 //!     instead. A virtual `VIRT_X` tracks the cursor's position on the
@@ -54,13 +59,14 @@ const EXIT_BUFFER_PX: i32 = 100;
 /// can't teleport the peer cursor across its screen. 30px keeps the
 /// cursor smooth even with high-DPI peers and aggressive acceleration.
 const MAX_DELTA_PX: i32 = 30;
-/// Cumulative leftward motion at the estimated left edge before we enter
-/// Remote. Without a reliable Wayland cursor-pos query we work from a
-/// best-effort estimate; the pressure threshold guards against the
-/// estimate being off (e.g. the real cursor is already at the left edge
-/// when the daemon starts) — the user has to deliberately push past the
-/// estimated edge for this many extra pixels to trip a transition.
-const ENTER_PRESSURE_PX: i32 = 100;
+/// Cumulative leftward overshoot past the (estimated) left edge before
+/// we hand control to the peer. The OS clamps the real cursor at the
+/// physical screen edge but evdev keeps reporting `REL_X` events from
+/// the still-moving HW; we mirror that with a clamped CURSOR_X estimate
+/// and treat sustained "raw_x < 0" overshoot as the user actively
+/// pushing against the edge. 200 px is a deliberate press without
+/// being so much that it feels sticky.
+const ENTER_PRESSURE_PX: i32 = 200;
 
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
@@ -84,7 +90,6 @@ static VIRT_X: AtomicI32 = AtomicI32::new(0);
 /// Cumulative leftward overshoot once `CURSOR_X` has clamped to zero.
 /// Resets on rightward motion. When it reaches `ENTER_PRESSURE_PX` we
 /// transition to Remote.
-#[allow(dead_code)]
 static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 
 pub fn local_screen_geometry() -> (u32, u32) {
@@ -132,6 +137,26 @@ pub fn force_exit_remote() {
         info!("force_exit_remote — peer asked us to release");
         exit_remote();
     }
+}
+
+/// Called when the peer signals it has taken Remote control of us.
+/// Wayland has no portable cursor-warp, so we slam the cursor into
+/// the left-edge OS clamp by injecting a wide negative relative
+/// delta — this puts our cursor at the boundary edge facing the peer
+/// (Win-LEFT / Ubuntu-RIGHT layout) so the peer's virt_x model lines
+/// up with the real cursor position.
+pub fn on_peer_take_control(inject: &dyn InputInject) {
+    let w = SCREEN_W.load(Ordering::Relaxed).max(1);
+    let slam = -(w * 2);
+    if let Err(e) = inject.mouse_move_rel(slam, 0) {
+        warn!(error = %e, "left-edge slam failed");
+        return;
+    }
+    // Resync our own LOCAL-mode tracking so we don't false-trigger
+    // re-entry once the peer releases and HW motion resumes here.
+    CURSOR_X.store(0, Ordering::Relaxed);
+    LEFT_PRESSURE.store(0, Ordering::Relaxed);
+    info!(slam_dx = slam, "left-edge slam on TakeControl (linux)");
 }
 
 pub struct EvdevCapture {
@@ -356,22 +381,56 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
 
     let mode = CURSOR_MODE.load(Ordering::Acquire);
     if mode == MODE_LOCAL {
-        // Linux Wayland has no portable cursor-position query, so any
-        // estimate-based edge detection eventually drifts and traps the
-        // user. Until Slice 3 brings in a real cursor query we rely on
-        // the explicit Ctrl+Alt+R hotkey to enter Remote from Linux.
-        //
         // When the peer is currently driving (peer_in_remote) we *do*
         // see the real HW events (the device is grabbed for us), so any
         // meaningful motion means the local user is trying to take
         // control back. Forward that intent as `RequestPeerExit` so
         // the peer's daemon will exit_remote and unfreeze our cursor.
-        if super::peer_in_remote() && (dx.abs() + dy.abs()) > 5 {
-            info!(
-                dx,
-                dy, "local HW motion while peer holds Remote — requesting peer release"
-            );
-            super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+        if super::peer_in_remote() {
+            if (dx.abs() + dy.abs()) > 5 {
+                info!(
+                    dx,
+                    dy, "local HW motion while peer holds Remote — requesting peer release"
+                );
+                super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+            }
+            return;
+        }
+
+        // Track an estimate of the real cursor X. We can't query
+        // Wayland for the real position, but the OS *clamps* the
+        // cursor to the screen edge — and evdev keeps reporting the
+        // overshoot. Mirroring that with a clamped CURSOR_X means
+        // any time the user drags into a real screen edge our
+        // estimate self-syncs to the real position; drift can't
+        // accumulate beyond one screen.
+        let screen_w = SCREEN_W.load(Ordering::Relaxed);
+        let prev_x = CURSOR_X.load(Ordering::Relaxed);
+        let raw_x = prev_x + dx;
+        let new_x = raw_x.clamp(0, (screen_w - 1).max(0));
+        CURSOR_X.store(new_x, Ordering::Relaxed);
+
+        // Edge press: raw_x < 0 means the user pushed past the
+        // (estimated) left edge — the OS cursor stopped but the HW
+        // is still moving. Sustained overshoot of `ENTER_PRESSURE_PX`
+        // pixels hands control to the peer.
+        if raw_x < 0 {
+            let overshoot = -raw_x;
+            let pressure =
+                LEFT_PRESSURE.fetch_add(overshoot, Ordering::Relaxed) + overshoot;
+            if pressure >= ENTER_PRESSURE_PX {
+                info!(
+                    pressure,
+                    threshold = ENTER_PRESSURE_PX,
+                    "left-edge press — entering remote (linux)"
+                );
+                LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                enter_remote();
+            }
+        } else if dx > 0 {
+            // Any rightward motion cancels an in-flight press —
+            // the user pulled back from the edge.
+            LEFT_PRESSURE.store(0, Ordering::Relaxed);
         }
         // No forward in LOCAL — OS already moves the cursor.
     } else {
