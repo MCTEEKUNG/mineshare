@@ -2,7 +2,7 @@
 host:        LAPTOP-4E1649F3-windows
 os:          windows
 arch:        x86_64
-collected:   2026-05-07T10:23:26.8501307Z
+collected:   2026-05-07T11:00:17.4147473Z
 daemon ver:  0.0.1
 log dir:     C:\Users\ASUS\AppData\Roaming\MineShare\logs
 device id:   5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
@@ -11,7 +11,7 @@ local addrs: [192.168.1.108]
 
 === Daemon log (most recent first) ===
 
---- C:\Users\ASUS\AppData\Roaming\MineShare\logs\daemon.2026-05-07 (1247 bytes) ---
+--- C:\Users\ASUS\AppData\Roaming\MineShare\logs\daemon.2026-05-07 (5013 bytes) ---
 2026-05-07T10:22:07.494467Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
 2026-05-07T10:22:07.494863Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
 2026-05-07T10:22:07.495050Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows
@@ -21,4 +21,32 @@ local addrs: [192.168.1.108]
 2026-05-07T10:22:07.511300Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:38123
 2026-05-07T10:22:07.585059Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
 2026-05-07T10:22:08.363691Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T10:38:54.348406Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T10:38:54.348854Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T10:38:54.349054Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=false
+2026-05-07T10:38:54.349112Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T10:38:54.349184Z  INFO mineshare_daemon::runtime: inject disabled via --no-inject
+2026-05-07T10:38:54.349298Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T10:38:54.351270Z  INFO mineshare_daemon::runtime: control listener bound port=58384
+2026-05-07T10:38:54.351940Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T10:38:54.366562Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=38123
+2026-05-07T10:38:54.366635Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:38123
+2026-05-07T10:38:54.413488Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T10:38:54.413733Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=56797
+2026-05-07T10:38:54.455637Z  WARN mineshare_daemon::runtime: outbound peer session ended peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 error=An existing connection was forcibly closed by the remote host. (os error 10054)
+2026-05-07T10:38:55.258257Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
+2026-05-07T10:59:19.628714Z  INFO mineshare_daemon::logs: log file appender ready log_dir=C:\Users\ASUS\AppData\Roaming\MineShare\logs
+2026-05-07T10:59:19.629696Z  INFO mineshare_daemon::identity: loaded existing identity path=C:\Users\ASUS\AppData\Roaming\MineShare\identity.json
+2026-05-07T10:59:19.630601Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows capture=true inject=false
+2026-05-07T10:59:19.630879Z  INFO mineshare_daemon::runtime: input capture started (passive)
+2026-05-07T10:59:19.631139Z  INFO mineshare_input::windows: Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)
+2026-05-07T10:59:19.631224Z  INFO mineshare_daemon::runtime: inject disabled via --no-inject
+2026-05-07T10:59:19.633084Z  INFO mineshare_daemon::runtime: control listener bound port=57773
+2026-05-07T10:59:19.633939Z  INFO mineshare_net::discovery: announced mDNS service instance="LAPTOP-4E1649F3-5a2243ef"
+2026-05-07T10:59:19.650211Z  INFO mineshare_daemon::runtime: peer discovered peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux addrs=[192.168.1.106] port=38465
+2026-05-07T10:59:19.650456Z DEBUG mineshare_daemon::runtime: dialing peer sock=192.168.1.106:38465
+2026-05-07T10:59:19.703850Z  INFO mineshare_daemon::runtime: outbound Noise XX handshake completed peer=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 peer_pub=d3efde4f4ab5
+2026-05-07T10:59:19.704198Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=53076
+2026-05-07T10:59:19.795414Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.106:38465 local_udp=53076 peer_udp=192.168.1.106:53630 peer_ver=0.0.1
+2026-05-07T10:59:20.540203Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="LAPTOP-4E1649F3-5a2243ef._mineshare._tcp.local."
 
