@@ -11,3 +11,9 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+
+cpal = { workspace = true }
+opus = { workspace = true }
+ringbuf = { workspace = true }

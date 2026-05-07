@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use bincode::config::standard;
+use mineshare_audio::{AudioFrame, AudioPlayback};
 use mineshare_core::DeviceId;
 use mineshare_input::{InputEvent, InputInject, make_capture, make_inject};
 use mineshare_net::{
@@ -61,6 +62,17 @@ enum ControlMsg {
     ForceRelease,
 }
 
+/// Tagged UDP payload — input events and audio frames share the same
+/// encrypted UDP socket, so the receiver needs to know which kind of
+/// payload arrived. bincode prefixes the variant index automatically.
+///
+/// Wire format is positional; both daemons must run the same version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum WireFrame {
+    Input(InputEvent),
+    Audio(AudioFrame),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
     pub capture: bool,
@@ -108,13 +120,49 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // keep alive
     let _cap_alive = cap_started;
 
-    let (event_bcast, _) = broadcast::channel::<InputEvent>(1024);
-    let bcast_for_drain = event_bcast.clone();
+    // Input + audio frames share the same broadcast channel so the
+    // per-peer UDP-send task only has to subscribe once. WireFrame's
+    // tagged variants tell the receiver which payload kind to inject.
+    let (wire_bcast, _) = broadcast::channel::<WireFrame>(1024);
+    let bcast_for_input_drain = wire_bcast.clone();
     tokio::spawn(async move {
         while let Some(ev) = cap_rx.recv().await {
-            let _ = bcast_for_drain.send(ev);
+            let _ = bcast_for_input_drain.send(WireFrame::Input(ev));
         }
-        debug!("capture pump terminated");
+        debug!("input capture pump terminated");
+    });
+
+    // --- Audio sysout capture (Win loopback for Slice 1) ----------------
+    let (audio_cap_tx, mut audio_cap_rx) = mpsc::unbounded_channel::<AudioFrame>();
+    let audio_cap_started = if opts.capture {
+        match mineshare_audio::make_sysout_capture() {
+            Ok(mut cap) => match cap.start(audio_cap_tx) {
+                Ok(()) => {
+                    info!("audio sysout capture started");
+                    Some(cap)
+                }
+                Err(e) => {
+                    warn!(error = %e, "audio sysout capture failed to start");
+                    None
+                }
+            },
+            Err(e) => {
+                info!(reason = %e, "audio sysout capture not available — skipping");
+                None
+            }
+        }
+    } else {
+        info!("audio capture disabled via --no-capture");
+        None
+    };
+    let _audio_cap_alive = audio_cap_started;
+
+    let bcast_for_audio_drain = wire_bcast.clone();
+    tokio::spawn(async move {
+        while let Some(frame) = audio_cap_rx.recv().await {
+            let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
+        }
+        debug!("audio capture pump terminated");
     });
 
     // --- Input injection --------------------------------------------------
@@ -134,6 +182,26 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         Arc::new(NullInject)
     };
 
+    // --- Audio playback ---------------------------------------------------
+    // Playback is built on both sides so either end can render the
+    // peer's sysout. Slice 1 only uses it on the Linux side, but
+    // running it everywhere is harmless if no audio frames arrive.
+    let playback: Arc<dyn AudioPlayback> = if opts.inject {
+        match mineshare_audio::make_playback() {
+            Ok(p) => {
+                info!("audio playback ready");
+                Arc::from(p)
+            }
+            Err(e) => {
+                warn!(error = %e, "audio playback unavailable — sysout from peer will be silent");
+                Arc::new(NullPlayback)
+            }
+        }
+    } else {
+        info!("audio playback disabled via --no-inject");
+        Arc::new(NullPlayback)
+    };
+
     // --- Control listener -------------------------------------------------
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -149,9 +217,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 
     let resp_static = identity.noise_static_priv.clone();
     let resp_inject = inject.clone();
-    let resp_bcast = event_bcast.clone();
+    let resp_playback = playback.clone();
+    let resp_bcast = wire_bcast.clone();
     tokio::spawn(async move {
-        accept_loop(listener, resp_static, resp_inject, resp_bcast).await;
+        accept_loop(listener, resp_static, resp_inject, resp_playback, resp_bcast).await;
     });
 
     // --- mDNS announce + browse ------------------------------------------
@@ -200,7 +269,8 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                 if local_id.0 < peer.device_id.0 {
                     let init_static = init_static.clone();
                     let inject = inject.clone();
-                    let bcast = event_bcast.clone();
+                    let playback = playback.clone();
+                    let bcast = wire_bcast.clone();
                     let known_for_loop = known.clone();
                     let peer_id = peer.device_id;
                     // Reconnect loop: redial after each session ends as long
@@ -219,7 +289,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                     }
                                 }
                             };
-                            match dial_and_run(&peer_now, &init_static, inject.clone(), bcast.clone()).await {
+                            match dial_and_run(&peer_now, &init_static, inject.clone(), playback.clone(), bcast.clone()).await {
                                 Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
                                 Err(e) => warn!(peer = %peer_id, error = %e, "session error — will reconnect"),
                             }
@@ -244,7 +314,8 @@ async fn accept_loop(
     listener: TcpListener,
     static_priv: Vec<u8>,
     inject: Arc<dyn InputInject>,
-    bcast: broadcast::Sender<InputEvent>,
+    playback: Arc<dyn AudioPlayback>,
+    bcast: broadcast::Sender<WireFrame>,
 ) {
     loop {
         match listener.accept().await {
@@ -252,9 +323,10 @@ async fn accept_loop(
                 debug!(%addr, "incoming connection");
                 let key = static_priv.clone();
                 let inject = inject.clone();
+                let playback = playback.clone();
                 let bcast = bcast.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_inbound(stream, &key, inject, bcast).await {
+                    if let Err(e) = handle_inbound(stream, &key, inject, playback, bcast).await {
                         warn!(%addr, error = %e, "inbound peer session ended");
                     }
                 });
@@ -271,7 +343,8 @@ async fn handle_inbound(
     mut stream: TcpStream,
     static_priv: &[u8],
     inject: Arc<dyn InputInject>,
-    bcast: broadcast::Sender<InputEvent>,
+    playback: Arc<dyn AudioPlayback>,
+    bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
     let mut resp = Responder::new(static_priv)?;
@@ -281,14 +354,15 @@ async fn handle_inbound(
         peer_pub = %hex_short(&session.remote_static),
         "inbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, bcast).await
+    run_peer_session(stream, session, inject, playback, bcast).await
 }
 
 async fn dial_and_run(
     peer: &PeerAdvert,
     static_priv: &[u8],
     inject: Arc<dyn InputInject>,
-    bcast: broadcast::Sender<InputEvent>,
+    playback: Arc<dyn AudioPlayback>,
+    bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let addr = peer
         .addresses
@@ -306,7 +380,7 @@ async fn dial_and_run(
         peer_pub = %hex_short(&session.remote_static),
         "outbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, bcast).await
+    run_peer_session(stream, session, inject, playback, bcast).await
 }
 
 /// Drives one peer connection after the Noise handshake.
@@ -319,7 +393,8 @@ async fn run_peer_session(
     mut stream: TcpStream,
     session: NoiseSession,
     inject: Arc<dyn InputInject>,
-    bcast: broadcast::Sender<InputEvent>,
+    playback: Arc<dyn AudioPlayback>,
+    bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
@@ -412,12 +487,16 @@ async fn run_peer_session(
     let udp = Arc::new(udp);
     let stats = Arc::new(SessionStats::default());
 
-    // --- recv → inject ----------------------------------------------------
+    // --- recv → inject / playback ---------------------------------------
     let aead_recv = aead.clone_handle();
     let udp_recv = udp.clone();
     let inject_recv = inject.clone();
+    let playback_recv = playback.clone();
     let stats_recv = stats.clone();
     let recv_handle = tokio::spawn(async move {
+        // Buffer must fit the largest WireFrame: input events are
+        // tiny but Opus frames + AEAD tag + bincode framing top out
+        // around 1.5 KB. 4 KB leaves comfortable headroom.
         let mut buf = vec![0u8; 4096];
         loop {
             match udp_recv.recv_from(&mut buf).await {
@@ -426,13 +505,11 @@ async fn run_peer_session(
                     stats_recv.recv_bytes.fetch_add(n as u64, Ordering::Relaxed);
                     match aead_recv.open(&buf[..n]) {
                         Ok(pt) => {
-                            match bincode::serde::decode_from_slice::<InputEvent, _>(
+                            match bincode::serde::decode_from_slice::<WireFrame, _>(
                                 &pt,
                                 standard(),
                             ) {
-                                Ok((ev, _)) => {
-                                    // Log every 200th event so we can spot-check
-                                    // what's actually arriving without spamming.
+                                Ok((WireFrame::Input(ev), _)) => {
                                     let n = stats_recv.injected.load(Ordering::Relaxed);
                                     if n % 200 == 0 {
                                         tracing::info!(?ev, n, "sample inject event");
@@ -444,7 +521,24 @@ async fn run_peer_session(
                                         stats_recv.injected.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
-                                Err(e) => warn!(error = %e, "decode failed"),
+                                Ok((WireFrame::Audio(frame), _)) => {
+                                    let n = stats_recv.audio_recv.load(Ordering::Relaxed);
+                                    if n % 250 == 0 {
+                                        tracing::info!(
+                                            seq = frame.seq,
+                                            stream = ?frame.stream,
+                                            opus_bytes = frame.opus.len(),
+                                            n,
+                                            "sample audio frame"
+                                        );
+                                    }
+                                    if let Err(e) = playback_recv.enqueue(frame) {
+                                        warn!(error = %e, "audio enqueue failed");
+                                    } else {
+                                        stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "wireframe decode failed"),
                             }
                         }
                         Err(e) => {
@@ -482,6 +576,7 @@ async fn run_peer_session(
                     injected = delta.injected,
                     inject_errs = delta.inject_errs,
                     decrypt_errs = delta.decrypt_errs,
+                    audio_recv = delta.audio_recv,
                     "1-Hz stats"
                 );
             }
@@ -605,6 +700,7 @@ struct SessionStats {
     injected: AtomicU64,
     inject_errs: AtomicU64,
     decrypt_errs: AtomicU64,
+    audio_recv: AtomicU64,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -616,6 +712,7 @@ struct StatsSnapshot {
     injected: u64,
     inject_errs: u64,
     decrypt_errs: u64,
+    audio_recv: u64,
 }
 
 impl SessionStats {
@@ -628,6 +725,7 @@ impl SessionStats {
             injected: self.injected.load(Ordering::Relaxed),
             inject_errs: self.inject_errs.load(Ordering::Relaxed),
             decrypt_errs: self.decrypt_errs.load(Ordering::Relaxed),
+            audio_recv: self.audio_recv.load(Ordering::Relaxed),
         }
     }
 }
@@ -642,6 +740,7 @@ impl StatsSnapshot {
             injected: self.injected.saturating_sub(prev.injected),
             inject_errs: self.inject_errs.saturating_sub(prev.inject_errs),
             decrypt_errs: self.decrypt_errs.saturating_sub(prev.decrypt_errs),
+            audio_recv: self.audio_recv.saturating_sub(prev.audio_recv),
         }
     }
 }
@@ -661,6 +760,17 @@ impl InputInject for NullInject {
         Ok(())
     }
     fn scroll(&self, _dx: f32, _dy: f32) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// No-op playback used when audio output isn't available (no default
+/// device, or running headless). Drops every frame silently so the
+/// daemon stays useful for input-only setups.
+struct NullPlayback;
+
+impl AudioPlayback for NullPlayback {
+    fn enqueue(&self, _frame: AudioFrame) -> Result<()> {
         Ok(())
     }
 }
