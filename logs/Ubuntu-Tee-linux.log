@@ -2,7 +2,7 @@
 host:        Ubuntu-Tee-linux
 os:          linux
 arch:        x86_64
-collected:   2026-05-07T11:20:35.746983575Z
+collected:   2026-05-07T12:11:43.68090123Z
 daemon ver:  0.0.1
 log dir:     /home/tee/.config/MineShare/logs
 device id:   c59b98d5-fec4-4aa0-8855-37a6dbd6f372
@@ -11,7 +11,7 @@ local addrs: [192.168.1.106]
 
 === Daemon log (most recent first) ===
 
---- /home/tee/.config/MineShare/logs/daemon.2026-05-07 (42761 bytes) ---
+--- /home/tee/.config/MineShare/logs/daemon.2026-05-07 (140815 bytes) ---
 2026-05-07T10:57:43.814569Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
 2026-05-07T10:57:43.814608Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
 2026-05-07T10:57:43.814615Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=true inject=false
@@ -273,4 +273,557 @@ local addrs: [192.168.1.106]
 2026-05-07T11:19:56.265489Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52487 sent_pkts=0 sent_bytes=0 recv_pkts=5 recv_bytes=135 injected=5 inject_errs=0 decrypt_errs=0
 2026-05-07T11:19:57.265925Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52487 sent_pkts=0 sent_bytes=0 recv_pkts=108 recv_bytes=2916 injected=108 inject_errs=0 decrypt_errs=0
 2026-05-07T11:19:58.266124Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52487 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T11:32:04.182560Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T11:32:04.182597Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T11:32:04.182605Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=false inject=true
+2026-05-07T11:32:04.182612Z  INFO mineshare_daemon::runtime: capture disabled via --no-capture
+2026-05-07T11:32:04.183050Z  INFO mineshare_input::linux: uinput virtual device created name="MineShare Virtual Input"
+2026-05-07T11:32:04.183057Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T11:32:04.183084Z  INFO mineshare_daemon::runtime: control listener bound port=39637
+2026-05-07T11:32:04.183254Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T11:32:04.945673Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T11:32:04.945801Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T11:32:16.675720Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:60677
+2026-05-07T11:32:16.765907Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:60677 peer_pub=3c533fe3edff
+2026-05-07T11:32:16.765959Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=48794
+2026-05-07T11:32:16.766001Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:60677 local_udp=48794 peer_udp=192.168.1.108:52321 peer_ver=0.0.1
+2026-05-07T11:32:17.485257Z  INFO mineshare_daemon::runtime: peer discovered peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows addrs=[192.168.1.108] port=60676
+2026-05-07T11:32:17.485269Z DEBUG mineshare_daemon::runtime: deferring handshake — peer will initiate peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
+2026-05-07T11:33:41.767861Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=205 recv_bytes=6307 injected=205 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:42.767591Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=188 recv_bytes=5828 injected=188 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:43.767538Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=129 recv_bytes=3999 injected=129 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:44.767119Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=179 recv_bytes=5549 injected=179 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:45.767696Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=119 recv_bytes=3689 injected=119 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:46.768027Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=192 recv_bytes=5952 injected=192 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:47.767966Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=134 recv_bytes=4088 injected=134 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:48.767686Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=118 recv_bytes=3572 injected=118 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:49.767628Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=185 recv_bytes=5651 injected=185 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:50.768126Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=202 recv_bytes=6208 injected=202 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:51.767947Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=130 recv_bytes=4026 injected=130 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:52.767585Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=3025 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:53.767191Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=95 recv_bytes=2871 injected=95 inject_errs=0 decrypt_errs=0
+2026-05-07T11:33:54.767408Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=10 recv_bytes=290 injected=10 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:31.767368Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=39 recv_bytes=1181 injected=39 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:32.767973Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=232 recv_bytes=7192 injected=232 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:33.767279Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=139 recv_bytes=4309 injected=139 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:34.768121Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=44 recv_bytes=1364 injected=44 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:36.767405Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=14 recv_bytes=434 injected=14 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:37.767374Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=24 recv_bytes=744 injected=24 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:38.767753Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=128 recv_bytes=3968 injected=128 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:39.767799Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=207 recv_bytes=6417 injected=207 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:40.767900Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=28 recv_bytes=868 injected=28 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:41.767266Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=211 recv_bytes=6541 injected=211 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:42.767541Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=148 recv_bytes=4588 injected=148 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:43.768040Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=18 recv_bytes=558 injected=18 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:44.768010Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=214 recv_bytes=6634 injected=214 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:45.767905Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=162 recv_bytes=5022 injected=162 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:46.767879Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=115 recv_bytes=3565 injected=115 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:47.768166Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=79 recv_bytes=2449 injected=79 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:48.767818Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=8 recv_bytes=248 injected=8 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:49.767428Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=193 recv_bytes=5983 injected=193 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:50.767439Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=17 recv_bytes=527 injected=17 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:51.767496Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=204 recv_bytes=6324 injected=204 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:52.767487Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=197 recv_bytes=6107 injected=197 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:53.767259Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=20 recv_bytes=616 injected=20 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:54.767587Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=98 recv_bytes=3016 injected=98 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:55.767346Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=122 recv_bytes=3782 injected=122 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:56.767282Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=214 recv_bytes=6598 injected=214 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:57.767842Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=175 recv_bytes=5413 injected=175 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:58.767196Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=168 recv_bytes=5208 injected=168 inject_errs=0 decrypt_errs=0
+2026-05-07T11:34:59.767833Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=124 recv_bytes=3844 injected=124 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:00.767892Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=59 recv_bytes=1829 injected=59 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:01.767449Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=111 recv_bytes=3441 injected=111 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:02.767897Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=6 recv_bytes=162 injected=6 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:03.767889Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:04.768143Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=111 recv_bytes=3441 injected=111 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:05.767770Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=56 recv_bytes=1736 injected=56 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:06.767971Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=115 recv_bytes=3565 injected=115 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:07.767854Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=82 recv_bytes=2542 injected=82 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:51.767432Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=136 recv_bytes=4136 injected=136 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:52.767342Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=213 recv_bytes=6603 injected=213 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:53.767101Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=118 recv_bytes=3658 injected=118 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:54.767578Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=23 recv_bytes=705 injected=23 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:55.767267Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=42 recv_bytes=1302 injected=42 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:56.767808Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=31 recv_bytes=961 injected=31 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:57.767839Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=168 recv_bytes=5170 injected=168 inject_errs=0 decrypt_errs=0
+2026-05-07T11:35:58.768146Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=21 recv_bytes=651 injected=21 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:01.767819Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=108 recv_bytes=3348 injected=108 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:02.767874Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=133 recv_bytes=4123 injected=133 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:03.767911Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=101 recv_bytes=3131 injected=101 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:04.767309Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=122 recv_bytes=3782 injected=122 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:05.768047Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=91 recv_bytes=2769 injected=91 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:06.768074Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=73 recv_bytes=2259 injected=73 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:07.767952Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:46.767198Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=9 recv_bytes=279 injected=9 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:47.767505Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=213 recv_bytes=6515 injected=213 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:48.767216Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=232 recv_bytes=7026 injected=232 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:49.767258Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=191 recv_bytes=5709 injected=191 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:50.767805Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=229 recv_bytes=7099 injected=229 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:51.767599Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=158 recv_bytes=4898 injected=158 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:52.768030Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=36 recv_bytes=1116 injected=36 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:53.767333Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=68 recv_bytes=2108 injected=68 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:54.767701Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=143 recv_bytes=4353 injected=143 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:55.767416Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=122 recv_bytes=3640 injected=122 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:56.767746Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=116 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:57.767245Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=5 recv_bytes=145 injected=5 inject_errs=0 decrypt_errs=0
+2026-05-07T11:36:58.768056Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=29 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:02.767454Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=58 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:24.767536Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=40 recv_bytes=1196 injected=40 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:25.767797Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=191 recv_bytes=5897 injected=191 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:26.768041Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=212 recv_bytes=6572 injected=212 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:27.767801Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=203 recv_bytes=6263 injected=203 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:28.767690Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=173 recv_bytes=5363 injected=173 inject_errs=0 decrypt_errs=0
+2026-05-07T11:37:29.767575Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:60677 sent_pkts=0 sent_bytes=0 recv_pkts=80 recv_bytes=2480 injected=80 inject_errs=0 decrypt_errs=0
+2026-05-07T11:39:23.279276Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:64448
+2026-05-07T11:39:23.375640Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:64448 peer_pub=3c533fe3edff
+2026-05-07T11:39:23.375698Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=44537
+2026-05-07T11:39:23.375740Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:64448 local_udp=44537 peer_udp=192.168.1.108:64088 peer_ver=0.0.1
+2026-05-07T11:40:53.376305Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=65 recv_bytes=2007 injected=65 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:54.376191Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=235 recv_bytes=7259 injected=235 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:55.376362Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=158 recv_bytes=4898 injected=158 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:56.377033Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=155 recv_bytes=4805 injected=155 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:57.376184Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=149 recv_bytes=4619 injected=149 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:58.377174Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=227 recv_bytes=7037 injected=227 inject_errs=0 decrypt_errs=0
+2026-05-07T11:40:59.376179Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=135 recv_bytes=4185 injected=135 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:00.376202Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:01.377054Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:05.376605Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:15.376256Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:24.376993Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:25.376664Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:28.377155Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=12 recv_bytes=324 injected=12 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:29.376770Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=5 recv_bytes=135 injected=5 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:30.376858Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:32.376569Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:41:33.376764Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64448 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:15.713815Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:52130
+2026-05-07T11:44:15.806982Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:52130 peer_pub=3c533fe3edff
+2026-05-07T11:44:15.807033Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=51839
+2026-05-07T11:44:15.807120Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:52130 local_udp=51839 peer_udp=192.168.1.108:60801 peer_ver=0.0.1
+2026-05-07T11:44:39.808833Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=115 recv_bytes=3565 injected=115 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:40.808617Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=190 recv_bytes=5890 injected=190 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:41.809029Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=185 recv_bytes=5735 injected=185 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:42.808783Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=213 recv_bytes=6603 injected=213 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:43.808747Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=160 recv_bytes=4934 injected=160 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:45.808188Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=96 recv_bytes=2976 injected=96 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:46.808196Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=146 recv_bytes=4526 injected=146 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:47.808830Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=240 recv_bytes=7340 injected=240 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:48.809096Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=209 recv_bytes=6401 injected=209 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:49.809102Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=196 recv_bytes=5864 injected=196 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:50.809189Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=7417 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:51.808276Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=192 recv_bytes=5848 injected=192 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:52.809148Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=124 recv_bytes=3844 injected=124 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:53.808513Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=117 recv_bytes=3627 injected=117 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:54.808183Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=144 recv_bytes=4250 injected=144 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:55.808049Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=146 recv_bytes=4488 injected=146 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:56.808672Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=67 recv_bytes=2077 injected=67 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:57.808364Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=70 recv_bytes=2166 injected=70 inject_errs=0 decrypt_errs=0
+2026-05-07T11:44:58.808496Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:00.808867Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=83 recv_bytes=2573 injected=83 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:01.808266Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=233 recv_bytes=7223 injected=233 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:02.809116Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=149 recv_bytes=4453 injected=149 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:03.808331Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=195 recv_bytes=5853 injected=195 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:04.809160Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=76 recv_bytes=2272 injected=76 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:08.808766Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=222 recv_bytes=6562 injected=222 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:09.809170Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=115 recv_bytes=3519 injected=115 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:12.808413Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:13.809101Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=25 recv_bytes=727 injected=25 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:14.808698Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=168 recv_bytes=5190 injected=168 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:15.808563Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=155 recv_bytes=4801 injected=155 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:16.808201Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:17.808615Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=81 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:19.808285Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:21.809104Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=6 recv_bytes=162 injected=6 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:24.808425Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:33.808265Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:34.808277Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:45:38.808276Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:43.808190Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=205 recv_bytes=6169 injected=205 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:44.809119Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=60 recv_bytes=1782 injected=60 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:45.808597Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=139 recv_bytes=4273 injected=139 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:52.808953Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=55 recv_bytes=1705 injected=55 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:53.808330Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=155 recv_bytes=4805 injected=155 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:54.808076Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=112 recv_bytes=3472 injected=112 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:55.808519Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=87 recv_bytes=2697 injected=87 inject_errs=0 decrypt_errs=0
+2026-05-07T11:46:56.808685Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=3061 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T11:47:56.808712Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=109 recv_bytes=3379 injected=109 inject_errs=0 decrypt_errs=0
+2026-05-07T11:47:57.808885Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=81 recv_bytes=2511 injected=81 inject_errs=0 decrypt_errs=0
+2026-05-07T11:47:58.808831Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=80 recv_bytes=2480 injected=80 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:02.808254Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=47 recv_bytes=1457 injected=47 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:03.809106Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1472 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:04.809139Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=37 recv_bytes=1143 injected=37 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:05.808707Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=13 recv_bytes=391 injected=13 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:06.808189Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=90 recv_bytes=2782 injected=90 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:07.809123Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=12 recv_bytes=360 injected=12 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:08.808257Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=36 recv_bytes=1116 injected=36 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:09.808131Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=96 recv_bytes=2976 injected=96 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:10.808490Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=7371 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:11.808688Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=97 recv_bytes=3007 injected=97 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:12.808916Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=50 recv_bytes=1550 injected=50 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:13.808575Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=123 recv_bytes=3813 injected=123 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:14.808594Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1488 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:15.808458Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=101 recv_bytes=3131 injected=101 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:16.808283Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=126 recv_bytes=3906 injected=126 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:17.808766Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=77 recv_bytes=2387 injected=77 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:19.808270Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=79 recv_bytes=2449 injected=79 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:20.808604Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=165 recv_bytes=5115 injected=165 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:21.808355Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=11 recv_bytes=341 injected=11 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:23.808651Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=61 recv_bytes=1845 injected=61 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:46.808194Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=62 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:58.808487Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=131 recv_bytes=4061 injected=131 inject_errs=0 decrypt_errs=0
+2026-05-07T11:48:59.808725Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=107 recv_bytes=3313 injected=107 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:00.809108Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=42 recv_bytes=1290 injected=42 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:02.808524Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=88 recv_bytes=2642 injected=88 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:03.809142Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=29 recv_bytes=899 injected=29 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:04.808887Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=31 recv_bytes=943 injected=31 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:05.808331Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=28 recv_bytes=812 injected=28 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:06.808774Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=55 recv_bytes=1593 injected=55 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:07.808547Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=60 recv_bytes=1740 injected=60 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:08.808357Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:09.808714Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:10.809110Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=125 recv_bytes=3623 injected=125 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:11.808209Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=9 recv_bytes=255 injected=9 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:13.808421Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=42 recv_bytes=1270 injected=42 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:22.808562Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=124 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:43.808907Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=148 recv_bytes=4584 injected=148 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:44.808218Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=38 recv_bytes=1174 injected=38 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:45.808758Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=104 recv_bytes=3220 injected=104 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:46.808281Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:47.808195Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:48.808936Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=75 recv_bytes=2325 injected=75 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:49.808654Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1488 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:50.808844Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=123 recv_bytes=3809 injected=123 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:51.808944Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=72 recv_bytes=2220 injected=72 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:52.808717Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=50 recv_bytes=1538 injected=50 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:53.808732Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=97 recv_bytes=3003 injected=97 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:54.808209Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:55.808303Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=50 recv_bytes=1546 injected=50 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:56.808108Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=52 recv_bytes=1600 injected=52 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:57.808298Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=179 recv_bytes=5549 injected=179 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:58.808256Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=101 recv_bytes=3127 injected=101 inject_errs=0 decrypt_errs=0
+2026-05-07T11:49:59.808252Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=147 recv_bytes=4553 injected=147 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:00.808196Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:02.808974Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=68 recv_bytes=2042 injected=68 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:03.808218Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=13 recv_bytes=399 injected=13 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:18.808716Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=44 recv_bytes=1364 injected=44 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:19.808979Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=82 recv_bytes=2542 injected=82 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:20.809002Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=18 recv_bytes=558 injected=18 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:26.808778Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=82 recv_bytes=2460 injected=82 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:27.808774Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=151 recv_bytes=4605 injected=151 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:28.808207Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:29.809070Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=44 recv_bytes=1332 injected=44 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:35.808552Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=112 recv_bytes=3472 injected=112 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:36.808101Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=240 recv_bytes=7372 injected=240 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:37.808288Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=125 recv_bytes=3827 injected=125 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:38.808280Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=65 recv_bytes=1925 injected=65 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:39.808446Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=37 recv_bytes=1073 injected=37 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:48.808428Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=127 recv_bytes=3853 injected=127 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:49.809147Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=49 recv_bytes=1511 injected=49 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:50.809077Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=124 recv_bytes=3844 injected=124 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:51.809004Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=206 recv_bytes=6386 injected=206 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:52.808206Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=100 recv_bytes=3100 injected=100 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:53.808597Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=11 recv_bytes=341 injected=11 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:54.808263Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:55.809027Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=74 recv_bytes=2294 injected=74 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:56.808849Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=141 recv_bytes=4371 injected=141 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:57.808808Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=7 recv_bytes=209 injected=7 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:58.809049Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=84 recv_bytes=2604 injected=84 inject_errs=0 decrypt_errs=0
+2026-05-07T11:50:59.808527Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=25 recv_bytes=757 injected=25 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:28.808602Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=47 recv_bytes=1457 injected=47 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:29.808848Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=98 recv_bytes=3038 injected=98 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:30.808494Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=109 recv_bytes=3379 injected=109 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:31.809149Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=39 recv_bytes=1209 injected=39 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:32.808247Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=156 recv_bytes=4814 injected=156 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:33.808540Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=160 recv_bytes=4766 injected=160 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:34.808981Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=169 recv_bytes=5047 injected=169 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:35.808044Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=149 recv_bytes=4619 injected=149 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:36.809117Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=175 recv_bytes=5425 injected=175 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:37.808569Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=117 recv_bytes=3627 injected=117 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:38.808325Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=149 recv_bytes=4619 injected=149 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:39.809160Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=87 recv_bytes=2693 injected=87 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:40.808945Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=62 recv_bytes=1914 injected=62 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:41.808189Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=25 recv_bytes=751 injected=25 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:42.808450Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=38 recv_bytes=1174 injected=38 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:45.809069Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=76 recv_bytes=2356 injected=76 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:46.808187Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=34 recv_bytes=1054 injected=34 inject_errs=0 decrypt_errs=0
+2026-05-07T11:52:47.808260Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=67 recv_bytes=2067 injected=67 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:00.808846Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=9 recv_bytes=279 injected=9 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:01.808852Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=130 recv_bytes=4030 injected=130 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:02.808360Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=96 recv_bytes=2976 injected=96 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:03.808212Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=80 recv_bytes=2480 injected=80 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:04.808641Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=74 recv_bytes=2290 injected=74 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:05.808995Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=16 recv_bytes=484 injected=16 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:06.808293Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1472 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:08.808968Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=91 recv_bytes=2761 injected=91 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:09.808341Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=130 recv_bytes=4006 injected=130 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:10.808686Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=203 recv_bytes=6037 injected=203 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:11.808266Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:12.808732Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=2999 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:13.808297Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=83 recv_bytes=2565 injected=83 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:14.809088Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=5 recv_bytes=135 injected=5 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:16.808842Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=81 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:17.809056Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=7 recv_bytes=189 injected=7 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:18.808680Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=10 recv_bytes=270 injected=10 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:19.808662Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:20.809057Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:58.808971Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=81 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T11:54:59.808489Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=81 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:31.808181Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=36 recv_bytes=1116 injected=36 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:32.808715Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=85 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:34.808185Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=121 recv_bytes=3625 injected=121 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:35.808454Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=6 recv_bytes=162 injected=6 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:36.808798Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=34 recv_bytes=1046 injected=34 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:37.808666Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=86 recv_bytes=2666 injected=86 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:39.808322Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=46 recv_bytes=1426 injected=46 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:40.809174Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=84 recv_bytes=2474 injected=84 inject_errs=0 decrypt_errs=0
+2026-05-07T11:56:41.808582Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:52130 sent_pkts=0 sent_bytes=0 recv_pkts=44 recv_bytes=1270 injected=44 inject_errs=0 decrypt_errs=0
+2026-05-07T11:58:03.868953Z  INFO mineshare_daemon::logs: log file appender ready log_dir=/home/tee/.config/MineShare/logs
+2026-05-07T11:58:03.868991Z  INFO mineshare_daemon::identity: loaded existing identity path=/home/tee/.config/MineShare/identity.json
+2026-05-07T11:58:03.869000Z  INFO mineshare_daemon::runtime: MineShare daemon starting device_id=c59b98d5-fec4-4aa0-8855-37a6dbd6f372 name=Ubuntu-Tee os=linux capture=false inject=true
+2026-05-07T11:58:03.869007Z  INFO mineshare_daemon::runtime: capture disabled via --no-capture
+2026-05-07T11:58:03.869579Z  INFO mineshare_input::linux: uinput virtual device created name="MineShare Virtual Input"
+2026-05-07T11:58:03.869587Z  INFO mineshare_daemon::runtime: input inject ready
+2026-05-07T11:58:03.869612Z  INFO mineshare_daemon::runtime: control listener bound port=42997
+2026-05-07T11:58:03.869741Z  INFO mineshare_net::discovery: announced mDNS service instance="Ubuntu-Tee-c59b98d5"
+2026-05-07T11:58:04.652058Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T11:58:04.652154Z DEBUG mineshare_net::discovery: ignoring self advertisement fullname="Ubuntu-Tee-c59b98d5._mineshare._tcp.local."
+2026-05-07T11:58:16.125763Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:54997
+2026-05-07T11:58:16.215903Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:54997 peer_pub=3c533fe3edff
+2026-05-07T11:58:16.215958Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=36472
+2026-05-07T11:58:16.216001Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:54997 local_udp=36472 peer_udp=192.168.1.108:61419 peer_ver=0.0.1
+2026-05-07T11:58:17.018988Z  INFO mineshare_daemon::runtime: peer discovered peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4 name=LAPTOP-4E1649F3 os=windows addrs=[192.168.1.108] port=54996
+2026-05-07T11:58:17.019000Z DEBUG mineshare_daemon::runtime: deferring handshake — peer will initiate peer=5a2243ef-0e6a-4b7b-ab20-1e40f4dea3c4
+2026-05-07T11:58:58.309894Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 722, dy: 777 } n=0
+2026-05-07T11:58:59.217606Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=79 recv_bytes=2449 injected=79 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:00.217189Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=3069 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:00.309189Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 608, dy: 794 } n=200
+2026-05-07T11:59:01.140441Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1027, dy: 807 } n=400
+2026-05-07T11:59:01.216932Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=7471 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:01.971835Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1149, dy: 60 } n=600
+2026-05-07T11:59:02.217700Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=7415 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:02.802682Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 508, dy: 552 } n=800
+2026-05-07T11:59:03.217079Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=240 recv_bytes=7426 injected=240 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:03.650463Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 937, dy: 266 } n=1000
+2026-05-07T11:59:04.217192Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=171 recv_bytes=5301 injected=171 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:05.030215Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2166, dy: 152 } n=1200
+2026-05-07T11:59:05.217594Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=175 recv_bytes=5425 injected=175 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:06.217132Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=89 recv_bytes=2707 injected=89 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:06.708535Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2162, dy: 490 } n=1400
+2026-05-07T11:59:07.217337Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=114 recv_bytes=3534 injected=114 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:08.059291Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2182, dy: 254 } n=1600
+2026-05-07T11:59:08.217581Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=169 recv_bytes=5041 injected=169 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:09.151511Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1821, dy: -65 } n=1800
+2026-05-07T11:59:09.217485Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=198 recv_bytes=5906 injected=198 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:10.217065Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=144 recv_bytes=4448 injected=144 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:10.743408Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2175, dy: 172 } n=2000
+2026-05-07T11:59:11.217659Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=68 recv_bytes=2108 injected=68 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:12.217460Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=137 recv_bytes=4247 injected=137 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:12.651237Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2181, dy: 201 } n=2200
+2026-05-07T11:59:13.217336Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=95 recv_bytes=2911 injected=95 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:14.106639Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2161, dy: 93 } n=2400
+2026-05-07T11:59:14.217182Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=167 recv_bytes=4843 injected=167 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:15.217201Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=166 recv_bytes=5008 injected=166 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:15.249299Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2194, dy: 374 } n=2600
+2026-05-07T11:59:16.217190Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=177 recv_bytes=5411 injected=177 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:16.379998Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2160, dy: 375 } n=2800
+2026-05-07T11:59:17.217257Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=154 recv_bytes=4716 injected=154 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:17.556254Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2163, dy: 128 } n=3000
+2026-05-07T11:59:18.216649Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=157 recv_bytes=4755 injected=157 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:19.028016Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 807, dy: 1125 } n=3200
+2026-05-07T11:59:19.217249Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=127 recv_bytes=3921 injected=127 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:20.217519Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=8 recv_bytes=216 injected=8 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:22.216941Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=166 recv_bytes=5146 injected=166 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:22.294462Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2159, dy: 166 } n=3400
+2026-05-07T11:59:23.217400Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=77 recv_bytes=2387 injected=77 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:30.216723Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=3021 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:30.579391Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 500, dy: 785 } n=3600
+2026-05-07T11:59:31.217350Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=70 recv_bytes=2162 injected=70 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:33.217280Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=104 recv_bytes=3224 injected=104 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:33.869152Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 542, dy: 280 } n=3800
+2026-05-07T11:59:34.216846Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=77 recv_bytes=2387 injected=77 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:35.217099Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:36.217201Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:37.217269Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=37 recv_bytes=1147 injected=37 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:38.217168Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=20 recv_bytes=596 injected=20 inject_errs=0 decrypt_errs=0
+2026-05-07T11:59:46.216970Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=38 recv_bytes=1178 injected=38 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:05.216929Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=21 recv_bytes=651 injected=21 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:05.708006Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 784, dy: 309 } n=4000
+2026-05-07T12:00:06.217530Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=145 recv_bytes=4495 injected=145 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:20.217702Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=31 recv_bytes=961 injected=31 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:21.217125Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=56 recv_bytes=1732 injected=56 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:22.216953Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:24.740421Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 197, dy: 688 } n=4200
+2026-05-07T12:00:25.216936Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=110 recv_bytes=3410 injected=110 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:26.217146Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=102 recv_bytes=3162 injected=102 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:26.938881Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 459, dy: 754 } n=4400
+2026-05-07T12:00:27.216877Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=95 recv_bytes=2945 injected=95 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:28.217191Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=125 recv_bytes=3875 injected=125 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:28.252556Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 348, dy: 822 } n=4600
+2026-05-07T12:00:29.216936Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=63 recv_bytes=1883 injected=63 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:30.217127Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=126 recv_bytes=3876 injected=126 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:31.124334Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 431, dy: 837 } n=4800
+2026-05-07T12:00:31.217051Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=42 recv_bytes=1294 injected=42 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:32.217095Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=78 recv_bytes=2364 injected=78 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:33.032393Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 296, dy: 777 } n=5000
+2026-05-07T12:00:33.217139Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=116 recv_bytes=3586 injected=116 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:34.217593Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=25 recv_bytes=771 injected=25 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:35.217316Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=66 recv_bytes=2034 injected=66 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:35.916246Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2169, dy: 517 } n=5200
+2026-05-07T12:00:36.216818Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=99 recv_bytes=3069 injected=99 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:37.216841Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=143 recv_bytes=4433 injected=143 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:37.424731Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1604, dy: 599 } n=5400
+2026-05-07T12:00:38.217187Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=191 recv_bytes=5921 injected=191 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:38.463324Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2164, dy: 497 } n=5600
+2026-05-07T12:00:39.217677Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=153 recv_bytes=4743 injected=153 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:39.834905Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 2089, dy: 475 } n=5800
+2026-05-07T12:00:40.216772Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=170 recv_bytes=5270 injected=170 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:42.216855Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=108 recv_bytes=3348 injected=108 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:42.536071Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 692, dy: 679 } n=6000
+2026-05-07T12:00:43.217010Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=95 recv_bytes=2945 injected=95 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:44.217029Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=125 recv_bytes=3871 injected=125 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:44.352626Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1267, dy: 724 } n=6200
+2026-05-07T12:00:45.216826Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=72 recv_bytes=2220 injected=72 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:46.217287Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=55 recv_bytes=1705 injected=55 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:47.217354Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=53 recv_bytes=1643 injected=53 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:47.414988Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 301, dy: 856 } n=6400
+2026-05-07T12:00:48.216917Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=128 recv_bytes=3956 injected=128 inject_errs=0 decrypt_errs=0
+2026-05-07T12:00:49.217348Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:54997 sent_pkts=0 sent_bytes=0 recv_pkts=15 recv_bytes=451 injected=15 inject_errs=0 decrypt_errs=0
+2026-05-07T12:01:47.567135Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:53105
+2026-05-07T12:01:47.660854Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:53105 peer_pub=3c533fe3edff
+2026-05-07T12:01:47.660907Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=53421
+2026-05-07T12:01:47.660937Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:53105 local_udp=53421 peer_udp=192.168.1.108:61723 peer_ver=0.0.1
+2026-05-07T12:02:14.069590Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1444, dy: -94 } n=0
+2026-05-07T12:02:14.661927Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=114 recv_bytes=3512 injected=114 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:15.212447Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1442, dy: -273 } n=200
+2026-05-07T12:02:15.662227Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=122 recv_bytes=3782 injected=122 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:16.642071Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 455, dy: -207 } n=400
+2026-05-07T12:02:16.662317Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=168 recv_bytes=5078 injected=168 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:17.662020Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=130 recv_bytes=3894 injected=130 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:18.233648Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1455, dy: -23 } n=600
+2026-05-07T12:02:18.661865Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=131 recv_bytes=3833 injected=131 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:19.661980Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=129 recv_bytes=3911 injected=129 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:19.725867Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 107, dy: 805 } n=800
+2026-05-07T12:02:20.661805Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=64 recv_bytes=1918 injected=64 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:21.661826Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:02:59.662713Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:03.662097Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:04.662123Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=126 recv_bytes=3906 injected=126 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:06.661945Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=5 recv_bytes=155 injected=5 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:06.683696Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 260, dy: 337 } n=1000
+2026-05-07T12:03:07.662399Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1432 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:10.662066Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=42 recv_bytes=1266 injected=42 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:11.662333Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=70 recv_bytes=2170 injected=70 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:11.891757Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 309, dy: 319 } n=1200
+2026-05-07T12:03:12.662292Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=75 recv_bytes=2325 injected=75 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:13.661735Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=70 recv_bytes=2170 injected=70 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:14.662645Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=124 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:21.661738Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=94 recv_bytes=2752 injected=94 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:21.801207Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 532, dy: 117 } n=1400
+2026-05-07T12:03:22.661846Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=48 recv_bytes=1386 injected=48 inject_errs=0 decrypt_errs=0
+2026-05-07T12:03:23.661934Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=9 recv_bytes=261 injected=9 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:43.661676Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=129 recv_bytes=3999 injected=129 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:43.729266Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1294, dy: -304 } n=1600
+2026-05-07T12:04:44.662682Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=195 recv_bytes=5851 injected=195 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:44.913248Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1447, dy: -44 } n=1800
+2026-05-07T12:04:45.662242Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=158 recv_bytes=4582 injected=158 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:45.951763Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 289, dy: 7 } n=2000
+2026-05-07T12:04:46.662654Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=179 recv_bytes=5317 injected=179 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:47.662279Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=38 recv_bytes=1132 injected=38 inject_errs=0 decrypt_errs=0
+2026-05-07T12:04:48.662372Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:53105 sent_pkts=0 sent_bytes=0 recv_pkts=33 recv_bytes=957 injected=33 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:08.478725Z DEBUG mineshare_daemon::runtime: incoming connection addr=192.168.1.108:64461
+2026-05-07T12:08:08.568719Z  INFO mineshare_daemon::runtime: inbound Noise XX handshake completed peer_addr=192.168.1.108:64461 peer_pub=3c533fe3edff
+2026-05-07T12:08:08.568772Z DEBUG mineshare_daemon::runtime: local UDP socket bound for peer local_udp_port=36524
+2026-05-07T12:08:08.568802Z  INFO mineshare_daemon::runtime: input UDP channel established peer_addr=192.168.1.108:64461 local_udp=36524 peer_udp=192.168.1.108:57742 peer_ver=0.0.1
+2026-05-07T12:08:37.701425Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 100, dy: -100 } n=0
+2026-05-07T12:08:38.570234Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=102 recv_bytes=2754 injected=102 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:38.980495Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -6, dy: 2 } n=200
+2026-05-07T12:08:39.570473Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=235 recv_bytes=6345 injected=235 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:39.832813Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: 0 } n=400
+2026-05-07T12:08:40.570155Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=166 recv_bytes=4482 injected=166 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:41.570069Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=95 recv_bytes=2565 injected=95 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:45.974864Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 14, dy: -5 } n=600
+2026-05-07T12:08:46.569729Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=126 recv_bytes=3402 injected=126 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:46.889486Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -2, dy: -5 } n=800
+2026-05-07T12:08:47.570277Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=240 recv_bytes=6480 injected=240 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:47.728856Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: 1 } n=1000
+2026-05-07T12:08:48.570691Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=142 recv_bytes=3834 injected=142 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:49.010735Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: 2 } n=1200
+2026-05-07T12:08:49.569756Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=209 recv_bytes=5643 injected=209 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:50.198022Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: -2 } n=1400
+2026-05-07T12:08:50.569775Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=173 recv_bytes=4671 injected=173 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:51.037800Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: -17 } n=1600
+2026-05-07T12:08:51.570161Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=6507 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:51.868521Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -6, dy: -4 } n=1800
+2026-05-07T12:08:52.570190Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=240 recv_bytes=6480 injected=240 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:52.699580Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 2 } n=2000
+2026-05-07T12:08:53.569731Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=137 recv_bytes=3699 injected=137 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:54.569790Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=17 recv_bytes=459 injected=17 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:55.570531Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=31 recv_bytes=837 injected=31 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:56.570478Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=3 recv_bytes=81 injected=3 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:57.570256Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=1 recv_bytes=27 injected=1 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:58.570569Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T12:08:59.341880Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -19, dy: 2 } n=2200
+2026-05-07T12:08:59.570351Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=58 recv_bytes=1566 injected=58 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:00.569968Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:01.509507Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 9, dy: 0 } n=2400
+2026-05-07T12:09:01.569842Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=191 recv_bytes=5157 injected=191 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:02.570590Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=144 recv_bytes=3888 injected=144 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:03.570558Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=28 recv_bytes=756 injected=28 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:04.139250Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 0, dy: -2 } n=2600
+2026-05-07T12:09:04.569828Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=18 recv_bytes=486 injected=18 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:05.570170Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:10.495490Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: 0 } n=2800
+2026-05-07T12:09:10.570032Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=210 recv_bytes=5670 injected=210 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:11.570347Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=156 recv_bytes=4212 injected=156 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:12.489765Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: -1 } n=3000
+2026-05-07T12:09:12.569840Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=46 recv_bytes=1242 injected=46 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:13.391553Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: -2 } n=3200
+2026-05-07T12:09:13.570008Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=224 recv_bytes=6048 injected=224 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:14.570506Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=91 recv_bytes=2457 injected=91 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:15.570319Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=57 recv_bytes=1539 injected=57 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:15.609940Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=3400
+2026-05-07T12:09:16.569680Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=162 recv_bytes=4374 injected=162 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:16.764825Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 4, dy: 0 } n=3600
+2026-05-07T12:09:17.569761Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=194 recv_bytes=5238 injected=194 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:17.861502Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -7, dy: -2 } n=3800
+2026-05-07T12:09:18.570653Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=120 recv_bytes=3240 injected=120 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:19.570686Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=96 recv_bytes=2592 injected=96 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:19.727465Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -10, dy: 0 } n=4000
+2026-05-07T12:09:20.570272Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=157 recv_bytes=4239 injected=157 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:21.570565Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=54 recv_bytes=1458 injected=54 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:39.569780Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=10 recv_bytes=270 injected=10 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:39.638359Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 3, dy: 0 } n=4200
+2026-05-07T12:09:40.569674Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=191 recv_bytes=5157 injected=191 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:40.765180Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 0 } n=4400
+2026-05-07T12:09:41.569779Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=66 recv_bytes=1782 injected=66 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:42.570229Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:43.570390Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=8 recv_bytes=216 injected=8 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:44.570720Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=144 recv_bytes=3888 injected=144 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:44.630634Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: -2 } n=4600
+2026-05-07T12:09:45.569726Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=33 recv_bytes=891 injected=33 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:46.569909Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:47.570134Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:48.570186Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=4 recv_bytes=108 injected=4 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:49.379422Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 11, dy: -7 } n=4800
+2026-05-07T12:09:49.570559Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=210 recv_bytes=5670 injected=210 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:50.280978Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: -3 } n=5000
+2026-05-07T12:09:50.570157Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=202 recv_bytes=5454 injected=202 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:51.570070Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=21 recv_bytes=567 injected=21 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:52.570589Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=2 recv_bytes=54 injected=2 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:53.570570Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=94 recv_bytes=2538 injected=94 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:53.717969Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -11, dy: -4 } n=5200
+2026-05-07T12:09:54.570446Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=175 recv_bytes=4725 injected=175 inject_errs=0 decrypt_errs=0
+2026-05-07T12:09:54.985632Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -5, dy: 1 } n=5400
+2026-05-07T12:09:55.570615Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=108 recv_bytes=2916 injected=108 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:15.569787Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=69 recv_bytes=1863 injected=69 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:16.213250Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -1, dy: 0 } n=5600
+2026-05-07T12:11:16.570351Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=92 recv_bytes=2484 injected=92 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:17.570318Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=164 recv_bytes=4428 injected=164 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:17.683440Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 1, dy: 1 } n=5800
+2026-05-07T12:11:18.569751Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=104 recv_bytes=2808 injected=104 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:21.391974Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: 17, dy: 1 } n=6000
+2026-05-07T12:11:21.570551Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=166 recv_bytes=4482 injected=166 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:22.222532Z  INFO mineshare_daemon::runtime: sample inject event ev=MouseMove { dx: -3, dy: 3 } n=6200
+2026-05-07T12:11:22.570068Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=241 recv_bytes=6507 injected=241 inject_errs=0 decrypt_errs=0
+2026-05-07T12:11:23.570125Z  INFO mineshare_daemon::runtime: 1-Hz stats peer=192.168.1.108:64461 sent_pkts=0 sent_bytes=0 recv_pkts=51 recv_bytes=1377 injected=51 inject_errs=0 decrypt_errs=0
 
