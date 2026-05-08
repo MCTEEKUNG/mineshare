@@ -44,6 +44,10 @@ pub struct StatusSnapshot {
     /// True when the peer is driving us — we're a passive
     /// receiver, our cursor is grabbed.
     pub peer_in_remote: bool,
+    /// True when game-mode lock is active — edge crossing /
+    /// auto-handover are paused; only the Ctrl+Alt+R hotkey can
+    /// move between machines.
+    pub input_locked: bool,
 }
 
 pub fn snapshot() -> StatusSnapshot {
@@ -59,6 +63,7 @@ pub fn snapshot() -> StatusSnapshot {
         decrypt_errs: DECRYPT_ERRS.load(Ordering::Relaxed),
         local_in_remote: mineshare_input::local_in_remote(),
         peer_in_remote: mineshare_input::peer_in_remote(),
+        input_locked: mineshare_input::is_input_locked(),
     }
 }
 

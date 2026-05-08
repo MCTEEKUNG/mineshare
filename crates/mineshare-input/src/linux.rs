@@ -389,6 +389,20 @@ fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEve
                         continue;
                     }
 
+                    // Hotkey: Ctrl+Alt+L toggles game-mode lock —
+                    // pins input to this PC so accidental edge
+                    // crosses during gameplay don't yank focus.
+                    if down
+                        && key == EvKey::KEY_L
+                        && MOD_CTRL.load(Ordering::Relaxed)
+                        && MOD_ALT.load(Ordering::Relaxed)
+                    {
+                        let next = !super::is_input_locked();
+                        info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
+                        super::set_input_locked(next);
+                        continue;
+                    }
+
                     // Keystrokes and mouse buttons follow the cursor.
                     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
                         if let Some(btn) = button_from_key(key) {
@@ -492,6 +506,14 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
             ),
         };
         if let Some(over) = overshoot {
+            // Game-mode lock: pretend the press never happened.
+            // We still update CURSOR_X/Y above so the estimate
+            // self-syncs at the clamp; we just don't trip the
+            // FSM into Remote.
+            if super::is_input_locked() {
+                LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                return;
+            }
             let threshold = if super::peer_side().is_horizontal() {
                 ENTER_PRESSURE_HORIZ_PX
             } else {

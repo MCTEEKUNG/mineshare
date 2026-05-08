@@ -53,6 +53,11 @@ struct DevicesSnapshot {
 }
 
 #[tauri::command]
+fn set_input_lock(locked: bool) {
+    mineshare_input::set_input_locked(locked);
+}
+
+#[tauri::command]
 fn list_audio_devices() -> DevicesSnapshot {
     DevicesSnapshot {
         outputs: mineshare_audio::list_output_devices(),
@@ -90,6 +95,7 @@ pub fn run() {
             get_audio_status,
             set_audio_toggle,
             list_audio_devices,
+            set_input_lock,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

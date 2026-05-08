@@ -113,6 +113,33 @@ pub enum RemoteEvent {
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
 static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 
+/// "Game mode" — when on, edge detection / press gestures / auto
+/// cursor-handover are all disabled and the bridge stays pinned
+/// to the local machine. The Ctrl+Alt+R hotkey still works as a
+/// deliberate escape hatch (the user can ALWAYS leave or enter
+/// Remote with the keyboard) and peer-driven auto-release on
+/// real local HW also still fires. Persisted via the daemon's
+/// AppData config, toggled via the Ctrl+Alt+L hotkey or the
+/// Status tab in the GUI.
+static INPUT_LOCKED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_input_locked() -> bool {
+    INPUT_LOCKED.load(Ordering::Acquire)
+}
+
+pub fn set_input_locked(v: bool) {
+    let prev = INPUT_LOCKED.swap(v, Ordering::AcqRel);
+    if prev != v {
+        tracing::info!(locked = v, "input lock toggled");
+        if v {
+            // Engaging the lock while in Remote drops us back to
+            // local immediately so the user isn't stuck driving
+            // the peer with no edge-crossing way back.
+            force_local_exit_remote();
+        }
+    }
+}
+
 /// Which side of the local screen the peer monitor is "stuck to"
 /// in the user's physical desk arrangement. The platform-specific
 /// capture modules read this to decide which edge of our display

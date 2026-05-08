@@ -18,6 +18,7 @@ type Status = {
   decrypt_errs: number;
   local_in_remote: boolean;
   peer_in_remote: boolean;
+  input_locked: boolean;
 };
 
 type Tab = "status" | "layout" | "devices" | "audio" | "hotkeys" | "advanced";
@@ -71,7 +72,12 @@ export default function App() {
           <ConnectionPill status={status} error={error} />
         </header>
 
-        {tab === "status" && status ? <StatusGrid s={status} /> : null}
+        {tab === "status" && status ? (
+          <>
+            <GameLockCard s={status} onChange={(v) => invoke("set_input_lock", { locked: v })} />
+            <StatusGrid s={status} />
+          </>
+        ) : null}
         {tab === "layout" ? <LayoutPage /> : null}
         {tab === "devices" ? <DevicesPage /> : null}
         {tab === "audio" ? <AudioPage /> : null}
@@ -108,6 +114,52 @@ function ConnectionPill({
       <span className="size-2 rounded-full bg-emerald-500" />
       paired with {status.peer_addr}
     </span>
+  );
+}
+
+function GameLockCard({
+  s,
+  onChange,
+}: {
+  s: Status;
+  onChange: (v: boolean) => void;
+}) {
+  const locked = s.input_locked;
+  return (
+    <div
+      className={
+        "rounded-lg border p-4 mb-6 flex items-center justify-between transition-colors " +
+        (locked
+          ? "border-amber-300 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/30"
+          : "border-neutral-200 dark:border-neutral-800")
+      }
+    >
+      <div>
+        <p className="text-sm font-semibold flex items-center gap-2">
+          {locked ? "🔒 Game mode — input pinned to this PC" : "Game mode — off"}
+        </p>
+        <p className="text-xs text-neutral-500 mt-1 max-w-prose">
+          When on, edge crossing and auto-handover are disabled so an
+          accidental cursor swing during a fullscreen game can't yank
+          your keyboard to the other machine. Ctrl+Alt+R still works
+          as a manual override.{" "}
+          <span className="text-neutral-400">
+            Toggle with <kbd className="font-mono">Ctrl+Alt+L</kbd>.
+          </span>
+        </p>
+      </div>
+      <button
+        onClick={() => onChange(!locked)}
+        className={
+          "rounded-md px-4 py-2 text-sm font-medium transition-colors " +
+          (locked
+            ? "bg-amber-500 hover:bg-amber-600 text-white"
+            : "border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-900")
+        }
+      >
+        {locked ? "Unlock" : "Lock"}
+      </button>
+    </div>
   );
 }
 

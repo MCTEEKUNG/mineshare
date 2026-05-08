@@ -33,12 +33,14 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION,
-    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos,
-    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CURSORINFO, CURSOR_SHOWING, CallNextHookEx, DispatchMessageW, GetClipCursor, GetCursorInfo,
+    GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+    SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
+use windows::Win32::Foundation::RECT;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
@@ -76,6 +78,10 @@ const SCAN_ALT: u32 = 0x38;
 /// Hotkey: Ctrl+Alt+R forces exit_remote regardless of cursor position.
 /// Useful when remote-mode gets stuck (e.g. peer disconnected mid-session).
 const SCAN_HOTKEY: u32 = 0x13; // R
+/// Hotkey: Ctrl+Alt+L toggles game-mode lock — pins all input to
+/// this PC so accidental edge crosses during fullscreen gameplay
+/// don't yank focus.
+const SCAN_HOTKEY_LOCK: u32 = 0x26; // L
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -253,7 +259,78 @@ impl InputCapture for HookCapture {
             .name("win-input-hooks".into())
             .spawn(|| unsafe { hook_thread() })
             .context("spawn hook thread")?;
+
+        // Game auto-detect: a separate poll thread watches the
+        // visible-cursor flag + the clip-cursor rect. When a
+        // foreground app hides or confines the cursor (the
+        // signature of fullscreen FPS / GTA / Minecraft mouse
+        // capture), we auto-engage the input lock so an
+        // accidental edge cross during gameplay can't yank focus
+        // to the peer. We deliberately only set/clear an
+        // *auto* flag, separate from the manual lock — the user's
+        // explicit Ctrl+Alt+L override always wins.
+        thread::Builder::new()
+            .name("win-game-detect".into())
+            .spawn(|| game_detect_thread())
+            .context("spawn game-detect thread")?;
         Ok(())
+    }
+}
+
+/// Polls the OS cursor visibility + clip-rect state so the input
+/// lock auto-engages when a fullscreen game has captured the
+/// pointer. Manual `set_input_locked(true)` from the GUI / hotkey
+/// keeps precedence — we only flip the lock when the auto state
+/// actually changes, and we never override a user-engaged lock.
+fn game_detect_thread() {
+    use std::sync::atomic::AtomicBool;
+    static AUTO_ENGAGED: AtomicBool = AtomicBool::new(false);
+    let poll_ms = std::time::Duration::from_millis(250);
+    loop {
+        std::thread::sleep(poll_ms);
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        let cursor_hidden = unsafe { GetCursorInfo(&mut ci) }.is_ok()
+            && (ci.flags.0 & CURSOR_SHOWING.0) == 0;
+
+        let mut clip = RECT::default();
+        let cursor_clipped = unsafe { GetClipCursor(&mut clip) }.is_ok() && {
+            let w = SCREEN_W.load(Ordering::Relaxed);
+            let h = SCREEN_H.load(Ordering::Relaxed);
+            // OS default clip is the full virtual desktop. A real
+            // game-clipped rect is strictly smaller than the
+            // primary display.
+            (clip.right - clip.left) < w || (clip.bottom - clip.top) < h
+        };
+
+        let should_lock = cursor_hidden || cursor_clipped;
+        let was_engaged = AUTO_ENGAGED.load(Ordering::Acquire);
+        if should_lock != was_engaged {
+            AUTO_ENGAGED.store(should_lock, Ordering::Release);
+            // Only flip the public lock if the user hasn't already
+            // engaged it manually — we don't want auto-detect to
+            // *unlock* a user-locked session when they alt-tab out
+            // of a game momentarily.
+            if should_lock {
+                if !super::is_input_locked() {
+                    info!(
+                        cursor_hidden,
+                        cursor_clipped, "game auto-detect — engaging lock"
+                    );
+                    super::set_input_locked(true);
+                }
+            } else {
+                // Auto-disengage only if WE were the ones that
+                // engaged it. Otherwise leave the user's manual
+                // lock alone.
+                if super::is_input_locked() && was_engaged {
+                    info!("game auto-detect — releasing lock");
+                    super::set_input_locked(false);
+                }
+            }
+        }
     }
 }
 
@@ -325,7 +402,12 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 LAST_Y.store(y, Ordering::Relaxed);
                 // Edge to watch depends on layout. We treat hitting
                 // the configured boundary edge as the trigger.
-                let crossed_edge = last_x != i32::MIN
+                // Game-mode lock pins input to this PC — skip the
+                // edge check entirely so accidental cursor moves
+                // during fullscreen play don't yank focus to the
+                // peer. Ctrl+Alt+R still works as a manual override.
+                let crossed_edge = !super::is_input_locked()
+                    && last_x != i32::MIN
                     && match super::peer_side() {
                         super::PeerSide::Right => last_x < w - 1 && x >= w - 1,
                         super::PeerSide::Left => last_x > 0 && x <= 0,
@@ -494,6 +576,18 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
                 };
                 enter_remote(entry_y);
             }
+            return LRESULT(1);
+        }
+
+        // Hotkey: Ctrl+Alt+L toggles game-mode lock.
+        if down
+            && scan == SCAN_HOTKEY_LOCK
+            && MOD_CTRL.load(Ordering::Relaxed)
+            && MOD_ALT.load(Ordering::Relaxed)
+        {
+            let next = !super::is_input_locked();
+            info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
+            super::set_input_locked(next);
             return LRESULT(1);
         }
 

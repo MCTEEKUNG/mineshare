@@ -19,6 +19,11 @@ export default function HotkeysPage() {
           name="Toggle Remote"
           desc="Three-way: enter Remote / exit Remote on local / ask peer to release if peer holds Remote."
         />
+        <Row
+          combo={["Ctrl", "Alt", "L"]}
+          name="Game-mode lock"
+          desc="Pins input to this PC. Edge crossing and auto-handover pause; Ctrl+Alt+R still works as a manual escape hatch. On Windows, the bridge also auto-engages this when a fullscreen app captures or hides the cursor."
+        />
       </div>
     </section>
   );
