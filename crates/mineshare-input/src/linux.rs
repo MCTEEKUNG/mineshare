@@ -59,14 +59,19 @@ const EXIT_BUFFER_PX: i32 = 100;
 /// can't teleport the peer cursor across its screen. 30px keeps the
 /// cursor smooth even with high-DPI peers and aggressive acceleration.
 const MAX_DELTA_PX: i32 = 30;
-/// Cumulative leftward overshoot past the (estimated) left edge before
-/// we hand control to the peer. The OS clamps the real cursor at the
-/// physical screen edge but evdev keeps reporting `REL_X` events from
-/// the still-moving HW; we mirror that with a clamped CURSOR_X estimate
-/// and treat sustained "raw_x < 0" overshoot as the user actively
-/// pushing against the edge. 200 px is a deliberate press without
-/// being so much that it feels sticky.
-const ENTER_PRESSURE_PX: i32 = 200;
+/// Cumulative overshoot past the configured boundary edge before we
+/// hand control to the peer. The OS clamps the real cursor at the
+/// physical screen edge but evdev keeps reporting deltas from the
+/// still-moving HW; we mirror that with clamped CURSOR_X / CURSOR_Y
+/// estimates and treat sustained overshoot as the user actively
+/// pushing against the edge.
+///
+/// Two thresholds so the gesture feels symmetric on both axes —
+/// the vertical extent of a 1920×1080 desktop is roughly half the
+/// horizontal one, so the same 200 px feels twice as sticky on
+/// top/bottom edges. Scale the trigger by the actual extent.
+const ENTER_PRESSURE_HORIZ_PX: i32 = 200;
+const ENTER_PRESSURE_VERT_PX: i32 = 110;
 
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
@@ -148,6 +153,20 @@ fn exit_remote() {
 
 pub fn local_in_remote() -> bool {
     CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+}
+
+/// Called by `mineshare_input::set_peer_side` whenever the user
+/// flips the layout via the GUI. Wipes the press counter and re-
+/// centres the cursor-position estimate so the next overshoot
+/// detection has a sane baseline — without this the user would
+/// have to traverse most of the screen on the new axis to
+/// re-trigger.
+pub fn reset_after_side_change() {
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    CURSOR_X.store(w / 2, Ordering::Relaxed);
+    CURSOR_Y.store(h / 2, Ordering::Relaxed);
+    LEFT_PRESSURE.store(0, Ordering::Relaxed);
 }
 
 pub fn force_exit_remote() {
@@ -473,11 +492,16 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
             ),
         };
         if let Some(over) = overshoot {
+            let threshold = if super::peer_side().is_horizontal() {
+                ENTER_PRESSURE_HORIZ_PX
+            } else {
+                ENTER_PRESSURE_VERT_PX
+            };
             let pressure = LEFT_PRESSURE.fetch_add(over, Ordering::Relaxed) + over;
-            if pressure >= ENTER_PRESSURE_PX {
+            if pressure >= threshold {
                 info!(
                     pressure,
-                    threshold = ENTER_PRESSURE_PX,
+                    threshold,
                     side = ?super::peer_side(),
                     "edge press — entering remote (linux)"
                 );

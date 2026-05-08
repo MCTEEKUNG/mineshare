@@ -83,13 +83,18 @@ export default function LayoutPage() {
 
 /* ------------------------------------------------------------------ */
 
-const CANVAS_W = 560;
-const CANVAS_H = 360;
-const LOCAL_W = 220;
-const LOCAL_H = 138; // 16:10 aspect-ish, generic
-const PEER_W = 200;
-const PEER_H = 125;
-const GAP = 18;
+// Canvas large enough to hold the local tile centred + the peer
+// tile flush against any of the four edges with breathing room.
+// Required width  = LOCAL_W + 2*GAP + 2*PEER_W + margins
+// Required height = LOCAL_H + 2*GAP + 2*PEER_H + margins
+const LOCAL_W = 200;
+const LOCAL_H = 125;
+const PEER_W = 170;
+const PEER_H = 106;
+const GAP = 16;
+const MARGIN = 24;
+const CANVAS_W = LOCAL_W + 2 * GAP + 2 * PEER_W + 2 * MARGIN; // 580
+const CANVAS_H = LOCAL_H + 2 * GAP + 2 * PEER_H + 2 * MARGIN; // 417
 /** Pixels of free-drag distance from the local tile's center
  *  beyond which we treat the gesture as "moving toward an edge". */
 const SNAP_THRESHOLD = 40;

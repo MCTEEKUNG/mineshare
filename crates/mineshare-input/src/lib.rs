@@ -147,8 +147,19 @@ pub fn peer_side() -> PeerSide {
 }
 
 pub fn set_peer_side(side: PeerSide) {
-    PEER_SIDE.store(side as u8, Ordering::Release);
-    tracing::info!(?side, "peer side updated");
+    let prev = PEER_SIDE.swap(side as u8, Ordering::AcqRel);
+    if prev != side as u8 {
+        tracing::info!(?side, "peer side updated");
+        // Stale press accumulator from the previous side would
+        // otherwise leak: a left-edge counter doesn't mean
+        // anything once the user has switched to top, etc. Same
+        // for the cursor-position estimate on Linux — re-seed it
+        // to mid-screen so the next overshoot detection has a
+        // sane baseline regardless of where the user's real
+        // cursor actually is right now.
+        #[cfg(target_os = "linux")]
+        linux::reset_after_side_change();
+    }
 }
 
 /// Daemon registers a channel here once the encrypted control session is
