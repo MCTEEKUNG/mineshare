@@ -158,6 +158,10 @@ fn exit_remote(restore_y: i32) {
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
+pub fn local_in_remote() -> bool {
+    CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+}
+
 pub fn force_exit_remote() {
     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
         let h = SCREEN_H.load(Ordering::Relaxed);

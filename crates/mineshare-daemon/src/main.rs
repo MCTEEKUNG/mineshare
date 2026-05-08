@@ -1,4 +1,6 @@
-//! MineShare daemon — M0.
+//! MineShare daemon — thin clap entry point. All real work lives
+//! in the `mineshare_daemon` library so the Tauri GUI shell can
+//! embed the runtime without re-implementing it.
 //!
 //! Subcommands:
 //!   (default) / `run`      Run the daemon (mDNS announce + browse + Noise XX handshake)
@@ -12,14 +14,9 @@
 // for `cargo run` ergonomics.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod clipboard;
-mod collect;
-mod identity;
-mod logs;
-mod runtime;
-
 use anyhow::Result;
 use clap::Parser;
+use mineshare_daemon::{collect, runtime};
 
 #[derive(Parser, Debug)]
 #[command(

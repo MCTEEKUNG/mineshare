@@ -127,6 +127,26 @@ pub fn clear_remote_event_sender() {
 /// mode, in which case the local capture must refuse to enter Remote
 /// itself (otherwise both ends would forward each other's HW input and
 /// the cursors fight on both screens).
+/// Returns true if *we* (the local capture) have entered Remote
+/// mode and are forwarding HW input to the peer. The platform
+/// modules each maintain their own cursor-mode state machine; this
+/// helper queries whichever one is compiled in. Used by the GUI
+/// shell's status snapshot.
+pub fn local_in_remote() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::local_in_remote()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::local_in_remote()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
 pub fn peer_in_remote() -> bool {
     PEER_IN_REMOTE.load(Ordering::Acquire)
 }

@@ -132,6 +132,10 @@ fn exit_remote() {
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
+pub fn local_in_remote() -> bool {
+    CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+}
+
 pub fn force_exit_remote() {
     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
         info!("force_exit_remote — peer asked us to release");

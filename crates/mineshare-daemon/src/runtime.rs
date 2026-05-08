@@ -518,6 +518,7 @@ async fn run_peer_session(
 ) -> Result<()> {
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
+    crate::status::set_peer_connected(peer_addr.to_string(), None);
 
     let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
     let local_udp_port = udp.local_addr()?.port();
@@ -805,6 +806,7 @@ async fn run_peer_session(
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::set_peer_in_remote(false);
     mineshare_input::clear_remote_event_sender();
+    crate::status::clear_peer_connected();
     Ok(())
 }
 

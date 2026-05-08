@@ -19,11 +19,16 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 
-# Wire the workspace crates so the Tauri backend can drive the daemon directly
-# (single-process for M0; split into separate daemon process in M4).
-mineshare-core = { path = "../../crates/mineshare-core" }
-mineshare-net  = { path = "../../crates/mineshare-net" }
-mineshare-ipc  = { path = "../../crates/mineshare-ipc" }
+# Wire the workspace crates so the Tauri backend can drive the daemon
+# directly. M5 rewires the GUI to embed the full daemon runtime
+# (capture + audio + clipboard + control) instead of the M0
+# discovery-only prototype, so the same binary serves as both the
+# headless bridge and its UI.
+mineshare-core   = { path = "../../crates/mineshare-core" }
+mineshare-net    = { path = "../../crates/mineshare-net" }
+mineshare-ipc    = { path = "../../crates/mineshare-ipc" }
+mineshare-input  = { path = "../../crates/mineshare-input" }
+mineshare-daemon = { path = "../../crates/mineshare-daemon" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
