@@ -5,6 +5,7 @@
 //!   `collect [--push]`     Bundle recent logs + system info into `logs/<hostname>.log`,
 //!                          optionally git-add/commit/push to the current repo.
 
+mod clipboard;
 mod collect;
 mod identity;
 mod logs;

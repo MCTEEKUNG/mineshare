@@ -29,6 +29,7 @@ dirs = "6"
 clap = { version = "4", features = ["derive"] }
 time = { workspace = true }
 bincode = { workspace = true }
+arboard = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hostname = "0.4"

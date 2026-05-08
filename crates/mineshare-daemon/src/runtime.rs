@@ -87,6 +87,11 @@ enum ControlMsg {
     /// `force_local_exit_remote()` and then send `ReleaseControl`
     /// from the resulting `Exited` event.
     ForceRelease,
+    /// Peer's clipboard changed — apply the text on this side. Bound
+    /// to 64 KB at the watcher to keep oversized pastes from
+    /// flooding the control channel; receivers should also sanity-
+    /// check length before applying.
+    ClipboardText(String),
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -544,17 +549,29 @@ async fn run_peer_session(
     // ControlMsg → set_peer_in_remote) in parallel after PortAnnounce.
     let (mut tcp_read, mut tcp_write) = stream.into_split();
 
-    // Writer task: capture-side RemoteEvent → ControlMsg over TCP.
+    // Writer task: drain both input-RemoteEvent and clipboard-text
+    // changes, encode each as a `ControlMsg`, and send over the
+    // encrypted TCP channel. We `select!` between the two channels
+    // so neither side starves the other.
     let (rev_tx, mut rev_rx) =
         tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
     mineshare_input::set_remote_event_sender(rev_tx);
+    let (clip_tx, mut clip_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    crate::clipboard::ensure_watcher(clip_tx);
     let aead_writer = aead.clone_handle();
     let writer_handle = tokio::spawn(async move {
-        while let Some(ev) = rev_rx.recv().await {
-            let msg = match ev {
-                mineshare_input::RemoteEvent::Entered => ControlMsg::TakeControl,
-                mineshare_input::RemoteEvent::Exited => ControlMsg::ReleaseControl,
-                mineshare_input::RemoteEvent::RequestPeerExit => ControlMsg::ForceRelease,
+        loop {
+            let msg = tokio::select! {
+                ev = rev_rx.recv() => match ev {
+                    Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
+                    Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
+                    Some(mineshare_input::RemoteEvent::RequestPeerExit) => ControlMsg::ForceRelease,
+                    None => break,
+                },
+                clip = clip_rx.recv() => match clip {
+                    Some(text) => ControlMsg::ClipboardText(text),
+                    None => break,
+                },
             };
             if let Err(e) = write_encrypted(&mut tcp_write, &aead_writer, &msg).await {
                 warn!(error = %e, "control writer failed — peer probably disconnected");
@@ -590,6 +607,11 @@ async fn run_peer_session(
                 Ok(ControlMsg::ForceRelease) => {
                     info!("peer asked us to release Remote");
                     mineshare_input::force_local_exit_remote();
+                }
+                Ok(ControlMsg::ClipboardText(text)) => {
+                    if let Err(e) = crate::clipboard::apply_from_peer(&text) {
+                        warn!(error = %e, "failed to apply peer clipboard");
+                    }
                 }
                 Err(e) => {
                     debug!(error = %e, "control reader ended");

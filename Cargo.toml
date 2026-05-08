@@ -64,6 +64,14 @@ cpal = "0.15"
 opus = "0.3"
 ringbuf = "0.4"
 
+# clipboard
+# `wayland-data-control` flips the Linux backend from X11 (which
+# needs an Xwayland connection + valid XAUTHORITY) to native
+# Wayland via the wlr-data-control protocol — works inside a
+# real GNOME/KDE Wayland session, including over SSH where DISPLAY
+# / xauth aren't inherited from the active login.
+arboard = { version = "3", features = ["wayland-data-control"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
