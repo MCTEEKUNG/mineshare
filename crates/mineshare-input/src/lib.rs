@@ -113,6 +113,33 @@ pub enum RemoteEvent {
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
 static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 
+/// Which side of the local screen the peer monitor is "stuck to".
+/// 0 = Left (peer is to the left of us), 1 = Right (default —
+/// matches the M0–M4 hardcoded layout where Win is on the left
+/// and Ubuntu is on the right of the desk). The platform-specific
+/// capture modules read this to decide which edge of our display
+/// triggers entry into Remote, where to warp the cursor on
+/// TakeControl, and which sign convention `virt_x` follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerSide {
+    Left = 0,
+    Right = 1,
+}
+
+static PEER_SIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1); // Right
+
+pub fn peer_side() -> PeerSide {
+    match PEER_SIDE.load(Ordering::Acquire) {
+        0 => PeerSide::Left,
+        _ => PeerSide::Right,
+    }
+}
+
+pub fn set_peer_side(side: PeerSide) {
+    PEER_SIDE.store(side as u8, Ordering::Release);
+    tracing::info!(?side, "peer side updated");
+}
+
 /// Daemon registers a channel here once the encrypted control session is
 /// up. Capture modules call `fire_remote_event` on each transition.
 pub fn set_remote_event_sender(tx: UnboundedSender<RemoteEvent>) {

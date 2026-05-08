@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import LayoutPage from "./pages/Layout";
 
 type Status = {
   peer_connected: boolean;
@@ -15,7 +16,10 @@ type Status = {
   peer_in_remote: boolean;
 };
 
+type Tab = "status" | "layout" | "devices" | "audio" | "hotkeys" | "advanced";
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>("status");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,32 +41,37 @@ export default function App() {
       <aside className="w-56 shrink-0 border-r border-neutral-200 dark:border-neutral-800 px-3 py-6">
         <h1 className="text-lg font-semibold mb-6 px-3">MineShare</h1>
         <nav className="flex flex-col gap-1 text-sm">
-          <NavItem active>Status</NavItem>
-          <NavItem>Layout</NavItem>
-          <NavItem>Devices</NavItem>
-          <NavItem>Audio</NavItem>
-          <NavItem>Hotkeys</NavItem>
-          <NavItem>Advanced</NavItem>
+          <NavItem active={tab === "status"} onClick={() => setTab("status")}>
+            Status
+          </NavItem>
+          <NavItem active={tab === "layout"} onClick={() => setTab("layout")}>
+            Layout
+          </NavItem>
+          <NavItem active={tab === "devices"} onClick={() => setTab("devices")}>
+            Devices
+          </NavItem>
+          <NavItem active={tab === "audio"} onClick={() => setTab("audio")}>
+            Audio
+          </NavItem>
+          <NavItem active={tab === "hotkeys"} onClick={() => setTab("hotkeys")}>
+            Hotkeys
+          </NavItem>
+          <NavItem active={tab === "advanced"} onClick={() => setTab("advanced")}>
+            Advanced
+          </NavItem>
         </nav>
       </aside>
       <main className="flex-1 px-10 py-8">
         <header className="mb-6 flex items-baseline justify-between">
-          <h2 className="text-2xl font-semibold">Status</h2>
+          <h2 className="text-2xl font-semibold capitalize">{tab}</h2>
           <ConnectionPill status={status} error={error} />
         </header>
 
-        {status ? <StatusGrid s={status} /> : null}
-
-        <section className="mt-12 rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700 p-8 text-sm text-neutral-500">
-          <p className="font-medium text-neutral-700 dark:text-neutral-300 mb-1">
-            Layout editor — coming in M5 Slice 2
-          </p>
-          <p>
-            Drag-arrange the peer's monitors against your own to set
-            edge-mapping. Until then, the bridge uses a fixed
-            Ubuntu-on-the-right / Win-on-the-left layout.
-          </p>
-        </section>
+        {tab === "status" && status ? <StatusGrid s={status} /> : null}
+        {tab === "layout" ? <LayoutPage /> : null}
+        {tab === "devices" || tab === "audio" || tab === "hotkeys" || tab === "advanced" ? (
+          <Placeholder name={tab} />
+        ) : null}
       </main>
     </div>
   );
@@ -136,15 +145,29 @@ function Stat({
   );
 }
 
+function Placeholder({ name }: { name: string }) {
+  return (
+    <div className="rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700 p-12 text-center text-neutral-500">
+      <p className="font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+        {name} — coming up
+      </p>
+      <p className="text-sm">M5 Slices 3 + 4 fill these tabs in.</p>
+    </div>
+  );
+}
+
 function NavItem({
   children,
   active,
+  onClick,
 }: {
   children: React.ReactNode;
   active?: boolean;
+  onClick?: () => void;
 }) {
   return (
     <button
+      onClick={onClick}
       className={
         "text-left px-3 py-2 rounded-md transition-colors " +
         (active

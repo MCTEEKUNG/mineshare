@@ -115,12 +115,24 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     logs::init()?;
 
     let identity = Identity::load_or_create().context("identity bootstrap failed")?;
+
+    // Push the persisted layout to the input modules before any
+    // capture starts so edge detection / boundary warp / virt_x
+    // sign convention come up in the right orientation.
+    let layout_cfg = crate::layout::current();
+    let side = match layout_cfg.peer_side {
+        crate::layout::PeerSide::Left => mineshare_input::PeerSide::Left,
+        crate::layout::PeerSide::Right => mineshare_input::PeerSide::Right,
+    };
+    mineshare_input::set_peer_side(side);
+
     info!(
         device_id = %identity.device_id,
         name = %identity.display_name,
         os = %identity.os,
         capture = opts.capture,
         inject = opts.inject,
+        peer_side = ?layout_cfg.peer_side,
         "MineShare daemon starting"
     );
 
