@@ -123,12 +123,18 @@ fn enter_remote() {
 }
 
 fn exit_remote() {
-    // Reset cursor estimate to "near left edge" so the user can drag right
-    // freely without us mis-detecting another edge crossing.
-    CURSOR_X.store(40, Ordering::Relaxed);
+    // Reset cursor estimate to "just inside the boundary edge" so
+    // the user can pull back freely without us mis-detecting
+    // another edge crossing. Side depends on the configured layout.
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let restore_x = match super::peer_side() {
+        super::PeerSide::Left => 40,
+        super::PeerSide::Right => (w - 41).max(0),
+    };
+    CURSOR_X.store(restore_x, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
-    info!(restore_x = 40, "cursor → local (linux)");
+    info!(restore_x, "cursor → local (linux)");
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -145,22 +151,23 @@ pub fn force_exit_remote() {
 
 /// Called when the peer signals it has taken Remote control of us.
 /// Wayland has no portable cursor-warp, so we slam the cursor into
-/// the left-edge OS clamp by injecting a wide negative relative
-/// delta — this puts our cursor at the boundary edge facing the peer
-/// (Win-LEFT / Ubuntu-RIGHT layout) so the peer's virt_x model lines
-/// up with the real cursor position.
+/// the boundary-edge OS clamp by injecting a wide relative delta —
+/// the side (and thus the sign) depends on the configured layout.
 pub fn on_peer_take_control(inject: &dyn InputInject) {
     let w = SCREEN_W.load(Ordering::Relaxed).max(1);
-    let slam = -(w * 2);
+    let (slam, resync_x) = match super::peer_side() {
+        super::PeerSide::Left => (-(w * 2), 0),
+        super::PeerSide::Right => (w * 2, w - 1),
+    };
     if let Err(e) = inject.mouse_move_rel(slam, 0) {
-        warn!(error = %e, "left-edge slam failed");
+        warn!(error = %e, "boundary-edge slam failed");
         return;
     }
     // Resync our own LOCAL-mode tracking so we don't false-trigger
     // re-entry once the peer releases and HW motion resumes here.
-    CURSOR_X.store(0, Ordering::Relaxed);
+    CURSOR_X.store(resync_x, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
-    info!(slam_dx = slam, "left-edge slam on TakeControl (linux)");
+    info!(slam_dx = slam, side = ?super::peer_side(), "boundary-edge slam on TakeControl (linux)");
 }
 
 pub struct EvdevCapture {
@@ -414,37 +421,57 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         let new_x = raw_x.clamp(0, (screen_w - 1).max(0));
         CURSOR_X.store(new_x, Ordering::Relaxed);
 
-        // Edge press: raw_x < 0 means the user pushed past the
-        // (estimated) left edge — the OS cursor stopped but the HW
-        // is still moving. Sustained overshoot of `ENTER_PRESSURE_PX`
-        // pixels hands control to the peer.
-        if raw_x < 0 {
-            let overshoot = -raw_x;
-            let pressure =
-                LEFT_PRESSURE.fetch_add(overshoot, Ordering::Relaxed) + overshoot;
+        // Edge press: which clamp signals "user is pushing into the
+        // boundary" depends on the layout. Peer-on-left → left-edge
+        // overshoot (raw_x < 0); peer-on-right → right-edge
+        // overshoot (raw_x > screen_w - 1). The OS cursor stays
+        // pinned at the clamp but evdev keeps reporting motion;
+        // sustained `ENTER_PRESSURE_PX` of overshoot hands control
+        // to the peer. The opposite-direction dx cancels an
+        // in-flight press (user pulled back from the edge).
+        let (overshoot, cancel) = match super::peer_side() {
+            super::PeerSide::Left => (
+                if raw_x < 0 { Some(-raw_x) } else { None },
+                dx > 0,
+            ),
+            super::PeerSide::Right => (
+                if raw_x > screen_w - 1 {
+                    Some(raw_x - (screen_w - 1))
+                } else {
+                    None
+                },
+                dx < 0,
+            ),
+        };
+        if let Some(over) = overshoot {
+            let pressure = LEFT_PRESSURE.fetch_add(over, Ordering::Relaxed) + over;
             if pressure >= ENTER_PRESSURE_PX {
                 info!(
                     pressure,
                     threshold = ENTER_PRESSURE_PX,
-                    "left-edge press — entering remote (linux)"
+                    side = ?super::peer_side(),
+                    "edge press — entering remote (linux)"
                 );
                 LEFT_PRESSURE.store(0, Ordering::Relaxed);
                 enter_remote();
             }
-        } else if dx > 0 {
-            // Any rightward motion cancels an in-flight press —
-            // the user pulled back from the edge.
+        } else if cancel {
             LEFT_PRESSURE.store(0, Ordering::Relaxed);
         }
         // No forward in LOCAL — OS already moves the cursor.
     } else {
         let peer_w = PEER_W.load(Ordering::Relaxed);
-        // For the Ubuntu→Win direction the entry edge is on the *right*
-        // of the user's hand motion (they crossed leftward to enter Win),
-        // so leftward dx (negative) takes the cursor *deeper* into the
-        // peer. Flip the sign so virt_x grows the same way it does in
-        // Slice 1 (Win→Ubuntu).
-        let raw = VIRT_X.load(Ordering::Relaxed) + (-dx);
+        // virt_x = "distance into the peer from the edge we crossed".
+        // For peer-on-left, the user crossed leftward so leftward dx
+        // (negative) goes deeper. For peer-on-right, rightward dx
+        // (positive) goes deeper. Either way, virt_x grows on
+        // depth-direction motion and falls back toward zero (then
+        // negative) on retreat — exit fires at -EXIT_BUFFER_PX.
+        let depth_dx = match super::peer_side() {
+            super::PeerSide::Left => -dx,
+            super::PeerSide::Right => dx,
+        };
+        let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
         let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 

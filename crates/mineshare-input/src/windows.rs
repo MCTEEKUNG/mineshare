@@ -148,13 +148,21 @@ fn exit_remote(restore_y: i32) {
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
     let y = restore_y.clamp(0, h - 1);
+    // Restore the local cursor to the edge that faces the peer
+    // (per the configured layout). User came back across that
+    // edge to leave Remote, so dropping the OS cursor there
+    // matches their hand position on the desk.
+    let restore_x = match super::peer_side() {
+        super::PeerSide::Right => w - 1,
+        super::PeerSide::Left => 0,
+    };
     unsafe {
-        let _ = SetCursorPos(w - 1, y);
+        let _ = SetCursorPos(restore_x, y);
     }
-    LAST_X.store(w - 1, Ordering::Relaxed);
+    LAST_X.store(restore_x, Ordering::Relaxed);
     LAST_Y.store(y, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
-    info!(restore = ?(w - 1, y), "cursor → local");
+    info!(restore = ?(restore_x, y), "cursor → local");
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -171,15 +179,18 @@ pub fn force_exit_remote() {
 }
 
 /// Called when the peer signals it has taken Remote control of us.
-/// Warps the local cursor to the right-edge boundary (the side facing
-/// the peer in the hardcoded Win-LEFT / Ubuntu-RIGHT layout) so the
-/// peer's virt_x model matches the real cursor position — without this
-/// the peer's exit threshold fires after a tiny rightward motion even
-/// though the cursor is mid-screen.
+/// Warps the local cursor to the boundary edge facing the peer (per
+/// the configured layout) so the peer's virt_x model matches the
+/// real cursor position — without this the peer's exit threshold
+/// fires after a tiny motion in the wrong direction even though the
+/// cursor is mid-screen.
 pub fn on_peer_take_control() {
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
-    let x = (w - 1).max(0);
+    let x = match super::peer_side() {
+        super::PeerSide::Right => (w - 1).max(0),
+        super::PeerSide::Left => 0,
+    };
     let y = (h / 2).clamp(0, (h - 1).max(0));
     unsafe {
         let _ = SetCursorPos(x, y);
@@ -188,7 +199,7 @@ pub fn on_peer_take_control() {
     // mis-fire on the first injected motion arriving from the peer.
     LAST_X.store(x, Ordering::Relaxed);
     LAST_Y.store(y, Ordering::Relaxed);
-    info!(boundary = ?(x, y), "warped cursor to peer-facing edge (right)");
+    info!(boundary = ?(x, y), side = ?super::peer_side(), "warped cursor to peer-facing edge");
 }
 
 pub struct HookCapture {
@@ -308,22 +319,36 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 }
                 LAST_X.store(x, Ordering::Relaxed);
                 LAST_Y.store(y, Ordering::Relaxed);
-                if last_x != i32::MIN && last_x < w - 1 && x >= w - 1 {
+                // Edge to watch depends on layout: peer-on-right →
+                // right edge of our display, peer-on-left → left edge.
+                let crossed_edge = match super::peer_side() {
+                    super::PeerSide::Right => {
+                        last_x != i32::MIN && last_x < w - 1 && x >= w - 1
+                    }
+                    super::PeerSide::Left => last_x != i32::MIN && last_x > 0 && x <= 0,
+                };
+                if crossed_edge {
                     enter_remote(y);
                 }
                 // local: don't forward, OS handles cursor as usual
             } else {
                 // REMOTE: compute delta from anchor, clamp to peer screen,
-                // and forward.
+                // and forward. virt_x's sign convention flips with the
+                // layout — peer-on-right means rightward dx takes us
+                // deeper into the peer; peer-on-left flips to leftward.
                 let dx = x - last_x;
                 let dy = y - last_y;
+                let depth_dx = match super::peer_side() {
+                    super::PeerSide::Right => dx,
+                    super::PeerSide::Left => -dx,
+                };
                 let peer_w = PEER_W.load(Ordering::Relaxed);
                 // Clamp accumulated virt_x to [-EXIT_BUFFER_PX, peer_w-1].
                 // The lower floor doubles as the exit trigger; the upper
-                // bound stops further rightward dx from being absorbed
-                // into ever-growing virt_x (which would force the user
-                // to drag left for thousands of events to escape).
-                let raw = VIRT_X.load(Ordering::Relaxed) + dx;
+                // bound stops further depth-direction dx from being
+                // absorbed into ever-growing virt_x (which would force
+                // the user to drag back for thousands of events to escape).
+                let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
                 let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w - 1);
                 VIRT_X.store(new_virt_x, Ordering::Relaxed);
                 VIRT_Y.fetch_add(dy, Ordering::Relaxed);
