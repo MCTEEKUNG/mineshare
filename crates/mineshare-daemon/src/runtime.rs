@@ -92,6 +92,11 @@ enum ControlMsg {
     /// flooding the control channel; receivers should also sanity-
     /// check length before applying.
     ClipboardText(String),
+    /// Peer changed their layout — they want OUR `peer_side` to
+    /// be the value they sent. The sender flips left↔right /
+    /// top↔bottom on their side before sending, so receivers can
+    /// apply the value verbatim.
+    SetPeerSide(crate::layout::PeerSide),
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -564,15 +569,18 @@ async fn run_peer_session(
     // ControlMsg → set_peer_in_remote) in parallel after PortAnnounce.
     let (mut tcp_read, mut tcp_write) = stream.into_split();
 
-    // Writer task: drain both input-RemoteEvent and clipboard-text
+    // Writer task: drain RemoteEvent / clipboard-text / layout-side
     // changes, encode each as a `ControlMsg`, and send over the
-    // encrypted TCP channel. We `select!` between the two channels
-    // so neither side starves the other.
+    // encrypted TCP channel. We `select!` between the channels so
+    // none starves the others.
     let (rev_tx, mut rev_rx) =
         tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
     mineshare_input::set_remote_event_sender(rev_tx);
     let (clip_tx, mut clip_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     crate::clipboard::ensure_watcher(clip_tx);
+    let (side_tx, mut side_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
+    crate::layout::set_propagate_sender(side_tx);
     let aead_writer = aead.clone_handle();
     let writer_handle = tokio::spawn(async move {
         loop {
@@ -585,6 +593,10 @@ async fn run_peer_session(
                 },
                 clip = clip_rx.recv() => match clip {
                     Some(text) => ControlMsg::ClipboardText(text),
+                    None => break,
+                },
+                side = side_rx.recv() => match side {
+                    Some(s) => ControlMsg::SetPeerSide(s),
                     None => break,
                 },
             };
@@ -626,6 +638,14 @@ async fn run_peer_session(
                 Ok(ControlMsg::ClipboardText(text)) => {
                     if let Err(e) = crate::clipboard::apply_from_peer(&text) {
                         warn!(error = %e, "failed to apply peer clipboard");
+                    }
+                }
+                Ok(ControlMsg::SetPeerSide(side)) => {
+                    info!(?side, "peer pushed a layout side — applying locally");
+                    if let Err(e) = crate::layout::apply_from_peer(
+                        crate::layout::LayoutConfig { peer_side: side },
+                    ) {
+                        warn!(error = %e, "failed to apply peer layout");
                     }
                 }
                 Err(e) => {
@@ -820,6 +840,7 @@ async fn run_peer_session(
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::set_peer_in_remote(false);
     mineshare_input::clear_remote_event_sender();
+    crate::layout::clear_propagate_sender();
     crate::status::clear_peer_connected();
     Ok(())
 }

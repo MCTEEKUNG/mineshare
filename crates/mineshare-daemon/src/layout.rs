@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,6 +29,22 @@ pub enum PeerSide {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
     pub peer_side: PeerSide,
+}
+
+impl PeerSide {
+    /// The side the *peer* ends up on if I'm at `self` from their
+    /// perspective — left/right and top/bottom are mirror pairs.
+    /// When the user flips our side, we propagate this opposite to
+    /// the peer so both ends agree on the desk layout without
+    /// anyone touching the GUI on the other machine.
+    pub fn opposite(self) -> Self {
+        match self {
+            PeerSide::Left => PeerSide::Right,
+            PeerSide::Right => PeerSide::Left,
+            PeerSide::Top => PeerSide::Bottom,
+            PeerSide::Bottom => PeerSide::Top,
+        }
+    }
 }
 
 impl Default for LayoutConfig {
@@ -50,6 +67,23 @@ impl Default for LayoutConfig {
 
 static CURRENT: Mutex<Option<LayoutConfig>> = Mutex::new(None);
 
+/// Per-peer-session sender that the runtime writer task drains and
+/// sends as `ControlMsg::SetPeerSide` over the encrypted control
+/// channel. Set when a session comes up, cleared when it tears
+/// down. We push the *opposite* of our local side here whenever
+/// the user flips it via the GUI — the peer then applies that
+/// opposite side via `apply_from_peer` so both ends agree on the
+/// desk layout in one click.
+static PROPAGATE_TX: Mutex<Option<UnboundedSender<PeerSide>>> = Mutex::new(None);
+
+pub fn set_propagate_sender(tx: UnboundedSender<PeerSide>) {
+    *PROPAGATE_TX.lock() = Some(tx);
+}
+
+pub fn clear_propagate_sender() {
+    *PROPAGATE_TX.lock() = None;
+}
+
 /// Returns the in-memory current layout, lazily loading from disk
 /// on first call. Subsequent calls hit the cached value.
 pub fn current() -> LayoutConfig {
@@ -66,11 +100,28 @@ pub fn current() -> LayoutConfig {
 /// the new side to `mineshare_input` so the bridge picks it up
 /// immediately without a daemon restart. Called from the Tauri
 /// `set_layout` command when the user drags-or-clicks in the
-/// Layout page.
+/// Layout page. ALSO propagates the mirror side to the peer over
+/// the active control channel so both machines agree on the desk
+/// arrangement after one click.
 pub fn set(cfg: LayoutConfig) -> Result<()> {
-    save(&cfg)?;
+    apply_locally(&cfg)?;
+    if let Some(tx) = PROPAGATE_TX.lock().as_ref() {
+        let _ = tx.send(cfg.peer_side.opposite());
+    }
+    Ok(())
+}
+
+/// Apply a layout received from the peer — same thing as `set` but
+/// without echoing it back over the control channel. Avoids an
+/// infinite ping-pong of SetPeerSide messages.
+pub fn apply_from_peer(cfg: LayoutConfig) -> Result<()> {
+    apply_locally(&cfg)
+}
+
+fn apply_locally(cfg: &LayoutConfig) -> Result<()> {
+    save(cfg)?;
     mineshare_input::set_peer_side(map_side(cfg.peer_side));
-    *CURRENT.lock() = Some(cfg);
+    *CURRENT.lock() = Some(cfg.clone());
     Ok(())
 }
 
