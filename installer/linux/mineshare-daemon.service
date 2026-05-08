@@ -1,0 +1,26 @@
+[Unit]
+Description=MineShare cross-machine input + audio bridge
+Documentation=https://github.com/local/mineshare
+# Tie the daemon to the user's graphical session so it doesn't
+# start before the desktop is up (we need DISPLAY/WAYLAND_DISPLAY,
+# pipewire-pulse, and dbus for clipboard + audio).
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.socket
+
+[Service]
+Type=simple
+# Pull DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / DBUS into systemd's
+# user-environment block, the same way GNOME's session does it
+# automatically — but we re-do it here so the unit also works
+# under non-GNOME compositors that don't auto-export.
+ExecStartPre=/bin/sh -c 'systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS 2>/dev/null || true'
+ExecStart=/usr/local/bin/mineshare-daemon run
+Restart=on-failure
+RestartSec=2
+# Daemon is headless after startup; no stdin needed and a small
+# amount of stdout/stderr goes to journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

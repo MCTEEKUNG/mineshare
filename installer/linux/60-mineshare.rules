@@ -1,0 +1,15 @@
+# udev rule for MineShare daemon
+#
+# Grants the `input` group rw access to /dev/uinput so the daemon
+# can create its virtual HID device for injection without root.
+# evdev capture also requires read on /dev/input/event*, which is
+# already group=input by default on stock Linux.
+#
+# Install: cp 60-mineshare.rules /etc/udev/rules.d/
+#          udevadm control --reload-rules
+#          udevadm trigger
+#
+# Then add your user to the input group and re-login:
+#          sudo usermod -aG input "$USER"
+
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
