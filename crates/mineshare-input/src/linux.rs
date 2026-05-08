@@ -268,31 +268,68 @@ fn is_relevant(d: &Device) -> bool {
     has_rel || has_keyboard || has_mouse_btns
 }
 
+/// Classify a device as "pointer-like" — has actual relative-axis
+/// motion. Used to scope EVIOCGRAB more narrowly when the peer
+/// is driving us: only mouse-class devices need to be grabbed
+/// (to prevent the user's HW cursor fighting the injected one).
+/// Keyboards stay free so the user can keep typing on their own
+/// machine even while the peer's cursor is borrowing the screen.
+///
+/// We deliberately key off REL_X / REL_Y *only*, not BTN_LEFT —
+/// many gaming keyboards expose media-key BTN_* codes the kernel
+/// happens to share with mouse buttons, and the original
+/// "has_mouse_btns" branch mis-classified them as pointers.
+fn is_pointer_device(d: &Device) -> bool {
+    d.supported_relative_axes()
+        .map(|a| a.contains(RelativeAxisCode::REL_X) || a.contains(RelativeAxisCode::REL_Y))
+        .unwrap_or(false)
+}
+
 impl InputCapture for EvdevCapture {
     fn start(&mut self, sink: UnboundedSender<InputEvent>) -> Result<()> {
         for (path, device) in self.devices.drain(..) {
             let sink = sink.clone();
+            let is_pointer = is_pointer_device(&device);
+            let name = device.name().unwrap_or("?").to_string();
+            info!(
+                path = %path.display(),
+                name,
+                is_pointer,
+                "evdev pump classification (pointer = grabbed when peer drives; non-pointer = stays free for typing)"
+            );
             thread::Builder::new()
                 .name(format!("evdev-{}", path.display()))
-                .spawn(move || pump_device(path, device, sink))
+                .spawn(move || pump_device(path, device, is_pointer, sink))
                 .context("spawn evdev thread")?;
         }
         Ok(())
     }
 }
 
-fn pump_device(path: PathBuf, mut device: Device, sink: UnboundedSender<InputEvent>) {
+fn pump_device(
+    path: PathBuf,
+    mut device: Device,
+    is_pointer: bool,
+    sink: UnboundedSender<InputEvent>,
+) {
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
     let mut grabbed = false;
 
     loop {
-        // Grab whenever EITHER side is in Remote — when local capture is
-        // forwarding to the peer, OR when the peer is forwarding to us
-        // (so the user's real HW doesn't fight the injected cursor on
-        // Ubuntu's compositor).
-        let want_grab =
-            CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::peer_in_remote();
+        // Two grab regimes:
+        //   * MODE_REMOTE (we drive the peer): grab everything —
+        //     mouse + keyboard — so local OS doesn't double-process
+        //     events we're forwarding over the wire.
+        //   * peer_in_remote (peer drives us): grab only POINTER
+        //     devices to prevent the user's HW mouse motion fighting
+        //     our injected cursor. Keyboards stay free so the user
+        //     can keep typing on their own machine while the peer's
+        //     cursor borrows the screen — keystrokes don't visually
+        //     "fight" the way cursor motion does.
+        let we_drive = CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
+        let peer_drives = super::peer_in_remote();
+        let want_grab = we_drive || (peer_drives && is_pointer);
         if want_grab != grabbed {
             if want_grab {
                 match device.grab() {
