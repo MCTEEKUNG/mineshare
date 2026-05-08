@@ -12,6 +12,16 @@ license = "MIT"
 name = "mineshare_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Enabled by `tauri build`; without it the WebView always loads
+# from `devUrl` (http://localhost:1420) and shows
+# "Could not connect to localhost: connection refused" when run
+# outside `tauri dev`. Including it in the default feature set
+# makes plain `cargo build --release` produce a binary that serves
+# the embedded `frontendDist` instead.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
