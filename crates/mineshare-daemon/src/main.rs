@@ -5,6 +5,13 @@
 //!   `collect [--push]`     Bundle recent logs + system info into `logs/<hostname>.log`,
 //!                          optionally git-add/commit/push to the current repo.
 
+// On Windows release builds we drop the console subsystem so the
+// auto-start shortcut in the user's Startup folder doesn't flash a
+// black window on every logon. Logs still go to the file appender
+// at `%APPDATA%\MineShare\logs\…`. Debug builds keep stdout/stderr
+// for `cargo run` ergonomics.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod clipboard;
 mod collect;
 mod identity;
