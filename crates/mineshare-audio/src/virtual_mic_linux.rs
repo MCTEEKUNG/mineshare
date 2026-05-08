@@ -34,10 +34,15 @@ use crate::codec::OpusDecoder;
 use crate::{AudioFrame, AudioPlayback, FRAME_SAMPLES_INTERLEAVED};
 
 /// PipeWire sink-name used both for `pactl load-module` and for
-/// pacat's `--device=` flag. Apps see the corresponding monitor
-/// as `Monitor of MineShare Mic` in their input picker.
+/// pacat's `--device=` flag.
 const SINK_NAME: &str = "mineshare_mic";
-const SINK_DESCRIPTION: &str = "MineShare Mic";
+/// Human-readable description shown in app pickers. **Must not
+/// contain spaces** — PipeWire's `pactl` compatibility shim splits
+/// every form of `sink_properties=…` value on whitespace before the
+/// property-list parser can honor quoting/escapes (we tried both
+/// `"foo bar"` and `foo\040bar`; both truncate). Hyphenated reads
+/// cleanly and survives the round trip intact.
+const SINK_DESCRIPTION: &str = "MineShare-Mic";
 
 pub struct PipewireVirtualMic {
     /// Module index returned by `pactl load-module` — needed for
@@ -55,14 +60,24 @@ pub struct PipewireVirtualMic {
 
 impl PipewireVirtualMic {
     pub fn new() -> Result<Self> {
-        // Step 1: create the null-sink. PipeWire returns the module
-        // index on stdout — we capture it so we can unload on Drop.
+        // Step 0: cleanup stale `mineshare_mic` modules left behind
+        // by a previous daemon that didn't shut down cleanly
+        // (SIGKILL / OOM / panic before Drop could run). Without
+        // this we accumulate duplicate sinks across restarts and
+        // pactl name resolution picks the wrong one when we later
+        // set the description.
+        cleanup_stale_modules();
+
+        // Step 1: create the null-sink with the description baked
+        // into module-args. PipeWire's pactl shim *does* honor the
+        // value as long as it has no internal whitespace — see the
+        // SINK_DESCRIPTION doc comment for the gory details.
         let out = Command::new("pactl")
             .args([
                 "load-module",
                 "module-null-sink",
                 &format!("sink_name={SINK_NAME}"),
-                &format!("sink_properties=device.description={}", SINK_DESCRIPTION.replace(' ', "\\ ")),
+                &format!("sink_properties=device.description={SINK_DESCRIPTION}"),
                 "channels=2",
                 "rate=48000",
             ])
@@ -80,6 +95,7 @@ impl PipewireVirtualMic {
         let module_index = String::from_utf8_lossy(&out.stdout).trim().to_string();
         info!(
             sink = SINK_NAME,
+            description = SINK_DESCRIPTION,
             module = %module_index,
             "PipeWire null-sink loaded for virtual mic"
         );
@@ -156,6 +172,33 @@ impl AudioPlayback for PipewireVirtualMic {
             return Err(e.into());
         }
         Ok(())
+    }
+}
+
+/// Find any leftover `module-null-sink sink_name=mineshare_mic` from
+/// a previous daemon and unload them. Best-effort; we ignore errors
+/// so a missing pactl during cleanup doesn't block startup.
+fn cleanup_stale_modules() {
+    let arg_match = format!("sink_name={SINK_NAME}");
+    let listing = match Command::new("pactl")
+        .args(["list", "short", "modules"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+    for line in String::from_utf8_lossy(&listing).lines() {
+        // Format: "<idx>\t<module-name>\t<args>"
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3
+            && parts[1] == "module-null-sink"
+            && parts[2].contains(&arg_match)
+        {
+            let _ = Command::new("pactl")
+                .args(["unload-module", parts[0]])
+                .output();
+            info!(stale_module = parts[0], "cleaned up leftover mineshare_mic module");
+        }
     }
 }
 
