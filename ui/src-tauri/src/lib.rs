@@ -6,6 +6,7 @@
 //! the Tauri shell is for users who want a window.
 
 mod state;
+mod tray;
 
 use mineshare_daemon::audio_status::AudioStatus;
 use mineshare_daemon::layout::LayoutConfig;
@@ -45,6 +46,20 @@ fn set_audio_toggle(stream: String, direction: String, enabled: bool) -> Result<
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct DevicesSnapshot {
+    outputs: Vec<mineshare_audio::DeviceInfo>,
+    inputs: Vec<mineshare_audio::DeviceInfo>,
+}
+
+#[tauri::command]
+fn list_audio_devices() -> DevicesSnapshot {
+    DevicesSnapshot {
+        outputs: mineshare_audio::list_output_devices(),
+        inputs: mineshare_audio::list_input_devices(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if let Err(e) = state::bootstrap_runtime() {
@@ -54,12 +69,27 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            tray::install(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing the main window should NOT quit the daemon —
+            // hide to tray instead. The user can re-open from the
+            // tray menu, and "Quit" there is the only path that
+            // tears the bridge down.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_layout,
             set_layout,
             get_audio_status,
             set_audio_toggle,
+            list_audio_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

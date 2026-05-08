@@ -88,6 +88,57 @@ pub fn make_mic_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(cpal_mic::CpalMic::new()?))
 }
 
+/// Enumerate cpal output devices on the local host with the
+/// default flagged. Used by the GUI's Devices tab to surface
+/// what the bridge would render peer audio into. Failures are
+/// non-fatal — we return what we got and log the rest.
+pub fn list_output_devices() -> Vec<DeviceInfo> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_name = host
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if let Ok(iter) = host.output_devices() {
+        for d in iter {
+            let name = d.name().unwrap_or_else(|_| "?".to_string());
+            out.push(DeviceInfo {
+                is_default: name == default_name,
+                name,
+            });
+        }
+    }
+    out
+}
+
+/// Enumerate cpal input devices on the local host (microphones).
+pub fn list_input_devices() -> Vec<DeviceInfo> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if let Ok(iter) = host.input_devices() {
+        for d in iter {
+            let name = d.name().unwrap_or_else(|_| "?".to_string());
+            out.push(DeviceInfo {
+                is_default: name == default_name,
+                name,
+            });
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
 /// Construct a virtual-mic playback sink — peer mic frames flow into
 /// this and apps on the local machine see a "MineShare Mic" input
 /// device.

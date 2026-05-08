@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import LayoutPage from "./pages/Layout";
 import AudioPage from "./pages/Audio";
+import DevicesPage from "./pages/Devices";
+import HotkeysPage from "./pages/Hotkeys";
+import AdvancedPage from "./pages/Advanced";
 
 type Status = {
   peer_connected: boolean;
@@ -70,10 +73,10 @@ export default function App() {
 
         {tab === "status" && status ? <StatusGrid s={status} /> : null}
         {tab === "layout" ? <LayoutPage /> : null}
+        {tab === "devices" ? <DevicesPage /> : null}
         {tab === "audio" ? <AudioPage /> : null}
-        {tab === "devices" || tab === "hotkeys" || tab === "advanced" ? (
-          <Placeholder name={tab} />
-        ) : null}
+        {tab === "hotkeys" ? <HotkeysPage /> : null}
+        {tab === "advanced" ? <AdvancedPage /> : null}
       </main>
     </div>
   );
@@ -143,17 +146,6 @@ function Stat({
       <dd className={mono ? "font-mono text-sm" : "text-sm font-medium"}>
         {value}
       </dd>
-    </div>
-  );
-}
-
-function Placeholder({ name }: { name: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700 p-12 text-center text-neutral-500">
-      <p className="font-medium text-neutral-700 dark:text-neutral-300 mb-1">
-        {name} — coming up
-      </p>
-      <p className="text-sm">M5 Slices 3 + 4 fill these tabs in.</p>
     </div>
   );
 }

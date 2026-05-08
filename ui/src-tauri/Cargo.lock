@@ -2664,6 +2664,7 @@ name = "mineshare-app"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "mineshare-audio",
  "mineshare-core",
  "mineshare-daemon",
  "mineshare-input",
