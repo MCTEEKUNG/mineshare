@@ -25,6 +25,12 @@ pub fn log_dir() -> Result<PathBuf> {
 }
 
 /// Initialise tracing with stderr + rotating-daily file output.
+///
+/// Idempotent: callable from both `mineshare-daemon` (binary) and
+/// `mineshare-app` (Tauri shell). The Tauri shell calls
+/// `bootstrap_runtime` which calls this *and then* spawns
+/// `runtime::run` which also calls this — without `try_init` the
+/// second call panics with `SetGlobalDefaultError`.
 pub fn init() -> Result<()> {
     let dir = log_dir()?;
     let appender = tracing_appender::rolling::daily(&dir, "daemon");
@@ -32,7 +38,7 @@ pub fn init() -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,mineshare=debug"));
 
-    tracing_subscriber::registry()
+    let already_set = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr).with_target(true))
         .with(
@@ -41,8 +47,11 @@ pub fn init() -> Result<()> {
                 .with_target(true)
                 .with_ansi(false),
         )
-        .init();
+        .try_init()
+        .is_err();
 
-    tracing::info!(log_dir = %dir.display(), "log file appender ready");
+    if !already_set {
+        tracing::info!(log_dir = %dir.display(), "log file appender ready");
+    }
     Ok(())
 }
