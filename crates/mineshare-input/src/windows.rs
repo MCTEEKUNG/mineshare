@@ -527,10 +527,19 @@ impl InputInject for EnigoInject {
     }
 
     fn scroll(&self, _dx: f32, dy: f32) -> Result<()> {
+        // Sign convention mismatch:
+        //   * Linux/Win HW: REL_WHEEL / WM_MOUSEWHEEL positive = wheel
+        //     rotated forward (away from user) → content scrolls UP.
+        //   * enigo's `scroll(length, Vertical)`: positive = scroll
+        //     DOWN. (See enigo docs: "positive value means scroll
+        //     down/right, negative means scroll up/left".)
+        // Without negation, every wheel-up on the controller becomes
+        // wheel-down on the Win receiver — exactly the inverted
+        // "looking" feel the user reported.
         if dy != 0.0 {
             self.inner
                 .lock()
-                .scroll(dy.round() as i32, Axis::Vertical)
+                .scroll(-dy.round() as i32, Axis::Vertical)
                 .context("enigo scroll v")?;
         }
         Ok(())

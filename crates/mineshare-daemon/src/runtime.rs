@@ -31,21 +31,24 @@ use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 
-/// Echo-loop guard: when we're playing peer audio through our local
-/// speakers, our own sysout monitor (WASAPI loopback / PipeWire
-/// monitor) catches the same signal and would forward it back, which
-/// the peer then plays, and we capture *that*, etc. — a positive
-/// feedback loop. The fix is dead simple: pause local sysout capture
-/// for a short window after we receive a peer audio frame.
+/// Echo-loop guard: the peer's *sysout* coming out of our speakers
+/// is what our own loopback re-captures and would forward back as a
+/// new sysout frame — that's the feedback loop. Mic frames don't
+/// loop the same way (they originate from a separate physical
+/// device), so we deliberately track only peer-sysout arrivals
+/// here. Mixing mic into the guard causes user-talk-while-music-
+/// plays scenarios to stutter the music: every breath/keyboard
+/// click captured by the peer's mic would briefly suppress our
+/// sysout forwarding.
 ///
 /// We *only* arm the guard on substantial Opus payloads — a silent
 /// stream still sends ~3-byte comfort-noise frames at 50 fps, and
 /// counting those would permanently suppress whichever side talks
 /// last (a deadlock on idle). 12 bytes is well above DTX/CN size
-/// while still triggering on quiet speech.
+/// while still triggering on quiet music.
 const ECHO_GUARD_MS: u64 = 500;
 const ECHO_TRIGGER_MIN_BYTES: usize = 12;
-static LAST_PEER_AUDIO_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_PEER_SYSOUT_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -156,11 +159,11 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         debug!("input capture pump terminated");
     });
 
-    // --- Audio sysout capture (Win loopback for Slice 1) ----------------
+    // --- Audio sysout capture (Win loopback / Linux PipeWire monitor) --
     let (audio_cap_tx, mut audio_cap_rx) = mpsc::unbounded_channel::<AudioFrame>();
     let audio_cap_started = if opts.capture {
         match mineshare_audio::make_sysout_capture() {
-            Ok(mut cap) => match cap.start(audio_cap_tx) {
+            Ok(mut cap) => match cap.start(audio_cap_tx.clone()) {
                 Ok(()) => {
                     info!("audio sysout capture started");
                     Some(cap)
@@ -181,18 +184,48 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     };
     let _audio_cap_alive = audio_cap_started;
 
+    // --- Mic capture (M3 Slice 3) --------------------------------------
+    // Default input device on each platform — cpal handles WASAPI on
+    // Windows and ALSA-via-PipeWire on Linux. Frames carry the
+    // `StreamKind::Mic` tag so the receiver can route them to a
+    // virtual mic device (PipeWire null-sink / VB-CABLE) rather than
+    // mixing them with sysout into the speakers.
+    let mic_cap_started = if opts.capture {
+        match mineshare_audio::make_mic_capture() {
+            Ok(mut cap) => match cap.start(audio_cap_tx) {
+                Ok(()) => {
+                    info!("mic capture started");
+                    Some(cap)
+                }
+                Err(e) => {
+                    warn!(error = %e, "mic capture failed to start");
+                    None
+                }
+            },
+            Err(e) => {
+                info!(reason = %e, "mic capture not available — skipping");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let _mic_cap_alive = mic_cap_started;
+
     let bcast_for_audio_drain = wire_bcast.clone();
     tokio::spawn(async move {
         while let Some(frame) = audio_cap_rx.recv().await {
-            // Echo-loop guard: if the peer has been actively sending
-            // sysout in the last `ECHO_GUARD_MS`, our own loopback is
-            // mostly *re-capturing the peer's audio* coming out of
-            // our speakers — forwarding that back would feed a
-            // runaway loop. Drop the frame; the peer is the active
-            // talker.
-            let last = LAST_PEER_AUDIO_AT_MS.load(Ordering::Relaxed);
-            if last != 0 && now_ms().saturating_sub(last) < ECHO_GUARD_MS {
-                continue;
+            // Echo-loop guard ONLY applies to sysout: when the peer
+            // is talking and we play it back, our own loopback
+            // re-captures it and would feed a runaway loop. Mic
+            // frames originate from a physically separate device
+            // (the user's mic) and don't have this problem, so we
+            // forward them unconditionally.
+            if matches!(frame.stream, mineshare_audio::StreamKind::SysOut) {
+                let last = LAST_PEER_SYSOUT_AT_MS.load(Ordering::Relaxed);
+                if last != 0 && now_ms().saturating_sub(last) < ECHO_GUARD_MS {
+                    continue;
+                }
             }
             let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
         }
@@ -556,15 +589,48 @@ async fn run_peer_session(
                                     }
                                 }
                                 Ok((WireFrame::Audio(frame), _)) => {
-                                    // Mark "peer is actively talking" so the
-                                    // local sysout capture pump suppresses its
-                                    // own forwards and we don't echo-loop.
-                                    // Filter out DTX comfort-noise frames
-                                    // (≤ 3 bytes) so we don't block forever
-                                    // on the always-on silence stream.
-                                    if frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES {
-                                        LAST_PEER_AUDIO_AT_MS
+                                    // Arm the echo-loop guard ONLY on peer
+                                    // sysout arrivals. Mic frames from the
+                                    // peer don't cause sysout↔sysout
+                                    // feedback — including them here makes
+                                    // every keyboard click / breath the peer
+                                    // makes briefly mute our outgoing sysout,
+                                    // which the user perceives as stutter on
+                                    // shared music or video. Filter out
+                                    // Opus DTX comfort noise (≤ 3 bytes) so
+                                    // the always-on silence stream doesn't
+                                    // permanently suppress us.
+                                    if matches!(
+                                        frame.stream,
+                                        mineshare_audio::StreamKind::SysOut
+                                    ) && frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES
+                                    {
+                                        LAST_PEER_SYSOUT_AT_MS
                                             .store(now_ms(), Ordering::Relaxed);
+                                    }
+                                    // Slice 3a: only the SysOut stream
+                                    // plays through the local default
+                                    // output. Mic frames are still
+                                    // received (visible in stats) but not
+                                    // audibly rendered — without a
+                                    // virtual-mic device they would just
+                                    // mix into the speakers, causing an
+                                    // open-room echo back through our own
+                                    // sysout monitor (peer's voice
+                                    // bouncing into peer's speakers via
+                                    // our loopback). Slice 3b will route
+                                    // mic frames into a PipeWire null-sink
+                                    // (Linux) / VB-CABLE (Win) so apps
+                                    // like Discord can pick them up
+                                    // without polluting the speaker mix.
+                                    if matches!(
+                                        frame.stream,
+                                        mineshare_audio::StreamKind::Mic
+                                    ) {
+                                        stats_recv
+                                            .audio_recv
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        continue;
                                     }
                                     let n = stats_recv.audio_recv.load(Ordering::Relaxed);
                                     if n % 250 == 0 {

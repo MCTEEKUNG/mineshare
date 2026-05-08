@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod codec;
+pub mod cpal_mic;
 pub mod playback;
 pub mod resample;
 
@@ -75,6 +76,12 @@ pub fn make_sysout_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     {
         anyhow::bail!("sysout capture is not implemented on this platform")
     }
+}
+
+/// Construct a mic capture handle on the system default input
+/// device. Cross-platform via cpal.
+pub fn make_mic_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
+    Ok(Box::new(cpal_mic::CpalMic::new()?))
 }
 
 /// Construct a `cpal` playback handle on the system default output
