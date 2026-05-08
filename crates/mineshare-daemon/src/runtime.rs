@@ -564,6 +564,18 @@ async fn run_peer_session(
 ) -> Result<()> {
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
+    // Stage 6.2: enable TCP keepalive on the control socket. Without
+    // it a silently-broken connection (mid-game Wi-Fi drop, peer
+    // suspended, network partition without TCP RST) leaves us
+    // hanging on `read_encrypted` forever — the `peer_in_remote`
+    // state stays true, the user's mouse stays grabbed, and the
+    // session never tears down. Keepalive forces the kernel to
+    // probe and surface a read EOF within ~30 s of silence so
+    // the writer/reader/forward tasks can shut down and the
+    // caller's reconnect loop kicks in.
+    if let Err(e) = enable_tcp_keepalive(&stream) {
+        warn!(error = %e, "failed to enable TCP keepalive on control socket");
+    }
     crate::status::set_peer_connected(peer_addr.to_string(), None);
 
     let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
@@ -887,6 +899,13 @@ async fn run_peer_session(
     mineshare_input::clear_remote_event_sender();
     crate::layout::clear_propagate_sender();
     crate::status::clear_peer_connected();
+    // Stage 6.1: emit synthetic key-up for any keys / buttons the
+    // peer left injected-but-not-released (gameplay WASD held when
+    // the network drops, etc). Without this the local OS stays
+    // convinced those keys are held.
+    if let Err(e) = inject.release_all_held() {
+        warn!(error = %e, "release_all_held failed");
+    }
     Ok(())
 }
 
@@ -924,6 +943,28 @@ fn hex_short(bytes: &[u8]) -> String {
         .take(6)
         .map(|b| format!("{b:02x}"))
         .collect::<String>()
+}
+
+fn enable_tcp_keepalive(stream: &TcpStream) -> Result<()> {
+    use std::time::Duration;
+    // SockRef borrows the underlying fd without taking ownership,
+    // so the tokio TcpStream stays usable after this call.
+    let sock = socket2::SockRef::from(stream);
+    // Idle 10 s before first probe, then a probe every 5 s, give
+    // up after 3 failed probes ⇒ ~25 s wall-clock to declare a
+    // silent connection dead. Aggressive enough that a mid-game
+    // Wi-Fi drop doesn't leave the user's keyboard grabbed for
+    // minutes; mild enough that brief network blips don't tear
+    // healthy sessions down.
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(10))
+        .with_interval(Duration::from_secs(5));
+    // `with_retries` is unix-only — the Win equivalent comes from
+    // the global TCP/IP keepalive policy, which we leave alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let ka = ka.with_retries(3);
+    sock.set_tcp_keepalive(&ka)?;
+    Ok(())
 }
 
 fn detect_local_addresses() -> Vec<IpAddr> {

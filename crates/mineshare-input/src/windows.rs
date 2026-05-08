@@ -696,8 +696,21 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
+/// Tag tracking which kind of code is held so `release_all_held`
+/// knows whether to call enigo's button() or key() to clear it.
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+enum HeldKey {
+    MouseBtn(Button),
+    Key(u16),
+}
+
 pub struct EnigoInject {
     inner: Mutex<Enigo>,
+    /// Codes the peer has injected `down` without a matching `up`.
+    /// Drained on `release_all_held` at session teardown so a
+    /// disconnected peer doesn't leave keys logically pressed in
+    /// the local OS (typical: WASD held during a network drop).
+    held: Mutex<std::collections::HashSet<HeldKey>>,
 }
 
 impl EnigoInject {
@@ -706,6 +719,7 @@ impl EnigoInject {
         debug!("enigo inject ready");
         Ok(Self {
             inner: Mutex::new(inner),
+            held: Mutex::new(std::collections::HashSet::new()),
         })
     }
 }
@@ -733,6 +747,12 @@ impl InputInject for EnigoInject {
             Direction::Release
         };
         self.inner.lock().button(b, dir).context("enigo button")?;
+        let mut held = self.held.lock();
+        if down {
+            held.insert(HeldKey::MouseBtn(btn));
+        } else {
+            held.remove(&HeldKey::MouseBtn(btn));
+        }
         Ok(())
     }
 
@@ -747,6 +767,47 @@ impl InputInject for EnigoInject {
             .lock()
             .key(EKey::Other(vk as u32), dir)
             .context("enigo key")?;
+        let mut held = self.held.lock();
+        if down {
+            held.insert(HeldKey::Key(code.0));
+        } else {
+            held.remove(&HeldKey::Key(code.0));
+        }
+        Ok(())
+    }
+
+    fn release_all_held(&self) -> Result<()> {
+        let drained: Vec<HeldKey> = self.held.lock().drain().collect();
+        if drained.is_empty() {
+            return Ok(());
+        }
+        let count = drained.len();
+        let mut enigo = self.inner.lock();
+        for h in drained {
+            let res: std::result::Result<(), _> = match h {
+                HeldKey::MouseBtn(btn) => {
+                    let b = match btn {
+                        Button::Left => EButton::Left,
+                        Button::Right => EButton::Right,
+                        Button::Middle => EButton::Middle,
+                        Button::X1 => EButton::Back,
+                        Button::X2 => EButton::Forward,
+                    };
+                    enigo.button(b, Direction::Release)
+                }
+                HeldKey::Key(code) => {
+                    let vk = scancode_to_vk(code);
+                    enigo.key(EKey::Other(vk as u32), Direction::Release)
+                }
+            };
+            if let Err(e) = res {
+                warn!(error = %e, "failed to release held key on session end");
+            }
+        }
+        info!(
+            count,
+            "released stale held keys at session end (preventing stuck-key after peer disconnect)"
+        );
         Ok(())
     }
 

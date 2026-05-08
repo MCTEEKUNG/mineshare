@@ -32,6 +32,7 @@
 //!     test rig's 200%-DPI Win laptop). Slice 2.5 will negotiate this over
 //!     the encrypted control channel.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::thread;
@@ -650,9 +651,24 @@ fn key_from_button(btn: Button) -> EvKey {
 /// Splitting into a clean mouse-only node + keyboard-only node
 /// lets each one be classified unambiguously, the same way real
 /// HID hardware presents itself.
+/// Tag tracking which virtual node a held code belongs to so
+/// `release_all_held` knows which uinput sink to emit the
+/// synthetic key-up on.
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+enum HeldKey {
+    /// BTN_* mouse-button code emitted on the mouse node.
+    MouseBtn(u16),
+    /// KEY_* keyboard code emitted on the keyboard node.
+    KbKey(u16),
+}
+
 pub struct UinputInject {
     mouse: parking_lot::Mutex<VirtualDevice>,
     keyboard: parking_lot::Mutex<VirtualDevice>,
+    /// Set of codes the peer has injected `down` without a matching
+    /// `up`. Maintained per inject call; drained on
+    /// `release_all_held` at session teardown.
+    held: parking_lot::Mutex<HashSet<HeldKey>>,
 }
 
 impl UinputInject {
@@ -699,6 +715,7 @@ impl UinputInject {
         Ok(Self {
             mouse: parking_lot::Mutex::new(mouse),
             keyboard: parking_lot::Mutex::new(keyboard),
+            held: parking_lot::Mutex::new(HashSet::new()),
         })
     }
 
@@ -745,7 +762,14 @@ impl InputInject for UinputInject {
             EventType::KEY.0,
             key.0,
             if down { 1 } else { 0 },
-        )])
+        )])?;
+        let mut held = self.held.lock();
+        if down {
+            held.insert(HeldKey::MouseBtn(key.0));
+        } else {
+            held.remove(&HeldKey::MouseBtn(key.0));
+        }
+        Ok(())
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
@@ -753,7 +777,44 @@ impl InputInject for UinputInject {
             EventType::KEY.0,
             code.0,
             if down { 1 } else { 0 },
-        )])
+        )])?;
+        let mut held = self.held.lock();
+        if down {
+            held.insert(HeldKey::KbKey(code.0));
+        } else {
+            held.remove(&HeldKey::KbKey(code.0));
+        }
+        Ok(())
+    }
+
+    fn release_all_held(&self) -> Result<()> {
+        let drained: Vec<HeldKey> = self.held.lock().drain().collect();
+        if drained.is_empty() {
+            return Ok(());
+        }
+        let count = drained.len();
+        for h in drained {
+            let res = match h {
+                HeldKey::KbKey(code) => self.emit_keyboard(&[evdev::InputEvent::new(
+                    EventType::KEY.0,
+                    code,
+                    0,
+                )]),
+                HeldKey::MouseBtn(code) => self.emit_mouse(&[evdev::InputEvent::new(
+                    EventType::KEY.0,
+                    code,
+                    0,
+                )]),
+            };
+            if let Err(e) = res {
+                warn!(error = %e, "failed to release held key on session end");
+            }
+        }
+        info!(
+            count,
+            "released stale held keys at session end (preventing stuck-key after peer disconnect)"
+        );
+        Ok(())
     }
 
     fn scroll(&self, dx: f32, dy: f32) -> Result<()> {

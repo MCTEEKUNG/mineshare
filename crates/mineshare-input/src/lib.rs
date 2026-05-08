@@ -18,7 +18,7 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Button {
     Left,
     Right,
@@ -66,6 +66,16 @@ pub trait InputInject: Send + Sync {
             InputEvent::Key { code, down } => self.key(code, down),
             InputEvent::Scroll { dx, dy } => self.scroll(dx, dy),
         }
+    }
+
+    /// Emit synthetic release events for any keys / mouse buttons
+    /// the peer has injected without their matching up-event. The
+    /// daemon calls this when a peer session ends so the OS doesn't
+    /// stay convinced a remote-injected key (typical: WASD held
+    /// during a game when the network drops) is still pressed.
+    /// Default no-op for impls that don't track held state.
+    fn release_all_held(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

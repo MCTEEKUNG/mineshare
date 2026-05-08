@@ -58,6 +58,7 @@ rcgen = "0.13"
 parking_lot = "0.12"
 bytes = "1"
 once_cell = "1"
+socket2 = { version = "0.5", features = ["all"] }
 
 # audio
 cpal = "0.15"
