@@ -29,9 +29,13 @@ pub mod resample;
 
 #[cfg(target_os = "windows")]
 pub mod wasapi_loopback;
+#[cfg(target_os = "windows")]
+pub mod virtual_mic_win;
 
 #[cfg(target_os = "linux")]
 pub mod pipewire_monitor;
+#[cfg(target_os = "linux")]
+pub mod virtual_mic_linux;
 
 /// Audio kind tag — both directions of the bridge ride the same wire,
 /// so the receiver needs to know whether a frame goes to the speakers
@@ -82,6 +86,30 @@ pub fn make_sysout_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
 /// device. Cross-platform via cpal.
 pub fn make_mic_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(cpal_mic::CpalMic::new()?))
+}
+
+/// Construct a virtual-mic playback sink — peer mic frames flow into
+/// this and apps on the local machine see a "MineShare Mic" input
+/// device.
+///
+///   * Linux: PipeWire `module-null-sink` named `mineshare_mic`
+///     (always available).
+///   * Windows: VB-CABLE `CABLE Input` (only if user has
+///     installed VB-CABLE — returns Err otherwise so the caller can
+///     log instructions and continue without virtual-mic playback).
+pub fn make_virtual_mic_playback() -> anyhow::Result<Box<dyn AudioPlayback>> {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(virtual_mic_win::VbCablePlayback::new()?))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(virtual_mic_linux::PipewireVirtualMic::new()?))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        anyhow::bail!("virtual mic playback is not implemented on this platform")
+    }
 }
 
 /// Construct a `cpal` playback handle on the system default output

@@ -269,6 +269,28 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         Arc::new(NullPlayback)
     };
 
+    // --- Virtual mic playback (M3 Slice 3b) -----------------------------
+    // The peer's Mic frames need their own sink so apps on this side
+    // see a "MineShare Mic" input device. Linux gets a PipeWire
+    // null-sink we create at startup; Windows uses VB-CABLE if the
+    // user installed it. Either failure is non-fatal — the bridge
+    // keeps working, mic frames just become silent on this side until
+    // VB-CABLE is installed (or the daemon restarted).
+    let mic_playback: Arc<dyn AudioPlayback> = if opts.inject {
+        match mineshare_audio::make_virtual_mic_playback() {
+            Ok(p) => {
+                info!("virtual mic playback ready");
+                Arc::from(p)
+            }
+            Err(e) => {
+                warn!(reason = %e, "virtual mic playback unavailable — peer mic frames will be dropped");
+                Arc::new(NullPlayback)
+            }
+        }
+    } else {
+        Arc::new(NullPlayback)
+    };
+
     // --- Control listener -------------------------------------------------
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -285,9 +307,18 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let resp_static = identity.noise_static_priv.clone();
     let resp_inject = inject.clone();
     let resp_playback = playback.clone();
+    let resp_mic_playback = mic_playback.clone();
     let resp_bcast = wire_bcast.clone();
     tokio::spawn(async move {
-        accept_loop(listener, resp_static, resp_inject, resp_playback, resp_bcast).await;
+        accept_loop(
+            listener,
+            resp_static,
+            resp_inject,
+            resp_playback,
+            resp_mic_playback,
+            resp_bcast,
+        )
+        .await;
     });
 
     // --- mDNS announce + browse ------------------------------------------
@@ -337,6 +368,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     let init_static = init_static.clone();
                     let inject = inject.clone();
                     let playback = playback.clone();
+                    let mic_playback = mic_playback.clone();
                     let bcast = wire_bcast.clone();
                     let known_for_loop = known.clone();
                     let peer_id = peer.device_id;
@@ -356,7 +388,16 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                     }
                                 }
                             };
-                            match dial_and_run(&peer_now, &init_static, inject.clone(), playback.clone(), bcast.clone()).await {
+                            match dial_and_run(
+                                &peer_now,
+                                &init_static,
+                                inject.clone(),
+                                playback.clone(),
+                                mic_playback.clone(),
+                                bcast.clone(),
+                            )
+                            .await
+                            {
                                 Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
                                 Err(e) => warn!(peer = %peer_id, error = %e, "session error — will reconnect"),
                             }
@@ -382,6 +423,7 @@ async fn accept_loop(
     static_priv: Vec<u8>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
+    mic_playback: Arc<dyn AudioPlayback>,
     bcast: broadcast::Sender<WireFrame>,
 ) {
     loop {
@@ -391,9 +433,12 @@ async fn accept_loop(
                 let key = static_priv.clone();
                 let inject = inject.clone();
                 let playback = playback.clone();
+                let mic_playback = mic_playback.clone();
                 let bcast = bcast.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_inbound(stream, &key, inject, playback, bcast).await {
+                    if let Err(e) =
+                        handle_inbound(stream, &key, inject, playback, mic_playback, bcast).await
+                    {
                         warn!(%addr, error = %e, "inbound peer session ended");
                     }
                 });
@@ -411,6 +456,7 @@ async fn handle_inbound(
     static_priv: &[u8],
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
+    mic_playback: Arc<dyn AudioPlayback>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
@@ -421,7 +467,7 @@ async fn handle_inbound(
         peer_pub = %hex_short(&session.remote_static),
         "inbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, playback, bcast).await
+    run_peer_session(stream, session, inject, playback, mic_playback, bcast).await
 }
 
 async fn dial_and_run(
@@ -429,6 +475,7 @@ async fn dial_and_run(
     static_priv: &[u8],
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
+    mic_playback: Arc<dyn AudioPlayback>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let addr = peer
@@ -447,7 +494,7 @@ async fn dial_and_run(
         peer_pub = %hex_short(&session.remote_static),
         "outbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, playback, bcast).await
+    run_peer_session(stream, session, inject, playback, mic_playback, bcast).await
 }
 
 /// Drives one peer connection after the Noise handshake.
@@ -461,6 +508,7 @@ async fn run_peer_session(
     session: NoiseSession,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
+    mic_playback: Arc<dyn AudioPlayback>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let aead = EncryptedSession::from(session);
@@ -559,6 +607,7 @@ async fn run_peer_session(
     let udp_recv = udp.clone();
     let inject_recv = inject.clone();
     let playback_recv = playback.clone();
+    let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
     let recv_handle = tokio::spawn(async move {
         // Buffer must fit the largest WireFrame: input events are
@@ -608,30 +657,6 @@ async fn run_peer_session(
                                         LAST_PEER_SYSOUT_AT_MS
                                             .store(now_ms(), Ordering::Relaxed);
                                     }
-                                    // Slice 3a: only the SysOut stream
-                                    // plays through the local default
-                                    // output. Mic frames are still
-                                    // received (visible in stats) but not
-                                    // audibly rendered — without a
-                                    // virtual-mic device they would just
-                                    // mix into the speakers, causing an
-                                    // open-room echo back through our own
-                                    // sysout monitor (peer's voice
-                                    // bouncing into peer's speakers via
-                                    // our loopback). Slice 3b will route
-                                    // mic frames into a PipeWire null-sink
-                                    // (Linux) / VB-CABLE (Win) so apps
-                                    // like Discord can pick them up
-                                    // without polluting the speaker mix.
-                                    if matches!(
-                                        frame.stream,
-                                        mineshare_audio::StreamKind::Mic
-                                    ) {
-                                        stats_recv
-                                            .audio_recv
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        continue;
-                                    }
                                     let n = stats_recv.audio_recv.load(Ordering::Relaxed);
                                     if n % 250 == 0 {
                                         tracing::info!(
@@ -642,7 +667,18 @@ async fn run_peer_session(
                                             "sample audio frame"
                                         );
                                     }
-                                    if let Err(e) = playback_recv.enqueue(frame) {
+                                    // Route by stream kind: SysOut → the
+                                    // default output device (peer's
+                                    // speakers); Mic → the virtual-mic
+                                    // sink (PipeWire null-sink on Linux,
+                                    // VB-CABLE on Windows) so apps see
+                                    // it as an input device without
+                                    // mixing into the speaker output.
+                                    let target = match frame.stream {
+                                        mineshare_audio::StreamKind::SysOut => &playback_recv,
+                                        mineshare_audio::StreamKind::Mic => &mic_playback_recv,
+                                    };
+                                    if let Err(e) = target.enqueue(frame) {
                                         warn!(error = %e, "audio enqueue failed");
                                     } else {
                                         stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
