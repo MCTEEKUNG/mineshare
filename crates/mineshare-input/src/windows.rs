@@ -40,7 +40,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{CloseHandle, MAX_PATH, RECT};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    PROCESS_NAME_FORMAT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
@@ -277,11 +282,90 @@ impl InputCapture for HookCapture {
     }
 }
 
-/// Polls the OS cursor visibility + clip-rect state so the input
-/// lock auto-engages when a fullscreen game has captured the
-/// pointer. Manual `set_input_locked(true)` from the GUI / hotkey
-/// keeps precedence — we only flip the lock when the auto state
-/// actually changes, and we never override a user-engaged lock.
+/// Anti-cheat-protected executables. Foreground match → auto-lock
+/// the bridge regardless of cursor state, and surface a red
+/// banner on the GUI Status tab so the user *knows* why their
+/// keyboard isn't crossing. These games' kernel-level anti-cheat
+/// (BattlEye / EAC / Vanguard / RICOCHET / Hyperion) routinely
+/// bans accounts for SendInput-style injected events — silently
+/// dropping the bridge is the safer default than letting an
+/// accidental edge cross arrive as suspect input on the peer.
+///
+/// Match is case-insensitive on the basename. Add new entries
+/// freely — false positives just engage a lock the user can
+/// override with Ctrl+Alt+R, false negatives are the dangerous
+/// direction.
+const RISKY_GAMES: &[&str] = &[
+    // Riot Vanguard
+    "VALORANT.exe",
+    "VALORANT-Win64-Shipping.exe",
+    "LeagueClient.exe",
+    "League of Legends.exe",
+    // BattlEye
+    "FortniteClient-Win64-Shipping.exe",
+    "RainbowSix.exe",
+    "RainbowSix_Vulkan.exe",
+    "TslGame.exe", // PUBG
+    "destiny2.exe",
+    "ArmaReforger.exe",
+    "DayZ_x64.exe",
+    "Tarkov.exe",
+    "EscapeFromTarkov.exe",
+    // Easy Anti-Cheat
+    "r5apex.exe", // Apex Legends
+    "r5apex_dx12.exe",
+    "FFXIV_dx11.exe",
+    "RustClient.exe",
+    "ELDENRING.exe",
+    // Activision RICOCHET
+    "cod.exe",
+    "ModernWarfare.exe",
+    "BlackOpsColdWar.exe",
+    // Roblox Hyperion
+    "RobloxPlayerBeta.exe",
+    // FACEIT / ESEA
+    "csgo.exe",
+    "cs2.exe",
+];
+
+fn current_foreground_exe_basename() -> Option<String> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; MAX_PATH as usize];
+        let mut len = buf.len() as u32;
+        let res = QueryFullProcessImageNameW(proc, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(proc);
+        if res.is_err() {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    }
+}
+
+/// Polls cursor visibility + clip-rect + foreground-process state
+/// every 250 ms. Auto-engages the input lock when:
+///   * the cursor is hidden (Minecraft-style fullscreen capture)
+///   * OR the cursor clip rect is smaller than the screen (FPS
+///     mouse-confine)
+///   * OR the foreground process matches the anti-cheat-protected
+///     `RISKY_GAMES` list — even if cursor is visible (main menu)
+///
+/// Manual user-engaged locks survive auto-detect releases (user
+/// always wins) so alt-tabbing out of a game momentarily doesn't
+/// drop a user-set lock.
 fn game_detect_thread() {
     use std::sync::atomic::AtomicBool;
     static AUTO_ENGAGED: AtomicBool = AtomicBool::new(false);
@@ -295,40 +379,48 @@ fn game_detect_thread() {
         let cursor_hidden = unsafe { GetCursorInfo(&mut ci) }.is_ok()
             && (ci.flags.0 & CURSOR_SHOWING.0) == 0;
 
+        // Cursor confine: a real fullscreen game's clip rect is a
+        // small fraction of the screen (the playable window).
+        // Plain Tauri / browser focus can knock a few pixels off
+        // the OS default clip and would otherwise false-positive,
+        // so require the clip to be meaningfully smaller —
+        // < 70% on BOTH axes — before treating it as a game.
         let mut clip = RECT::default();
         let cursor_clipped = unsafe { GetClipCursor(&mut clip) }.is_ok() && {
             let w = SCREEN_W.load(Ordering::Relaxed);
             let h = SCREEN_H.load(Ordering::Relaxed);
-            // OS default clip is the full virtual desktop. A real
-            // game-clipped rect is strictly smaller than the
-            // primary display.
-            (clip.right - clip.left) < w || (clip.bottom - clip.top) < h
+            let cw = clip.right - clip.left;
+            let ch = clip.bottom - clip.top;
+            cw < w * 7 / 10 && ch < h * 7 / 10
         };
 
-        let should_lock = cursor_hidden || cursor_clipped;
+        // Foreground process match — independent of cursor state.
+        let exe = current_foreground_exe_basename();
+        let anticheat_match = exe.as_deref().and_then(|e| {
+            RISKY_GAMES
+                .iter()
+                .find(|r| r.eq_ignore_ascii_case(e))
+                .map(|_| e.to_string())
+        });
+        super::set_anticheat_warning(anticheat_match.clone());
+
+        let should_lock = cursor_hidden || cursor_clipped || anticheat_match.is_some();
         let was_engaged = AUTO_ENGAGED.load(Ordering::Acquire);
         if should_lock != was_engaged {
             AUTO_ENGAGED.store(should_lock, Ordering::Release);
-            // Only flip the public lock if the user hasn't already
-            // engaged it manually — we don't want auto-detect to
-            // *unlock* a user-locked session when they alt-tab out
-            // of a game momentarily.
             if should_lock {
                 if !super::is_input_locked() {
                     info!(
                         cursor_hidden,
-                        cursor_clipped, "game auto-detect — engaging lock"
+                        cursor_clipped,
+                        anticheat = ?anticheat_match,
+                        "game auto-detect — engaging lock"
                     );
                     super::set_input_locked(true);
                 }
-            } else {
-                // Auto-disengage only if WE were the ones that
-                // engaged it. Otherwise leave the user's manual
-                // lock alone.
-                if super::is_input_locked() && was_engaged {
-                    info!("game auto-detect — releasing lock");
-                    super::set_input_locked(false);
-                }
+            } else if super::is_input_locked() && was_engaged {
+                info!("game auto-detect — releasing lock");
+                super::set_input_locked(false);
             }
         }
     }

@@ -123,6 +123,32 @@ static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 /// Status tab in the GUI.
 static INPUT_LOCKED: AtomicBool = AtomicBool::new(false);
 
+/// Name of the foreground anti-cheat-protected game when the
+/// Win-side game-detect thread has flagged one. `None` when no
+/// risky title is in the foreground. The GUI surfaces this as a
+/// red banner on the Status tab so the user knows *why* the
+/// input lock auto-engaged. Anti-cheat engines like BattlEye /
+/// EAC / Vanguard / RICOCHET ban accounts for using injected
+/// input — flagging matters more than just cursor capture.
+static ANTICHEAT_WARNING: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+pub fn anticheat_warning() -> Option<String> {
+    ANTICHEAT_WARNING.lock().clone()
+}
+
+pub(crate) fn set_anticheat_warning(name: Option<String>) {
+    let mut g = ANTICHEAT_WARNING.lock();
+    let changed = g.as_ref() != name.as_ref();
+    *g = name.clone();
+    if changed {
+        if let Some(ref n) = name {
+            tracing::warn!(game = %n, "anti-cheat-protected game in foreground — input locked");
+        } else {
+            tracing::info!("anti-cheat foreground cleared");
+        }
+    }
+}
+
 pub fn is_input_locked() -> bool {
     INPUT_LOCKED.load(Ordering::Acquire)
 }

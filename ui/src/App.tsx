@@ -19,6 +19,7 @@ type Status = {
   local_in_remote: boolean;
   peer_in_remote: boolean;
   input_locked: boolean;
+  anticheat_warning: string | null;
 };
 
 type Tab = "status" | "layout" | "devices" | "audio" | "hotkeys" | "advanced";
@@ -74,6 +75,9 @@ export default function App() {
 
         {tab === "status" && status ? (
           <>
+            {status.anticheat_warning ? (
+              <AntiCheatBanner game={status.anticheat_warning} />
+            ) : null}
             <GameLockCard s={status} onChange={(v) => invoke("set_input_lock", { locked: v })} />
             <StatusGrid s={status} />
           </>
@@ -114,6 +118,24 @@ function ConnectionPill({
       <span className="size-2 rounded-full bg-emerald-500" />
       paired with {status.peer_addr}
     </span>
+  );
+}
+
+function AntiCheatBanner({ game }: { game: string }) {
+  return (
+    <div className="rounded-lg border-2 border-red-400 bg-red-50 dark:bg-red-950/40 p-4 mb-6">
+      <p className="text-sm font-semibold text-red-700 dark:text-red-400 flex items-center gap-2">
+        ⚠ Anti-cheat-protected game detected:{" "}
+        <code className="font-mono">{game}</code>
+      </p>
+      <p className="text-xs text-red-700 dark:text-red-300 mt-1.5 leading-relaxed max-w-prose">
+        Input is auto-locked to this PC for safety. Kernel-level
+        anti-cheat (BattlEye / EAC / Vanguard / RICOCHET / Hyperion)
+        can flag SendInput-style injected events as cheating and ban
+        accounts. The bridge will resume normally once the game is no
+        longer in the foreground.
+      </p>
+    </div>
   );
 }
 

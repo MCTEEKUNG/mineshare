@@ -48,6 +48,11 @@ pub struct StatusSnapshot {
     /// auto-handover are paused; only the Ctrl+Alt+R hotkey can
     /// move between machines.
     pub input_locked: bool,
+    /// Set when the foreground process matches the anti-cheat-
+    /// protected game DB (BattlEye / EAC / Vanguard / RICOCHET /
+    /// Hyperion). The GUI surfaces this as a red banner so the
+    /// user knows the auto-lock fired for safety reasons.
+    pub anticheat_warning: Option<String>,
 }
 
 pub fn snapshot() -> StatusSnapshot {
@@ -64,6 +69,7 @@ pub fn snapshot() -> StatusSnapshot {
         local_in_remote: mineshare_input::local_in_remote(),
         peer_in_remote: mineshare_input::peer_in_remote(),
         input_locked: mineshare_input::is_input_locked(),
+        anticheat_warning: mineshare_input::anticheat_warning(),
     }
 }
 
