@@ -14,5 +14,7 @@ pub mod collect;
 pub mod identity;
 pub mod layout;
 pub mod logs;
+pub mod pairing;
 pub mod runtime;
 pub mod status;
+pub mod trust;

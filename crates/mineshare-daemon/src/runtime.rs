@@ -97,6 +97,24 @@ enum ControlMsg {
     /// top↔bottom on their side before sending, so receivers can
     /// apply the value verbatim.
     SetPeerSide(crate::layout::PeerSide),
+    /// Stage 7 PIN-pairing: dialer sends the user-entered PIN
+    /// plus its own identity so the acceptor can both verify
+    /// and persist the trust entry. Used exactly once at the
+    /// start of a session against an untrusted peer.
+    PinAttempt {
+        pin: String,
+        device_id: String,
+        display_name: String,
+    },
+    /// Acceptor's verdict on the PinAttempt + its own identity.
+    /// On `ok=true` the dialer adds the acceptor to its trust
+    /// list and proceeds with the session; on `ok=false` both
+    /// sides tear the connection down.
+    PinAck {
+        ok: bool,
+        device_id: String,
+        display_name: String,
+    },
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -355,7 +373,9 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let known_peers: Arc<Mutex<HashMap<DeviceId, PeerAdvert>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let resp_static = identity.noise_static_priv.clone();
+    let identity_arc = Arc::new(identity);
+    let resp_static = identity_arc.noise_static_priv.clone();
+    let resp_identity = identity_arc.clone();
     let resp_inject = inject.clone();
     let resp_playback = playback.clone();
     let resp_mic_playback = mic_playback.clone();
@@ -364,6 +384,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         accept_loop(
             listener,
             resp_static,
+            resp_identity,
             resp_inject,
             resp_playback,
             resp_mic_playback,
@@ -375,9 +396,9 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // --- mDNS announce + browse ------------------------------------------
     let mut discovery = Discovery::new()?;
     let advert = PeerAdvert {
-        device_id: identity.device_id,
-        display_name: identity.display_name.clone(),
-        os: identity.os.clone(),
+        device_id: identity_arc.device_id,
+        display_name: identity_arc.display_name.clone(),
+        os: identity_arc.os.clone(),
         control_port: local_port,
         addresses: detect_local_addresses(),
     };
@@ -386,9 +407,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<DiscoveryEvent>(32);
     discovery.browse(tx)?;
 
-    let init_static = identity.noise_static_priv.clone();
+    let init_static = identity_arc.noise_static_priv.clone();
+    let init_identity = identity_arc.clone();
     let known = known_peers.clone();
-    let local_id = identity.device_id;
+    let local_id = identity_arc.device_id;
 
     while let Some(evt) = rx.recv().await {
         match evt {
@@ -417,6 +439,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 
                 if local_id.0 < peer.device_id.0 {
                     let init_static = init_static.clone();
+                    let init_identity = init_identity.clone();
                     let inject = inject.clone();
                     let playback = playback.clone();
                     let mic_playback = mic_playback.clone();
@@ -442,6 +465,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             match dial_and_run(
                                 &peer_now,
                                 &init_static,
+                                init_identity.clone(),
                                 inject.clone(),
                                 playback.clone(),
                                 mic_playback.clone(),
@@ -472,6 +496,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 async fn accept_loop(
     listener: TcpListener,
     static_priv: Vec<u8>,
+    identity: Arc<crate::identity::Identity>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
@@ -482,13 +507,22 @@ async fn accept_loop(
             Ok((stream, addr)) => {
                 debug!(%addr, "incoming connection");
                 let key = static_priv.clone();
+                let identity = identity.clone();
                 let inject = inject.clone();
                 let playback = playback.clone();
                 let mic_playback = mic_playback.clone();
                 let bcast = bcast.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_inbound(stream, &key, inject, playback, mic_playback, bcast).await
+                    if let Err(e) = handle_inbound(
+                        stream,
+                        &key,
+                        identity,
+                        inject,
+                        playback,
+                        mic_playback,
+                        bcast,
+                    )
+                    .await
                     {
                         warn!(%addr, error = %e, "inbound peer session ended");
                     }
@@ -505,6 +539,7 @@ async fn accept_loop(
 async fn handle_inbound(
     mut stream: TcpStream,
     static_priv: &[u8],
+    identity: Arc<crate::identity::Identity>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
@@ -518,12 +553,23 @@ async fn handle_inbound(
         peer_pub = %hex_short(&session.remote_static),
         "inbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, playback, mic_playback, bcast).await
+    run_peer_session(
+        stream,
+        session,
+        identity,
+        false, // is_initiator: we accepted, peer dialed us
+        inject,
+        playback,
+        mic_playback,
+        bcast,
+    )
+    .await
 }
 
 async fn dial_and_run(
     peer: &PeerAdvert,
     static_priv: &[u8],
+    identity: Arc<crate::identity::Identity>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
@@ -545,7 +591,17 @@ async fn dial_and_run(
         peer_pub = %hex_short(&session.remote_static),
         "outbound Noise XX handshake completed"
     );
-    run_peer_session(stream, session, inject, playback, mic_playback, bcast).await
+    run_peer_session(
+        stream,
+        session,
+        identity,
+        true, // is_initiator: we dialed
+        inject,
+        playback,
+        mic_playback,
+        bcast,
+    )
+    .await
 }
 
 /// Drives one peer connection after the Noise handshake.
@@ -557,11 +613,14 @@ async fn dial_and_run(
 async fn run_peer_session(
     mut stream: TcpStream,
     session: NoiseSession,
+    identity: Arc<crate::identity::Identity>,
+    is_initiator: bool,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
+    let peer_static = session.remote_static.clone();
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
@@ -576,6 +635,39 @@ async fn run_peer_session(
     if let Err(e) = enable_tcp_keepalive(&stream) {
         warn!(error = %e, "failed to enable TCP keepalive on control socket");
     }
+
+    // Stage 7: PIN-pairing gate. Anyone on the LAN with a fresh
+    // mineshare-daemon completes Noise XX (static keys are
+    // per-install random, so nothing about that proves identity);
+    // the trust list is what stops them from sending input events
+    // at us. New peers go through a one-time PIN exchange before
+    // we let them past the handshake.
+    if !crate::trust::is_trusted(&peer_static) {
+        info!(%peer_addr, "peer not in trust list — running PIN pairing");
+        match pair_peer(&mut stream, &aead, &peer_static, peer_addr, is_initiator, &identity).await
+        {
+            Ok(peer_id) => {
+                info!(peer_device = %peer_id.0, "pairing succeeded");
+                crate::pairing::set_phase(crate::pairing::PairingPhase::Trusted {
+                    peer_name: peer_id.1.clone(),
+                });
+                // Clear back to None after a brief delay so the
+                // GUI's "trusted" toast lingers.
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    crate::pairing::set_phase(crate::pairing::PairingPhase::None);
+                });
+            }
+            Err(e) => {
+                warn!(%peer_addr, error = %e, "pairing failed — closing session");
+                crate::pairing::set_phase(crate::pairing::PairingPhase::Failed {
+                    reason: e.to_string(),
+                });
+                return Err(e);
+            }
+        }
+    }
+
     crate::status::set_peer_connected(peer_addr.to_string(), None);
 
     let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
@@ -686,6 +778,15 @@ async fn run_peer_session(
                     ) {
                         warn!(error = %e, "failed to apply peer layout");
                     }
+                }
+                Ok(ControlMsg::PinAttempt { .. }) | Ok(ControlMsg::PinAck { .. }) => {
+                    // Pairing messages should only arrive during
+                    // the dedicated pairing handshake before the
+                    // session reader is up. A peer sending these
+                    // mid-session is either a protocol bug on
+                    // their side or someone trying to re-pair —
+                    // log + ignore.
+                    warn!("received pairing message mid-session — ignored");
                 }
                 Err(e) => {
                     debug!(error = %e, "control reader ended");
@@ -943,6 +1044,117 @@ fn hex_short(bytes: &[u8]) -> String {
         .take(6)
         .map(|b| format!("{b:02x}"))
         .collect::<String>()
+}
+
+/// PIN-based pairing handshake over the just-completed Noise
+/// channel. Returns the peer's `(device_id, display_name)` on
+/// success so the caller can persist the pairing into the trust
+/// list. 60 s timeout — past that we assume the human at the
+/// other end isn't around and tear the session down.
+async fn pair_peer(
+    stream: &mut TcpStream,
+    aead: &EncryptedSession,
+    peer_static: &[u8],
+    peer_addr: SocketAddr,
+    is_initiator: bool,
+    identity: &crate::identity::Identity,
+) -> Result<(String, String)> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let our_id = identity.device_id.0.to_string();
+    let our_name = identity.display_name.clone();
+    let pair_timeout = Duration::from_secs(60);
+
+    if is_initiator {
+        // We dialed — the other side will display the PIN; our
+        // user has to type it in. Surface that to the GUI and
+        // poll for the typed value.
+        crate::pairing::set_phase(crate::pairing::PairingPhase::AwaitingPin {
+            peer_name: format!("{peer_addr}"),
+            peer_addr: peer_addr.to_string(),
+        });
+        let pin = timeout(pair_timeout, async {
+            loop {
+                if let Some(p) = crate::pairing::take_submitted_pin() {
+                    break p;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .context("user did not enter PIN within timeout")?;
+
+        crate::pairing::set_phase(crate::pairing::PairingPhase::Verifying);
+        write_encrypted(
+            stream,
+            aead,
+            &ControlMsg::PinAttempt {
+                pin,
+                device_id: our_id,
+                display_name: our_name,
+            },
+        )
+        .await
+        .context("send PinAttempt")?;
+        let resp: ControlMsg = timeout(pair_timeout, read_encrypted(stream, aead))
+            .await
+            .context("waiting for PinAck")??;
+        match resp {
+            ControlMsg::PinAck {
+                ok: true,
+                device_id,
+                display_name,
+            } => {
+                crate::trust::add_trusted(&device_id, &display_name, peer_static)?;
+                Ok((device_id, display_name))
+            }
+            ControlMsg::PinAck { ok: false, .. } => {
+                anyhow::bail!("peer rejected the PIN");
+            }
+            other => anyhow::bail!("expected PinAck, got {other:?}"),
+        }
+    } else {
+        // We accepted — generate the PIN, show it on the local
+        // GUI so the user can read it to whoever's typing on the
+        // dialer's side, and wait for their PinAttempt.
+        let pin = crate::pairing::generate_pin();
+        crate::pairing::set_phase(crate::pairing::PairingPhase::DisplayingPin {
+            pin: pin.clone(),
+            peer_name: format!("{peer_addr}"),
+            peer_addr: peer_addr.to_string(),
+        });
+
+        let attempt: ControlMsg = timeout(pair_timeout, read_encrypted(stream, aead))
+            .await
+            .context("waiting for PinAttempt")??;
+        let (got_pin, peer_id, peer_name) = match attempt {
+            ControlMsg::PinAttempt {
+                pin,
+                device_id,
+                display_name,
+            } => (pin, device_id, display_name),
+            other => anyhow::bail!("expected PinAttempt, got {other:?}"),
+        };
+
+        let ok = got_pin == pin;
+        write_encrypted(
+            stream,
+            aead,
+            &ControlMsg::PinAck {
+                ok,
+                device_id: our_id,
+                display_name: our_name,
+            },
+        )
+        .await
+        .context("send PinAck")?;
+        if !ok {
+            anyhow::bail!("PIN mismatch (got {got_pin}, expected {pin})");
+        }
+        crate::trust::add_trusted(&peer_id, &peer_name, peer_static)?;
+        Ok((peer_id, peer_name))
+    }
 }
 
 fn enable_tcp_keepalive(stream: &TcpStream) -> Result<()> {

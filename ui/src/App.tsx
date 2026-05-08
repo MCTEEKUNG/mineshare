@@ -5,6 +5,7 @@ import AudioPage from "./pages/Audio";
 import DevicesPage from "./pages/Devices";
 import HotkeysPage from "./pages/Hotkeys";
 import AdvancedPage from "./pages/Advanced";
+import PairingModal from "./PairingModal";
 
 type Status = {
   peer_connected: boolean;
@@ -44,6 +45,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex">
+      <PairingModal />
       <aside className="w-56 shrink-0 border-r border-neutral-200 dark:border-neutral-800 px-3 py-6">
         <h1 className="text-lg font-semibold mb-6 px-3">MineShare</h1>
         <nav className="flex flex-col gap-1 text-sm">

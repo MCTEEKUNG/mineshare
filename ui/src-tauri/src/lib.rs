@@ -58,6 +58,26 @@ fn set_input_lock(locked: bool) {
 }
 
 #[tauri::command]
+fn get_pairing_phase() -> mineshare_daemon::pairing::PairingPhase {
+    mineshare_daemon::pairing::current_phase()
+}
+
+#[tauri::command]
+fn submit_pin(pin: String) {
+    mineshare_daemon::pairing::submit_pin(pin);
+}
+
+#[tauri::command]
+fn list_trusted_peers() -> Vec<mineshare_daemon::trust::TrustedPeer> {
+    mineshare_daemon::trust::list_trusted()
+}
+
+#[tauri::command]
+fn revoke_trusted_peer(device_id: String) -> Result<(), String> {
+    mineshare_daemon::trust::revoke(&device_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_audio_devices() -> DevicesSnapshot {
     DevicesSnapshot {
         outputs: mineshare_audio::list_output_devices(),
@@ -96,6 +116,10 @@ pub fn run() {
             set_audio_toggle,
             list_audio_devices,
             set_input_lock,
+            get_pairing_phase,
+            submit_pin,
+            list_trusted_peers,
+            revoke_trusted_peer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
