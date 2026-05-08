@@ -21,9 +21,8 @@ use serde::{Deserialize, Serialize};
 pub enum PeerSide {
     Left,
     Right,
-    // Top / Bottom land in 2b polish once the input modules can
-    // run vertical edge detection. Stored as `lowercase` so the
-    // JSON file stays readable: `{ "peer_side": "right" }`.
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,13 +69,18 @@ pub fn current() -> LayoutConfig {
 /// Layout page.
 pub fn set(cfg: LayoutConfig) -> Result<()> {
     save(&cfg)?;
-    let input_side = match cfg.peer_side {
-        PeerSide::Left => mineshare_input::PeerSide::Left,
-        PeerSide::Right => mineshare_input::PeerSide::Right,
-    };
-    mineshare_input::set_peer_side(input_side);
+    mineshare_input::set_peer_side(map_side(cfg.peer_side));
     *CURRENT.lock() = Some(cfg);
     Ok(())
+}
+
+fn map_side(side: PeerSide) -> mineshare_input::PeerSide {
+    match side {
+        PeerSide::Left => mineshare_input::PeerSide::Left,
+        PeerSide::Right => mineshare_input::PeerSide::Right,
+        PeerSide::Top => mineshare_input::PeerSide::Top,
+        PeerSide::Bottom => mineshare_input::PeerSide::Bottom,
+    }
 }
 
 fn config_path() -> Result<PathBuf> {

@@ -123,6 +123,8 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let side = match layout_cfg.peer_side {
         crate::layout::PeerSide::Left => mineshare_input::PeerSide::Left,
         crate::layout::PeerSide::Right => mineshare_input::PeerSide::Right,
+        crate::layout::PeerSide::Top => mineshare_input::PeerSide::Top,
+        crate::layout::PeerSide::Bottom => mineshare_input::PeerSide::Bottom,
     };
     mineshare_input::set_peer_side(side);
 

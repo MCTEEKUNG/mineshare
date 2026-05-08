@@ -147,22 +147,24 @@ fn enter_remote(entry_y: i32) {
 fn exit_remote(restore_y: i32) {
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
-    let y = restore_y.clamp(0, h - 1);
     // Restore the local cursor to the edge that faces the peer
     // (per the configured layout). User came back across that
     // edge to leave Remote, so dropping the OS cursor there
-    // matches their hand position on the desk.
-    let restore_x = match super::peer_side() {
-        super::PeerSide::Right => w - 1,
-        super::PeerSide::Left => 0,
+    // matches their hand position on the desk. For top/bottom
+    // we keep their horizontal anchor, just snap Y to the edge.
+    let (restore_x, restore_y) = match super::peer_side() {
+        super::PeerSide::Right => (w - 1, restore_y.clamp(0, h - 1)),
+        super::PeerSide::Left => (0, restore_y.clamp(0, h - 1)),
+        super::PeerSide::Top => (LAST_X.load(Ordering::Relaxed).clamp(0, w - 1), 0),
+        super::PeerSide::Bottom => (LAST_X.load(Ordering::Relaxed).clamp(0, w - 1), h - 1),
     };
     unsafe {
-        let _ = SetCursorPos(restore_x, y);
+        let _ = SetCursorPos(restore_x, restore_y);
     }
     LAST_X.store(restore_x, Ordering::Relaxed);
-    LAST_Y.store(y, Ordering::Relaxed);
+    LAST_Y.store(restore_y, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
-    info!(restore = ?(restore_x, y), "cursor → local");
+    info!(restore = ?(restore_x, restore_y), "cursor → local");
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -187,11 +189,12 @@ pub fn force_exit_remote() {
 pub fn on_peer_take_control() {
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
-    let x = match super::peer_side() {
-        super::PeerSide::Right => (w - 1).max(0),
-        super::PeerSide::Left => 0,
+    let (x, y) = match super::peer_side() {
+        super::PeerSide::Right => ((w - 1).max(0), (h / 2).clamp(0, (h - 1).max(0))),
+        super::PeerSide::Left => (0, (h / 2).clamp(0, (h - 1).max(0))),
+        super::PeerSide::Top => ((w / 2).clamp(0, (w - 1).max(0)), 0),
+        super::PeerSide::Bottom => ((w / 2).clamp(0, (w - 1).max(0)), (h - 1).max(0)),
     };
-    let y = (h / 2).clamp(0, (h - 1).max(0));
     unsafe {
         let _ = SetCursorPos(x, y);
     }
@@ -317,30 +320,36 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     );
                     super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
                 }
+                let h = SCREEN_H.load(Ordering::Relaxed);
                 LAST_X.store(x, Ordering::Relaxed);
                 LAST_Y.store(y, Ordering::Relaxed);
-                // Edge to watch depends on layout: peer-on-right →
-                // right edge of our display, peer-on-left → left edge.
-                let crossed_edge = match super::peer_side() {
-                    super::PeerSide::Right => {
-                        last_x != i32::MIN && last_x < w - 1 && x >= w - 1
-                    }
-                    super::PeerSide::Left => last_x != i32::MIN && last_x > 0 && x <= 0,
-                };
+                // Edge to watch depends on layout. We treat hitting
+                // the configured boundary edge as the trigger.
+                let crossed_edge = last_x != i32::MIN
+                    && match super::peer_side() {
+                        super::PeerSide::Right => last_x < w - 1 && x >= w - 1,
+                        super::PeerSide::Left => last_x > 0 && x <= 0,
+                        super::PeerSide::Top => last_y > 0 && y <= 0,
+                        super::PeerSide::Bottom => last_y < h - 1 && y >= h - 1,
+                    };
                 if crossed_edge {
                     enter_remote(y);
                 }
                 // local: don't forward, OS handles cursor as usual
             } else {
                 // REMOTE: compute delta from anchor, clamp to peer screen,
-                // and forward. virt_x's sign convention flips with the
-                // layout — peer-on-right means rightward dx takes us
-                // deeper into the peer; peer-on-left flips to leftward.
+                // and forward. The "depth" axis (how far INTO the peer
+                // we've gone) flips with the layout — right means
+                // rightward dx, left means -dx, top means -dy, bottom
+                // means dy. Exit fires when depth retreats to
+                // -EXIT_BUFFER_PX past the entry edge.
                 let dx = x - last_x;
                 let dy = y - last_y;
                 let depth_dx = match super::peer_side() {
                     super::PeerSide::Right => dx,
                     super::PeerSide::Left => -dx,
+                    super::PeerSide::Top => -dy,
+                    super::PeerSide::Bottom => dy,
                 };
                 let peer_w = PEER_W.load(Ordering::Relaxed);
                 // Clamp accumulated virt_x to [-EXIT_BUFFER_PX, peer_w-1].

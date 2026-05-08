@@ -113,10 +113,8 @@ pub enum RemoteEvent {
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
 static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 
-/// Which side of the local screen the peer monitor is "stuck to".
-/// 0 = Left (peer is to the left of us), 1 = Right (default —
-/// matches the M0–M4 hardcoded layout where Win is on the left
-/// and Ubuntu is on the right of the desk). The platform-specific
+/// Which side of the local screen the peer monitor is "stuck to"
+/// in the user's physical desk arrangement. The platform-specific
 /// capture modules read this to decide which edge of our display
 /// triggers entry into Remote, where to warp the cursor on
 /// TakeControl, and which sign convention `virt_x` follows.
@@ -124,6 +122,17 @@ static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 pub enum PeerSide {
     Left = 0,
     Right = 1,
+    Top = 2,
+    Bottom = 3,
+}
+
+impl PeerSide {
+    /// True when the side runs along a vertical edge of the local
+    /// screen (left or right). Tracking depth then comes from
+    /// horizontal HW deltas (`dx`).
+    pub fn is_horizontal(self) -> bool {
+        matches!(self, PeerSide::Left | PeerSide::Right)
+    }
 }
 
 static PEER_SIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1); // Right
@@ -131,7 +140,9 @@ static PEER_SIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new
 pub fn peer_side() -> PeerSide {
     match PEER_SIDE.load(Ordering::Acquire) {
         0 => PeerSide::Left,
-        _ => PeerSide::Right,
+        1 => PeerSide::Right,
+        2 => PeerSide::Top,
+        _ => PeerSide::Bottom,
     }
 }
 

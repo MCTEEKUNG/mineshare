@@ -81,15 +81,18 @@ static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
 /// peer-side right edge. Slice 2.5 negotiates the real value via
 /// `PortAnnounce`; for now defaults to the user's 2880-wide Win laptop.
 static PEER_W: AtomicI32 = AtomicI32::new(2880);
-/// Estimated own cursor X (clamped to `[0, SCREEN_W-1]`). We seed it at
-/// screen-centre because there is no portable way to query the real
-/// cursor position on Wayland; user motion drags it to the truth fast.
+/// Estimated own cursor X / Y (clamped to screen bounds). Seeded at
+/// screen-centre because Wayland has no portable cursor-pos query;
+/// user motion drags both to the truth fast via the clamp self-sync.
 static CURSOR_X: AtomicI32 = AtomicI32::new(960);
-/// Virtual cursor X on the peer's screen while we're in `REMOTE`.
+static CURSOR_Y: AtomicI32 = AtomicI32::new(540);
+/// Virtual cursor depth into the peer's screen while we're in `REMOTE`.
+/// Generic across horizontal/vertical layouts — reused under the same
+/// `VIRT_X` name to avoid renaming the entire FSM.
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
-/// Cumulative leftward overshoot once `CURSOR_X` has clamped to zero.
-/// Resets on rightward motion. When it reaches `ENTER_PRESSURE_PX` we
-/// transition to Remote.
+/// Cumulative overshoot once the cursor estimate has clamped at the
+/// configured boundary edge. Resets on motion in the opposite
+/// direction. Hits `ENTER_PRESSURE_PX` → enter Remote.
 static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 
 pub fn local_screen_geometry() -> (u32, u32) {
@@ -123,18 +126,23 @@ fn enter_remote() {
 }
 
 fn exit_remote() {
-    // Reset cursor estimate to "just inside the boundary edge" so
-    // the user can pull back freely without us mis-detecting
-    // another edge crossing. Side depends on the configured layout.
+    // Reset cursor-position estimate to "just inside the boundary
+    // edge" so the user can pull back freely without us
+    // mis-detecting another edge crossing. Side depends on the
+    // configured layout.
     let w = SCREEN_W.load(Ordering::Relaxed);
-    let restore_x = match super::peer_side() {
-        super::PeerSide::Left => 40,
-        super::PeerSide::Right => (w - 41).max(0),
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    let (rx, ry) = match super::peer_side() {
+        super::PeerSide::Left => (40, CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Right => ((w - 41).max(0), CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Top => (CURSOR_X.load(Ordering::Relaxed), 40),
+        super::PeerSide::Bottom => (CURSOR_X.load(Ordering::Relaxed), (h - 41).max(0)),
     };
-    CURSOR_X.store(restore_x, Ordering::Relaxed);
+    CURSOR_X.store(rx, Ordering::Relaxed);
+    CURSOR_Y.store(ry, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
-    info!(restore_x, "cursor → local (linux)");
+    info!(restore = ?(rx, ry), "cursor → local (linux)");
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -155,19 +163,27 @@ pub fn force_exit_remote() {
 /// the side (and thus the sign) depends on the configured layout.
 pub fn on_peer_take_control(inject: &dyn InputInject) {
     let w = SCREEN_W.load(Ordering::Relaxed).max(1);
-    let (slam, resync_x) = match super::peer_side() {
-        super::PeerSide::Left => (-(w * 2), 0),
-        super::PeerSide::Right => (w * 2, w - 1),
+    let h = SCREEN_H.load(Ordering::Relaxed).max(1);
+    let (slam_dx, slam_dy, rx, ry) = match super::peer_side() {
+        super::PeerSide::Left => (-(w * 2), 0, 0, h / 2),
+        super::PeerSide::Right => (w * 2, 0, w - 1, h / 2),
+        super::PeerSide::Top => (0, -(h * 2), w / 2, 0),
+        super::PeerSide::Bottom => (0, h * 2, w / 2, h - 1),
     };
-    if let Err(e) = inject.mouse_move_rel(slam, 0) {
+    if let Err(e) = inject.mouse_move_rel(slam_dx, slam_dy) {
         warn!(error = %e, "boundary-edge slam failed");
         return;
     }
     // Resync our own LOCAL-mode tracking so we don't false-trigger
     // re-entry once the peer releases and HW motion resumes here.
-    CURSOR_X.store(resync_x, Ordering::Relaxed);
+    CURSOR_X.store(rx, Ordering::Relaxed);
+    CURSOR_Y.store(ry, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
-    info!(slam_dx = slam, side = ?super::peer_side(), "boundary-edge slam on TakeControl (linux)");
+    info!(
+        slam = ?(slam_dx, slam_dy),
+        side = ?super::peer_side(),
+        "boundary-edge slam on TakeControl (linux)"
+    );
 }
 
 pub struct EvdevCapture {
@@ -408,27 +424,28 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
             return;
         }
 
-        // Track an estimate of the real cursor X. We can't query
-        // Wayland for the real position, but the OS *clamps* the
-        // cursor to the screen edge — and evdev keeps reporting the
-        // overshoot. Mirroring that with a clamped CURSOR_X means
-        // any time the user drags into a real screen edge our
-        // estimate self-syncs to the real position; drift can't
-        // accumulate beyond one screen.
+        // Track an estimate of the real cursor X *and* Y. Wayland
+        // has no portable cursor-pos query, but the OS clamps at
+        // the screen edges — and evdev keeps reporting the
+        // overshoot. Mirroring with clamped CURSOR_X / CURSOR_Y
+        // means any time the user drags into a real screen edge our
+        // estimate self-syncs; drift can't accumulate beyond one
+        // screen.
         let screen_w = SCREEN_W.load(Ordering::Relaxed);
+        let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
+        let prev_y = CURSOR_Y.load(Ordering::Relaxed);
         let raw_x = prev_x + dx;
-        let new_x = raw_x.clamp(0, (screen_w - 1).max(0));
-        CURSOR_X.store(new_x, Ordering::Relaxed);
+        let raw_y = prev_y + dy;
+        CURSOR_X.store(raw_x.clamp(0, (screen_w - 1).max(0)), Ordering::Relaxed);
+        CURSOR_Y.store(raw_y.clamp(0, (screen_h - 1).max(0)), Ordering::Relaxed);
 
         // Edge press: which clamp signals "user is pushing into the
-        // boundary" depends on the layout. Peer-on-left → left-edge
-        // overshoot (raw_x < 0); peer-on-right → right-edge
-        // overshoot (raw_x > screen_w - 1). The OS cursor stays
-        // pinned at the clamp but evdev keeps reporting motion;
-        // sustained `ENTER_PRESSURE_PX` of overshoot hands control
-        // to the peer. The opposite-direction dx cancels an
-        // in-flight press (user pulled back from the edge).
+        // boundary" depends on the layout. We pick one axis (X for
+        // left/right sides, Y for top/bottom) and detect overshoot
+        // past the configured edge of the screen. The opposite-
+        // direction motion cancels an in-flight press (user pulled
+        // back from the edge).
         let (overshoot, cancel) = match super::peer_side() {
             super::PeerSide::Left => (
                 if raw_x < 0 { Some(-raw_x) } else { None },
@@ -441,6 +458,18 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
                     None
                 },
                 dx < 0,
+            ),
+            super::PeerSide::Top => (
+                if raw_y < 0 { Some(-raw_y) } else { None },
+                dy > 0,
+            ),
+            super::PeerSide::Bottom => (
+                if raw_y > screen_h - 1 {
+                    Some(raw_y - (screen_h - 1))
+                } else {
+                    None
+                },
+                dy < 0,
             ),
         };
         if let Some(over) = overshoot {
@@ -461,15 +490,15 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         // No forward in LOCAL — OS already moves the cursor.
     } else {
         let peer_w = PEER_W.load(Ordering::Relaxed);
-        // virt_x = "distance into the peer from the edge we crossed".
-        // For peer-on-left, the user crossed leftward so leftward dx
-        // (negative) goes deeper. For peer-on-right, rightward dx
-        // (positive) goes deeper. Either way, virt_x grows on
-        // depth-direction motion and falls back toward zero (then
-        // negative) on retreat — exit fires at -EXIT_BUFFER_PX.
+        // Depth-direction delta: how far INTO the peer the latest
+        // HW motion takes us. Left means -dx, right means dx, top
+        // means -dy, bottom means dy. virt_x grows on depth and
+        // retreats toward -EXIT_BUFFER_PX as the user pulls back.
         let depth_dx = match super::peer_side() {
             super::PeerSide::Left => -dx,
             super::PeerSide::Right => dx,
+            super::PeerSide::Top => -dy,
+            super::PeerSide::Bottom => dy,
         };
         let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
         let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
