@@ -48,7 +48,12 @@ use tracing::{debug, info, warn};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
-const VIRTUAL_DEVICE_NAME: &str = "MineShare Virtual Input";
+/// Common prefix for our two virtual input devices. The pump
+/// loop uses this to skip them during enumeration so we don't
+/// pump our own injected events back as captured input.
+const VIRTUAL_DEVICE_PREFIX: &str = "MineShare Virtual";
+const VIRTUAL_MOUSE_NAME: &str = "MineShare Virtual Mouse";
+const VIRTUAL_KEYBOARD_NAME: &str = "MineShare Virtual Keyboard";
 
 const MODE_LOCAL: u8 = 0;
 const MODE_REMOTE: u8 = 1;
@@ -226,7 +231,7 @@ impl EvdevCapture {
         for (path, device) in evdev::enumerate() {
             if device
                 .name()
-                .map(|n| n.starts_with(VIRTUAL_DEVICE_NAME))
+                .map(|n| n.starts_with(VIRTUAL_DEVICE_PREFIX))
                 .unwrap_or(false)
             {
                 continue;
@@ -631,45 +636,82 @@ fn key_from_button(btn: Button) -> EvKey {
     }
 }
 
+/// Two virtual devices, one per input class. Earlier we shipped a
+/// single combo device that registered REL_X/Y + POINTER prop +
+/// keys 1..=255 + mouse buttons in one `uinput` node. libinput
+/// hates that — depending on which capability it sees first the
+/// device gets classified as either a pointer or a keyboard, and
+/// in the GNOME-Wayland case it sometimes ended up bound as the
+/// "keyboard seat" while not actually being the user's typing
+/// device. The result was a stuck state where letter keys from
+/// the real keyboard stopped reaching apps until the user logged
+/// out and back in.
+///
+/// Splitting into a clean mouse-only node + keyboard-only node
+/// lets each one be classified unambiguously, the same way real
+/// HID hardware presents itself.
 pub struct UinputInject {
-    device: parking_lot::Mutex<VirtualDevice>,
+    mouse: parking_lot::Mutex<VirtualDevice>,
+    keyboard: parking_lot::Mutex<VirtualDevice>,
 }
 
 impl UinputInject {
     pub fn new() -> Result<Self> {
-        let mut keys = AttributeSet::<EvKey>::new();
-        for code in 1u16..=255u16 {
-            keys.insert(EvKey(code));
-        }
+        // Mouse node: REL axes + POINTER prop + only the BTN_*
+        // mouse-button range. No typing keys here.
+        let mut mouse_keys = AttributeSet::<EvKey>::new();
         for code in 0x100u16..=0x151u16 {
-            keys.insert(EvKey(code));
+            mouse_keys.insert(EvKey(code));
         }
-
         let mut rel = AttributeSet::<RelativeAxisCode>::new();
         rel.insert(RelativeAxisCode::REL_X);
         rel.insert(RelativeAxisCode::REL_Y);
         rel.insert(RelativeAxisCode::REL_WHEEL);
         rel.insert(RelativeAxisCode::REL_HWHEEL);
-
-        let mut props = AttributeSet::<PropType>::new();
-        props.insert(PropType::POINTER);
-
-        let device = VirtualDevice::builder()
+        let mut mouse_props = AttributeSet::<PropType>::new();
+        mouse_props.insert(PropType::POINTER);
+        let mouse = VirtualDevice::builder()
             .context("uinput builder — need /dev/uinput access (group `input`)")?
-            .name(VIRTUAL_DEVICE_NAME)
-            .with_keys(&keys)?
+            .name(VIRTUAL_MOUSE_NAME)
+            .with_keys(&mouse_keys)?
             .with_relative_axes(&rel)?
-            .with_properties(&props)?
+            .with_properties(&mouse_props)?
             .build()
-            .context("create uinput device")?;
-        info!(name = VIRTUAL_DEVICE_NAME, "uinput virtual device created");
+            .context("create uinput mouse device")?;
+        info!(name = VIRTUAL_MOUSE_NAME, "uinput virtual mouse created");
+
+        // Keyboard node: typing keys (1..=255). Mouse-button codes
+        // overlap (BTN_LEFT == 0x110 falls in the 1..=255 range)
+        // but it's harmless to register them here too — the mouse
+        // device is the one we actually emit them on.
+        let mut kb_keys = AttributeSet::<EvKey>::new();
+        for code in 1u16..=255u16 {
+            kb_keys.insert(EvKey(code));
+        }
+        let keyboard = VirtualDevice::builder()
+            .context("uinput builder — need /dev/uinput access (group `input`)")?
+            .name(VIRTUAL_KEYBOARD_NAME)
+            .with_keys(&kb_keys)?
+            .build()
+            .context("create uinput keyboard device")?;
+        info!(name = VIRTUAL_KEYBOARD_NAME, "uinput virtual keyboard created");
+
         Ok(Self {
-            device: parking_lot::Mutex::new(device),
+            mouse: parking_lot::Mutex::new(mouse),
+            keyboard: parking_lot::Mutex::new(keyboard),
         })
     }
 
-    fn emit(&self, ev: &[evdev::InputEvent]) -> Result<()> {
-        self.device.lock().emit(ev).context("uinput emit")?;
+    fn emit_mouse(&self, ev: &[evdev::InputEvent]) -> Result<()> {
+        self.mouse.lock().emit(ev).context("uinput emit (mouse)")?;
+        Ok(())
+    }
+
+    fn emit_keyboard(&self, ev: &[evdev::InputEvent]) -> Result<()> {
+        self.keyboard
+            .lock()
+            .emit(ev)
+            .context("uinput emit (keyboard)")?;
         Ok(())
     }
 }
@@ -692,14 +734,14 @@ impl InputInject for UinputInject {
             ));
         }
         if !events.is_empty() {
-            self.emit(&events)?;
+            self.emit_mouse(&events)?;
         }
         Ok(())
     }
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
         let key = key_from_button(btn);
-        self.emit(&[evdev::InputEvent::new(
+        self.emit_mouse(&[evdev::InputEvent::new(
             EventType::KEY.0,
             key.0,
             if down { 1 } else { 0 },
@@ -707,7 +749,7 @@ impl InputInject for UinputInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
-        self.emit(&[evdev::InputEvent::new(
+        self.emit_keyboard(&[evdev::InputEvent::new(
             EventType::KEY.0,
             code.0,
             if down { 1 } else { 0 },
@@ -731,7 +773,7 @@ impl InputInject for UinputInject {
             ));
         }
         if !events.is_empty() {
-            self.emit(&events)?;
+            self.emit_mouse(&events)?;
         }
         Ok(())
     }
