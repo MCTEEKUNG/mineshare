@@ -8,6 +8,7 @@
 //! The `main.rs` next door is a thin clap entry point that calls
 //! into [`runtime::run`] / [`collect::run`].
 
+pub mod audio_status;
 pub mod clipboard;
 pub mod collect;
 pub mod identity;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import LayoutPage from "./pages/Layout";
+import AudioPage from "./pages/Audio";
 
 type Status = {
   peer_connected: boolean;
@@ -69,7 +70,8 @@ export default function App() {
 
         {tab === "status" && status ? <StatusGrid s={status} /> : null}
         {tab === "layout" ? <LayoutPage /> : null}
-        {tab === "devices" || tab === "audio" || tab === "hotkeys" || tab === "advanced" ? (
+        {tab === "audio" ? <AudioPage /> : null}
+        {tab === "devices" || tab === "hotkeys" || tab === "advanced" ? (
           <Placeholder name={tab} />
         ) : null}
       </main>

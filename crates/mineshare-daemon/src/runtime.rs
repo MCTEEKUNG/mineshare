@@ -239,6 +239,24 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let bcast_for_audio_drain = wire_bcast.clone();
     tokio::spawn(async move {
         while let Some(frame) = audio_cap_rx.recv().await {
+            // GUI-driven outbound toggle — flipped from the Audio
+            // tab. Off → drop the frame before it hits the broadcast
+            // (capture pipeline keeps running so re-enable is
+            // instant; we just don't forward).
+            let pass = match frame.stream {
+                mineshare_audio::StreamKind::SysOut => {
+                    crate::audio_status::SEND_SYSOUT
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                }
+                mineshare_audio::StreamKind::Mic => {
+                    crate::audio_status::SEND_MIC
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                }
+            };
+            if !pass {
+                continue;
+            }
+
             // Echo-loop guard ONLY applies to sysout: when the peer
             // is talking and we play it back, our own loopback
             // re-captures it and would feed a runaway loop. Mic
@@ -304,10 +322,19 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         match mineshare_audio::make_virtual_mic_playback() {
             Ok(p) => {
                 info!("virtual mic playback ready");
+                let backend = if cfg!(target_os = "windows") {
+                    crate::audio_status::VirtualMicBackend::VbCable
+                } else {
+                    crate::audio_status::VirtualMicBackend::Pipewire
+                };
+                crate::audio_status::set_virtual_mic_backend(backend);
                 Arc::from(p)
             }
             Err(e) => {
                 warn!(reason = %e, "virtual mic playback unavailable — peer mic frames will be dropped");
+                crate::audio_status::set_virtual_mic_backend(
+                    crate::audio_status::VirtualMicBackend::Unavailable,
+                );
                 Arc::new(NullPlayback)
             }
         }
@@ -724,6 +751,24 @@ async fn run_peer_session(
                                             "sample audio frame"
                                         );
                                     }
+                                    // GUI-driven inbound toggle — flipped
+                                    // from the Audio tab. Off → drop the
+                                    // frame before enqueuing.
+                                    let play = match frame.stream {
+                                        mineshare_audio::StreamKind::SysOut => {
+                                            crate::audio_status::PLAY_SYSOUT
+                                                .load(Ordering::Relaxed)
+                                        }
+                                        mineshare_audio::StreamKind::Mic => {
+                                            crate::audio_status::PLAY_MIC
+                                                .load(Ordering::Relaxed)
+                                        }
+                                    };
+                                    if !play {
+                                        stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
+                                        continue;
+                                    }
+
                                     // Route by stream kind: SysOut → the
                                     // default output device (peer's
                                     // speakers); Mic → the virtual-mic
