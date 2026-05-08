@@ -24,9 +24,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod codec;
 pub mod playback;
+pub mod resample;
 
 #[cfg(target_os = "windows")]
 pub mod wasapi_loopback;
+
+#[cfg(target_os = "linux")]
+pub mod pipewire_monitor;
 
 /// Audio kind tag — both directions of the bridge ride the same wire,
 /// so the receiver needs to know whether a frame goes to the speakers
@@ -56,17 +60,20 @@ pub const CHANNELS: u16 = 2;
 pub const FRAME_SAMPLES_PER_CHANNEL: usize = 960;
 pub const FRAME_SAMPLES_INTERLEAVED: usize = FRAME_SAMPLES_PER_CHANNEL * CHANNELS as usize;
 
-/// Construct the platform-specific sysout capture (WASAPI loopback on
-/// Windows, PipeWire monitor on Linux). Slice 1 only ships the Windows
-/// half; Linux returns an error until Slice 2.
+/// Construct the platform-specific sysout capture: WASAPI loopback
+/// on Windows, PipeWire monitor on Linux.
 pub fn make_sysout_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     #[cfg(target_os = "windows")]
     {
         Ok(Box::new(wasapi_loopback::WasapiLoopback::new()?))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        anyhow::bail!("sysout capture is not implemented on this platform yet (M3 Slice 2)")
+        Ok(Box::new(pipewire_monitor::PipewireMonitor::new()?))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        anyhow::bail!("sysout capture is not implemented on this platform")
     }
 }
 

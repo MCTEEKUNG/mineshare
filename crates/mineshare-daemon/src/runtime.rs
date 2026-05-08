@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use bincode::config::standard;
@@ -29,6 +30,29 @@ use crate::identity::Identity;
 use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
+
+/// Echo-loop guard: when we're playing peer audio through our local
+/// speakers, our own sysout monitor (WASAPI loopback / PipeWire
+/// monitor) catches the same signal and would forward it back, which
+/// the peer then plays, and we capture *that*, etc. — a positive
+/// feedback loop. The fix is dead simple: pause local sysout capture
+/// for a short window after we receive a peer audio frame.
+///
+/// We *only* arm the guard on substantial Opus payloads — a silent
+/// stream still sends ~3-byte comfort-noise frames at 50 fps, and
+/// counting those would permanently suppress whichever side talks
+/// last (a deadlock on idle). 12 bytes is well above DTX/CN size
+/// while still triggering on quiet speech.
+const ECHO_GUARD_MS: u64 = 500;
+const ECHO_TRIGGER_MIN_BYTES: usize = 12;
+static LAST_PEER_AUDIO_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// One-shot message exchanged on the encrypted TCP control channel after
 /// the Noise handshake. Carries the peer-side UDP port (so we know where
@@ -160,6 +184,16 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let bcast_for_audio_drain = wire_bcast.clone();
     tokio::spawn(async move {
         while let Some(frame) = audio_cap_rx.recv().await {
+            // Echo-loop guard: if the peer has been actively sending
+            // sysout in the last `ECHO_GUARD_MS`, our own loopback is
+            // mostly *re-capturing the peer's audio* coming out of
+            // our speakers — forwarding that back would feed a
+            // runaway loop. Drop the frame; the peer is the active
+            // talker.
+            let last = LAST_PEER_AUDIO_AT_MS.load(Ordering::Relaxed);
+            if last != 0 && now_ms().saturating_sub(last) < ECHO_GUARD_MS {
+                continue;
+            }
             let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
         }
         debug!("audio capture pump terminated");
@@ -522,6 +556,16 @@ async fn run_peer_session(
                                     }
                                 }
                                 Ok((WireFrame::Audio(frame), _)) => {
+                                    // Mark "peer is actively talking" so the
+                                    // local sysout capture pump suppresses its
+                                    // own forwards and we don't echo-loop.
+                                    // Filter out DTX comfort-noise frames
+                                    // (≤ 3 bytes) so we don't block forever
+                                    // on the always-on silence stream.
+                                    if frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES {
+                                        LAST_PEER_AUDIO_AT_MS
+                                            .store(now_ms(), Ordering::Relaxed);
+                                    }
                                     let n = stats_recv.audio_recv.load(Ordering::Relaxed);
                                     if n % 250 == 0 {
                                         tracing::info!(

@@ -200,7 +200,7 @@ fn drive_encode_loop(
             continue;
         }
 
-        resample_and_chmap(
+        crate::resample::resample_and_chmap(
             &in_buf[..n],
             in_channels,
             in_rate,
@@ -230,48 +230,3 @@ fn drive_encode_loop(
     }
 }
 
-/// Linear-interpolated resample + simple channel map. Good enough for
-/// transparent system-sound monitoring at typical rate ratios
-/// (44.1↔48 kHz). Real polyphase resampling is M3 polish.
-fn resample_and_chmap(
-    input: &[f32],
-    in_ch: u16,
-    in_rate: u32,
-    output: &mut [f32],
-    out_ch: u16,
-    out_rate: u32,
-) {
-    let in_frames = input.len() / in_ch as usize;
-    let out_frames = output.len() / out_ch as usize;
-    if in_frames == 0 || out_frames == 0 {
-        return;
-    }
-    let ratio = in_rate as f64 / out_rate as f64;
-    let in_ch_us = in_ch as usize;
-    let out_ch_us = out_ch as usize;
-
-    for o in 0..out_frames {
-        let src_pos = o as f64 * ratio;
-        let src_lo = (src_pos.floor() as usize).min(in_frames - 1);
-        let src_hi = (src_lo + 1).min(in_frames - 1);
-        let frac = (src_pos - src_lo as f64) as f32;
-
-        // Per-input-channel interpolated sample.
-        let mut samples = [0f32; 2];
-        for c in 0..in_ch_us.min(2) {
-            let v_lo = input[src_lo * in_ch_us + c];
-            let v_hi = input[src_hi * in_ch_us + c];
-            samples[c] = v_lo + (v_hi - v_lo) * frac;
-        }
-        // Mono-in → write same sample to both output channels.
-        if in_ch == 1 {
-            samples[1] = samples[0];
-        }
-
-        // Write `out_ch` channels. We only support 1 or 2 out, matched
-        // by the canonical CHANNELS constant, but be defensive.
-        for c in 0..out_ch_us.min(2) {
-            output[o * out_ch_us + c] = samples[c];
-        }
-    }
-}
