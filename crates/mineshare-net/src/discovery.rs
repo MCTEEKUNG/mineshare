@@ -1,6 +1,6 @@
 //! mDNS service discovery for MineShare peers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -71,6 +71,16 @@ impl Discovery {
     }
 
     /// Browse for peers. Sends events on the channel until the receiver is dropped.
+    ///
+    /// Deduplication: on a multi-NIC host mdns_sd fires one `ServiceResolved`
+    /// per receiving interface for the same remote service. We suppress the
+    /// duplicates so `runtime.rs` never sees the same peer arrive twice and
+    /// accidentally spawns two concurrent reconnect-loop tasks.
+    ///
+    /// PeerOffline: mdns_sd's `ServiceRemoved` only provides the fullname, not
+    /// the device_id. We maintain a `fullname → DeviceId` map built from every
+    /// `ServiceResolved` event so we can dispatch a proper `PeerOffline` when
+    /// the last fullname entry for a device disappears.
     pub fn browse(&self, tx: mpsc::Sender<DiscoveryEvent>) -> Result<()> {
         let receiver = self
             .daemon
@@ -79,6 +89,11 @@ impl Discovery {
 
         let me = self.instance_name.clone();
         tokio::spawn(async move {
+            // fullname → DeviceId  (populated on ServiceResolved)
+            let mut fullname_to_id: HashMap<String, DeviceId> = HashMap::new();
+            // DeviceIds for which we have sent PeerOnline (but not yet PeerOffline)
+            let mut announced: HashSet<DeviceId> = HashSet::new();
+
             loop {
                 let evt = match tokio::task::spawn_blocking({
                     let receiver = receiver.clone();
@@ -93,21 +108,45 @@ impl Discovery {
 
                 match evt {
                     ServiceEvent::ServiceResolved(info) => {
-                        let fullname = info.get_fullname();
+                        let fullname = info.get_fullname().to_string();
                         if fullname.contains(&me) {
                             debug!(fullname, "ignoring self advertisement");
                             continue;
                         }
                         match peer_from_info(&info) {
                             Ok(p) => {
-                                let _ = tx.send(DiscoveryEvent::PeerOnline(p)).await;
+                                // Record fullname → id so ServiceRemoved can look it up.
+                                fullname_to_id.insert(fullname.clone(), p.device_id);
+
+                                if announced.insert(p.device_id) {
+                                    // First resolution for this device — forward it.
+                                    let _ = tx.send(DiscoveryEvent::PeerOnline(p)).await;
+                                } else {
+                                    // Duplicate (e.g. second NIC received the same
+                                    // mDNS reply). Swallow silently.
+                                    debug!(
+                                        fullname,
+                                        device_id = %p.device_id,
+                                        "duplicate ServiceResolved — already announced, skipping"
+                                    );
+                                }
                             }
                             Err(e) => warn!(error = %e, "skipping malformed advertisement"),
                         }
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
-                        if let Some(id) = parse_device_id_from_fullname(&fullname) {
-                            let _ = tx.send(DiscoveryEvent::PeerOffline(id)).await;
+                        if fullname.contains(&me) {
+                            continue;
+                        }
+                        if let Some(id) = fullname_to_id.remove(&fullname) {
+                            // Only dispatch PeerOffline when no other fullnames
+                            // still reference this device (handles the case where
+                            // the same service was resolved via multiple interfaces).
+                            let still_active = fullname_to_id.values().any(|v| *v == id);
+                            if !still_active {
+                                announced.remove(&id);
+                                let _ = tx.send(DiscoveryEvent::PeerOffline(id)).await;
+                            }
                         }
                     }
                     _ => {}
@@ -153,7 +192,3 @@ fn peer_from_info(info: &mdns_sd::ServiceInfo) -> Result<PeerAdvert> {
     })
 }
 
-fn parse_device_id_from_fullname(_fullname: &str) -> Option<DeviceId> {
-    // mDNS removed event provides only fullname; in real impl we maintain a map.
-    None
-}

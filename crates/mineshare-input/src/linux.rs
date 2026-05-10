@@ -34,7 +34,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -44,7 +44,6 @@ use evdev::{
     AttributeSet, Device, EventSummary, EventType, KeyCode as EvKey, PropType, RelativeAxisCode,
     SynchronizationCode,
 };
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
@@ -101,17 +100,95 @@ static CURSOR_Y: AtomicI32 = AtomicI32::new(540);
 /// Generic across horizontal/vertical layouts — reused under the same
 /// `VIRT_X` name to avoid renaming the entire FSM.
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
+
+/// Stage 10 sub-pixel residue for the sensitivity multiplier.
+/// `f32` bits packed into `AtomicU32` because std lacks
+/// `AtomicF32`. Single-writer (the evdev forwarding thread)
+/// so the relaxed loads are fine.
+static SENS_RESIDUE_X: AtomicU32 = AtomicU32::new(0);
+static SENS_RESIDUE_Y: AtomicU32 = AtomicU32::new(0);
 /// Cumulative overshoot once the cursor estimate has clamped at the
 /// configured boundary edge. Resets on motion in the opposite
 /// direction. Hits `ENTER_PRESSURE_PX` → enter Remote.
 static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 
+// ---------------------------------------------------------------------------
+// Mouse-motion coalescing window (Stage: jitter fix).
+//
+// Mouse hardware polls at ~1000 Hz, but Windows refreshes the cursor
+// at the display rate (~125 Hz). Forwarding 1 kHz of `MouseMove`
+// events to the peer makes the receiver call `SendInput` 1000×/sec —
+// the OS visually batches those into 8 ms display frames, which the
+// user perceives as **stutter** even on a 0 ms RTT link (the
+// jitter the user reported).
+//
+// We aggregate dx/dy here for `FLUSH_INTERVAL_MS` then forward a
+// single combined delta. Aligning the wire rate with the receiver's
+// display rate cuts UDP traffic ~8×, ~8× the SendInput calls, and
+// removes the visible stutter. 8 ms ≈ 125 Hz which matches Windows'
+// default cursor update rate.
+//
+// Static atomics rather than per-thread state because multiple
+// pump threads (one per device) all feed a single peer cursor —
+// summing across devices is the correct combined motion.
+// ---------------------------------------------------------------------------
+const FLUSH_INTERVAL_MS: u64 = 8;
+static PENDING_DX: AtomicI32 = AtomicI32::new(0);
+static PENDING_DY: AtomicI32 = AtomicI32::new(0);
+static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+
 pub fn local_screen_geometry() -> (u32, u32) {
-    let w = env_i32("MINESHARE_SCREEN_W").unwrap_or(1920).max(1) as u32;
-    let h = env_i32("MINESHARE_SCREEN_H").unwrap_or(1080).max(1) as u32;
+    // Stage 9 priority order:
+    //   1. Explicit env vars (legacy, also lets users override on
+    //      headless setups where no display server is reachable).
+    //   2. `xrandr --query` output — works on X11 and XWayland,
+    //      reports the bounding rectangle around every connected
+    //      monitor under "Screen 0: ... current W x H".
+    //   3. 1920x1080 fallback for the no-display-server-available
+    //      path (matches the pre-Stage-9 default).
+    let env_w = env_i32("MINESHARE_SCREEN_W");
+    let env_h = env_i32("MINESHARE_SCREEN_H");
+    let (w, h) = if let (Some(w), Some(h)) = (env_w, env_h) {
+        (w.max(1) as u32, h.max(1) as u32)
+    } else if let Some((w, h)) = detect_via_xrandr() {
+        info!(width = w, height = h, "detected screen geometry via xrandr");
+        (w, h)
+    } else {
+        warn!("no env override and xrandr query failed — falling back to 1920x1080");
+        (1920, 1080)
+    };
     SCREEN_W.store(w as i32, Ordering::Relaxed);
     SCREEN_H.store(h as i32, Ordering::Relaxed);
     (w, h)
+}
+
+/// Parse the bounding rectangle out of `xrandr --query` stdout.
+/// On a 2-monitor setup the "current ..." line reports the
+/// combined dimensions (e.g. `Screen 0: minimum 320 x 200, current
+/// 3840 x 1080, maximum 8192 x 8192`), so this naturally handles
+/// multi-monitor without any per-output enumeration.
+fn detect_via_xrandr() -> Option<(u32, u32)> {
+    use std::process::Command;
+    let out = Command::new("xrandr").arg("--query").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        // Look for "current 1920 x 1080" anywhere on the first
+        // line — xrandr formatting is stable across versions.
+        if let Some(rest) = line.split("current ").nth(1) {
+            let mut parts = rest.split(|c: char| !c.is_ascii_digit());
+            let w: u32 = parts.find(|p| !p.is_empty()).and_then(|p| p.parse().ok())?;
+            let h: u32 = parts.find(|p| !p.is_empty()).and_then(|p| p.parse().ok())?;
+            if w > 0 && h > 0 {
+                return Some((w, h));
+            }
+        }
+    }
+    None
 }
 
 pub fn set_peer_screen(w: u32, _h: u32) {
@@ -131,6 +208,12 @@ fn enter_remote() {
     // edge. Mirrors Win→Ubuntu's meaning so the exit hysteresis is
     // symmetric: same EXIT_BUFFER_PX of grace before flipping back.
     VIRT_X.store(0, Ordering::Relaxed);
+    // Wipe any residual coalescing state so the new Remote session
+    // doesn't inherit pending dx/dy from a previous one — and seed
+    // last-flush time to "now" so the first 8 ms accumulate freshly.
+    PENDING_DX.store(0, Ordering::Release);
+    PENDING_DY.store(0, Ordering::Release);
+    LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
     info!("cursor → remote (linux)");
     super::fire_remote_event(super::RemoteEvent::Entered);
@@ -182,6 +265,69 @@ pub fn force_exit_remote() {
     }
 }
 
+/// Atomically drain the pending dx/dy accumulator and forward the
+/// combined delta to the peer. Caller is responsible for only
+/// invoking this in `MODE_REMOTE`. Skips the call entirely when both
+/// axes are zero so we don't spam no-op packets.
+fn flush_pending<F: Fn(InputEvent) + ?Sized>(sink: &F) {
+    // Two `swap` rather than one because there's no atomic "swap two
+    // values together" — but the watchdog and pump paths both run
+    // this same function, so any partial read on one side just gets
+    // forwarded as a smaller delta and the other axis follows on the
+    // very next tick. No data loss, just at most 8 ms of split per
+    // axis under contention (which is below human perception).
+    let dx = PENDING_DX.swap(0, Ordering::AcqRel);
+    let dy = PENDING_DY.swap(0, Ordering::AcqRel);
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
+    sink(InputEvent::MouseMove { dx, dy });
+    let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n % 100 == 0 {
+        let virt = VIRT_X.load(Ordering::Relaxed);
+        info!(
+            dx,
+            dy,
+            virt_x = virt,
+            n,
+            "linux coalesced motion forward (8ms-window)"
+        );
+    }
+}
+
+/// Spawn the periodic flush thread once. Wakes every
+/// `FLUSH_INTERVAL_MS` to deliver any pending motion that the pump
+/// thread couldn't dispatch (e.g. user moved 2 px then paused —
+/// without this the residual would sit in `PENDING_*` until the
+/// next motion event, producing a perceptible "phantom step" when
+/// the user resumes). Cheap: ~125 wakeups/sec, only does atomic
+/// loads when nothing is pending.
+fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>) {
+    if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Err(e) = thread::Builder::new()
+        .name("evdev-flush-watchdog".to_string())
+        .spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(FLUSH_INTERVAL_MS));
+                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+                    continue;
+                }
+                let n = super::now_ms();
+                let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+                if n.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+                    flush_pending(&*sink);
+                }
+            }
+        })
+    {
+        warn!(error = %e, "failed to spawn evdev flush watchdog — motion will still flow but with sub-window granularity loss on pause");
+        FLUSH_WATCHDOG_STARTED.store(false, Ordering::Release);
+    }
+}
+
 /// Called when the peer signals it has taken Remote control of us.
 /// Wayland has no portable cursor-warp, so we slam the cursor into
 /// the boundary-edge OS clamp by injecting a wide relative delta —
@@ -199,6 +345,26 @@ pub fn on_peer_take_control(inject: &dyn InputInject) {
         warn!(error = %e, "boundary-edge slam failed");
         return;
     }
+
+    // Phase 2 auto-focus: GNOME-Wayland (Ubuntu's default) is
+    // click-to-focus, so the cursor warp alone doesn't direct the
+    // peer's keystrokes anywhere — they get emitted via uinput
+    // but no window has keyboard focus and the typing vanishes.
+    // When this opt-in is enabled we fire a single left-click in
+    // place after the slam, which activates whatever window the
+    // cursor landed on. Side effect: any button / link / drag
+    // handle under the cursor gets clicked, which is why this is
+    // off by default.
+    if super::auto_focus_on_take_control() {
+        if let Err(e) = inject.mouse_button(super::Button::Left, true) {
+            warn!(error = %e, "auto-focus click press failed");
+        } else if let Err(e) = inject.mouse_button(super::Button::Left, false) {
+            warn!(error = %e, "auto-focus click release failed");
+        } else {
+            info!("auto-focus click fired on TakeControl");
+        }
+    }
+
     // Resync our own LOCAL-mode tracking so we don't false-trigger
     // re-entry once the peer releases and HW motion resumes here.
     CURSOR_X.store(rx, Ordering::Relaxed);
@@ -217,13 +383,18 @@ pub struct EvdevCapture {
 
 impl EvdevCapture {
     pub fn new() -> Result<Self> {
-        // Pull screen geometry from env so the user can override on
-        // mismatched setups without rebuilding.
-        let screen_w = env_i32("MINESHARE_SCREEN_W").unwrap_or(1920);
-        let screen_h = env_i32("MINESHARE_SCREEN_H").unwrap_or(1080);
+        // Stage 9: prefer the auto-detected (xrandr / env) values
+        // already populated by `local_screen_geometry()`. The env
+        // override path still works for headless / weird-Wayland
+        // boxes since `local_screen_geometry()` honours it first.
+        let (auto_w, auto_h) = local_screen_geometry();
+        let screen_w = auto_w as i32;
+        let screen_h = auto_h as i32;
+        // Peer width still honours `MINESHARE_PEER_W` for the
+        // "haven't received PortAnnounce yet" startup window;
+        // `set_peer_screen` overwrites it as soon as the
+        // handshake completes.
         let peer_w = env_i32("MINESHARE_PEER_W").unwrap_or(2880);
-        SCREEN_W.store(screen_w, Ordering::Relaxed);
-        SCREEN_H.store(screen_h, Ordering::Relaxed);
         PEER_W.store(peer_w, Ordering::Relaxed);
         CURSOR_X.store(screen_w / 2, Ordering::Relaxed);
         info!(screen_w, screen_h, peer_w, "evdev capture: screen geometry");
@@ -292,9 +463,16 @@ fn is_pointer_device(d: &Device) -> bool {
 }
 
 impl InputCapture for EvdevCapture {
-    fn start(&mut self, sink: UnboundedSender<InputEvent>) -> Result<()> {
+    fn start(
+        &mut self,
+        sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
+    ) -> Result<()> {
+        // Periodic flush so the user's "moved 2 px then paused" case
+        // doesn't strand pending motion in the coalescer. Idempotent —
+        // safe to call across reconnects.
+        start_flush_watchdog(sink.clone());
         for (path, device) in self.devices.drain(..) {
-            let sink = sink.clone();
+            let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
             info!(
@@ -316,7 +494,7 @@ fn pump_device(
     path: PathBuf,
     mut device: Device,
     is_pointer: bool,
-    sink: UnboundedSender<InputEvent>,
+    sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
 ) {
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
@@ -363,22 +541,38 @@ fn pump_device(
         for ev in events {
             match ev.destructure() {
                 EventSummary::RelativeAxis(_, axis, value) => match axis {
-                    RelativeAxisCode::REL_X => accum_dx += value,
-                    RelativeAxisCode::REL_Y => accum_dy += value,
+                    RelativeAxisCode::REL_X => {
+                        accum_dx += value;
+                        // Stage 11 Smart-keyboard: bump local
+                        // mouse activity on real HW motion.
+                        // Our virtual uinput mouse is excluded
+                        // from this capture by name prefix, so
+                        // injected events don't loop back here.
+                        super::bump_local_mouse_activity();
+                    }
+                    RelativeAxisCode::REL_Y => {
+                        accum_dy += value;
+                        super::bump_local_mouse_activity();
+                    }
                     RelativeAxisCode::REL_WHEEL => {
                         if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-                            let _ = sink.send(InputEvent::Scroll {
-                                dx: 0.0,
-                                dy: value as f32,
-                            });
+                            // Stage 10: optional Y-axis flip.
+                            let dy = if super::invert_scroll_y() {
+                                -(value as f32)
+                            } else {
+                                value as f32
+                            };
+                            sink(InputEvent::Scroll { dx: 0.0, dy });
                         }
                     }
                     RelativeAxisCode::REL_HWHEEL => {
                         if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-                            let _ = sink.send(InputEvent::Scroll {
-                                dx: value as f32,
-                                dy: 0.0,
-                            });
+                            let dx = if super::invert_scroll_x() {
+                                -(value as f32)
+                            } else {
+                                value as f32
+                            };
+                            sink(InputEvent::Scroll { dx, dy: 0.0 });
                         }
                     }
                     _ => {}
@@ -446,26 +640,62 @@ fn pump_device(
                         continue;
                     }
 
-                    // Keystrokes and mouse buttons follow the cursor.
-                    if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-                        if let Some(btn) = button_from_key(key) {
-                            let _ = sink.send(InputEvent::MouseButton {
+                    // Hotkey: Ctrl+Alt+K cycles keyboard target. ALWAYS
+                    // handled regardless of current target, so the
+                    // user can always switch back.
+                    if down
+                        && key == EvKey::KEY_K
+                        && MOD_CTRL.load(Ordering::Relaxed)
+                        && MOD_ALT.load(Ordering::Relaxed)
+                    {
+                        super::cycle_keyboard_target();
+                        info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+                        continue;
+                    }
+
+                    // Keystrokes routed via `route_keystroke` — combines
+                    // user's keyboard target preference, cursor side,
+                    // AND a held-key tracker that ensures key
+                    // releases follow their press to the same
+                    // destination (fixes stuck-modifier "everything's
+                    // uppercase even though Caps Lock is off" bug
+                    // when Smart flips mid-press).
+                    //
+                    // Mouse buttons still follow the cursor (a pinned
+                    // keyboard doesn't stop the user from clicking
+                    // wherever the mouse is pointing).
+                    let cursor_in_remote =
+                        CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
+                    if let Some(btn) = button_from_key(key) {
+                        // Local click → focus signal (regardless of
+                        // whether we forward it).
+                        if value != 0 {
+                            super::bump_local_click();
+                        }
+                        // Held-aware routing — UP follows DOWN's
+                        // destination so the peer never ends up
+                        // with a stuck-down button after a cursor
+                        // cross-back happens between press and
+                        // release.
+                        if super::route_mouse_button(btn, value != 0, cursor_in_remote) {
+                            sink(InputEvent::MouseButton {
                                 btn,
                                 down: value != 0,
                             });
-                        } else {
-                            let _ = sink.send(InputEvent::Key {
-                                code: KeyCode(key.0),
-                                down: value != 0,
-                            });
                         }
+                    } else if super::route_keystroke(key.0, value != 0, cursor_in_remote) {
+                        sink(InputEvent::Key {
+                            code: KeyCode(key.0),
+                            down: value != 0,
+                        });
+                        super::note_key_forwarded_with_code(key.0, value != 0);
                     }
                     // In LOCAL we don't forward; they're already going to
                     // the OS via the un-grabbed kernel path.
                 }
                 EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
                     if accum_dx != 0 || accum_dy != 0 {
-                        handle_motion_batch(accum_dx, accum_dy, &sink);
+                        handle_motion_batch(accum_dx, accum_dy, &*sink);
                         accum_dx = 0;
                         accum_dy = 0;
                     }
@@ -479,9 +709,7 @@ fn pump_device(
 /// Apply one synced (dx, dy) batch — either tracks our own cursor and
 /// triggers `enter_remote`, or forwards the delta to the peer and tracks
 /// `VIRT_X` for the right-edge exit.
-fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
-    use std::sync::atomic::AtomicI32;
-
+fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
     let mode = CURSOR_MODE.load(Ordering::Acquire);
     if mode == MODE_LOCAL {
         // When the peer is currently driving (peer_in_remote) we *do*
@@ -583,6 +811,9 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         // HW motion takes us. Left means -dx, right means dx, top
         // means -dy, bottom means dy. virt_x grows on depth and
         // retreats toward -EXIT_BUFFER_PX as the user pulls back.
+        // (This bookkeeping has to run on EVERY SYN_REPORT so the
+        // exit-edge detection stays accurate, even though we only
+        // *forward* an aggregate every FLUSH_INTERVAL_MS below.)
         let depth_dx = match super::peer_side() {
             super::PeerSide::Left => -dx,
             super::PeerSide::Right => dx,
@@ -594,24 +825,45 @@ fn handle_motion_batch(dx: i32, dy: i32, sink: &UnboundedSender<InputEvent>) {
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
         if new_virt_x <= -EXIT_BUFFER_PX {
+            // Hand any buffered motion to the peer before flipping
+            // back to LOCAL — otherwise the last few px the user
+            // dragged before crossing back would never reach them.
+            flush_pending(sink);
             exit_remote();
-        } else {
-            let fdx = dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-            let fdy = dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-            static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
-            let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
-            if n % 200 == 0 {
-                info!(
-                    raw_dx = dx,
-                    raw_dy = dy,
-                    fdx,
-                    fdy,
-                    virt_x = new_virt_x,
-                    n,
-                    "linux sample motion forward"
-                );
-            }
-            let _ = sink.send(InputEvent::MouseMove { dx: fdx, dy: fdy });
+            return;
+        }
+
+        // Stage 10 sensitivity scaling with sub-pixel residue —
+        // applied PER SYN_REPORT (same as before) so the residue
+        // tracker stays accurate at high frequencies.
+        let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+        let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+        let scaled_dx = super::scale_delta(dx, &mut rx);
+        let scaled_dy = super::scale_delta(dy, &mut ry);
+        SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+        SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+        let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+        let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+
+        // Coalesce into the pending accumulator. The sum across an
+        // 8 ms window can grow well past MAX_DELTA_PX (that cap
+        // exists to bound a SINGLE evdev event, not the aggregate),
+        // and that's exactly what we want — fast flicks should still
+        // travel a fast distance, just delivered as one packet
+        // instead of eight.
+        PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
+        PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+
+        // Opportunistic flush: if the window has already elapsed,
+        // dispatch immediately on this SYN rather than waiting for
+        // the watchdog tick. Keeps the worst-case latency bounded
+        // by the time between SYN_REPORTs (~1 ms) when the user is
+        // actively moving — only when motion *stops* does the
+        // watchdog's 8 ms tick determine the final-fragment delay.
+        let now_ms = super::now_ms();
+        let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+            flush_pending(sink);
         }
     }
 }
@@ -778,6 +1030,7 @@ impl InputInject for UinputInject {
             code.0,
             if down { 1 } else { 0 },
         )])?;
+        super::note_key_injected_with_code(code.0, down);
         let mut held = self.held.lock();
         if down {
             held.insert(HeldKey::KbKey(code.0));

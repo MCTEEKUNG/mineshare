@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cpal::SampleFormat;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 use tracing::{debug, info, warn};
@@ -37,18 +37,24 @@ pub struct CpalPlayback {
 impl CpalPlayback {
     pub fn new() -> Result<Self> {
         let (tx, rx) = mpsc::channel::<AudioFrame>();
-        // Hand the device thread a one-shot status channel so we can
-        // surface init errors back to the caller synchronously.
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
+        // Asynchronous bring-up: the playback thread spawns and
+        // begins building the cpal stream in the background. We
+        // do NOT block on a readiness signal here — Win laptops
+        // with slow audio drivers (Cirrus Logic SoundWire,
+        // Realtek HDA on first wake, USB DACs) can take 3-10 s
+        // for `Device::build_output_stream` to return, and the
+        // pre-Stage-10 synchronous wait would silently fall back
+        // to NullPlayback whenever it hit that ceiling, leaving
+        // the user with no audio for the rest of the session.
+        //
+        // The thread runs an outer build/run loop instead: if
+        // build fails it logs and retries every few seconds, so
+        // a hot-plugged device or a slow driver eventually wakes
+        // up and audio "appears" without restarting the daemon.
         thread::Builder::new()
             .name("cpal-playback".into())
-            .spawn(move || {
-                run_playback_thread(rx, ready_tx);
-            })
+            .spawn(move || run_playback_thread(rx))
             .context("spawn cpal-playback thread")?;
-        ready_rx
-            .recv_timeout(Duration::from_secs(3))
-            .context("cpal-playback thread did not signal readiness")??;
         Ok(Self { tx })
     }
 }
@@ -64,23 +70,7 @@ impl AudioPlayback for CpalPlayback {
     }
 }
 
-fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>, ready: mpsc::Sender<Result<()>>) {
-    let stream = match build_stream() {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return;
-        }
-    };
-    let _ = ready.send(Ok(()));
-
-    // Stream is constructed and started; now drain frames from the
-    // mpsc receiver, decode them, and push samples into the ring
-    // shared with the cpal callback.
-    let StreamCtx {
-        stream,
-        producer,
-    } = stream;
+fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
     let mut decoder = match OpusDecoder::new() {
         Ok(d) => d,
         Err(e) => {
@@ -89,42 +79,112 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>, ready: mpsc::Sender<Resul
         }
     };
     let mut scratch = vec![0f32; FRAME_SAMPLES_INTERLEAVED];
-    let mut producer = producer;
 
-    while let Ok(frame) = rx.recv() {
-        let n = match decoder.decode(&frame.opus, &mut scratch) {
-            Ok(n) => n,
-            Err(e) => {
-                warn!(error = %e, "opus decode failed — dropping frame");
-                continue;
+    // Lazy stream: starts as `None`, builds on the first iteration
+    // (or after a version bump). Retry cadence is bounded so a
+    // permanently-broken device doesn't hot-loop calling cpal.
+    let mut stream_ctx: Option<StreamCtx> = None;
+    let mut last_version = crate::output_device_version();
+    let mut next_build_attempt = std::time::Instant::now();
+    const RETRY_BACKOFF: Duration = Duration::from_secs(3);
+    let mut dropped_frames_since_warn: u64 = 0;
+    let mut last_drop_warn = std::time::Instant::now();
+
+    loop {
+        // (Re)build the stream when we need one. Either we have
+        // none yet (startup or a previous build failed) or the
+        // user picked a different device on the GUI Devices tab.
+        let v = crate::output_device_version();
+        let want_rebuild = stream_ctx.is_none() || v != last_version;
+        if want_rebuild && std::time::Instant::now() >= next_build_attempt {
+            // Drop any old stream first so the device handle is
+            // released before we ask cpal for it back — some
+            // Windows drivers refuse exclusive re-acquire
+            // otherwise.
+            stream_ctx = None;
+            match build_stream() {
+                Ok(s) => {
+                    stream_ctx = Some(s);
+                    last_version = v;
+                    info!("cpal playback ready");
+                }
+                Err(e) => {
+                    warn!(error = %e, "cpal playback build failed — retrying in 3 s");
+                    last_version = v; // don't busy-retry on the same version
+                    next_build_attempt = std::time::Instant::now() + RETRY_BACKOFF;
+                }
             }
-        };
-        let pushed = producer.push_slice(&scratch[..n]);
-        if pushed != n {
-            warn!(
-                dropped = n - pushed,
-                "cpal playback ring full — dropping samples"
-            );
+        }
+
+        // Drain frames with a short timeout so the next iteration
+        // can notice version bumps and retry timers without
+        // waiting on a frame that may not come (silent stream
+        // periods, peer paused playback, etc.).
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(frame) => {
+                let n = match decoder.decode(&frame.opus, &mut scratch) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        warn!(error = %e, "opus decode failed — dropping frame");
+                        continue;
+                    }
+                };
+                if let Some(ctx) = stream_ctx.as_mut() {
+                    let pushed = ctx.producer.push_slice(&scratch[..n]);
+                    if pushed != n {
+                        warn!(
+                            dropped = n - pushed,
+                            "cpal playback ring full — dropping samples"
+                        );
+                    }
+                } else {
+                    // Stream not built yet (or last build failed).
+                    // Drop the frame; we'd rather lose samples
+                    // than block the recv loop. Surface a
+                    // throttled warning so the user sees that
+                    // audio is arriving but cpal isn't ready.
+                    dropped_frames_since_warn += 1;
+                    if last_drop_warn.elapsed() >= Duration::from_secs(2) {
+                        warn!(
+                            count = dropped_frames_since_warn,
+                            "cpal stream not built yet — dropping incoming audio"
+                        );
+                        dropped_frames_since_warn = 0;
+                        last_drop_warn = std::time::Instant::now();
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No new frame — fall through to top of loop for
+                // the version-check / retry-timer.
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    // mpsc dropped → handle dropped → stop the stream and exit.
-    drop(stream);
+
+    drop(stream_ctx);
     info!("cpal playback thread exiting");
 }
 
 /// Wraps the cpal stream with the producer-half of the ring buffer
 /// the decoded-frame loop pushes into. Both fields stay on the
-/// playback thread — `Stream` is `!Send` on Windows.
+/// playback thread — `Stream` is `!Send` on Windows. The
+/// `stream` field is held only for its drop semantics (cpal stops
+/// the audio device when it goes out of scope), so the compiler
+/// can't see it being read; the `#[allow]` keeps the warning
+/// quiet without disabling dead-code lints elsewhere.
 struct StreamCtx {
+    #[allow(dead_code)]
     stream: cpal::Stream,
     producer: ringbuf::HeapProd<f32>,
 }
 
 fn build_stream() -> Result<StreamCtx> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .context("no default audio output device")?;
+    // Honour the user's runtime device pick (Stage 8.4); falls
+    // back to the OS default when no selection is set or the
+    // selected device has been unplugged since.
+    let device =
+        crate::resolve_output_device().context("no audio output device available (default or selected)")?;
     let device_name = device.name().unwrap_or_else(|_| "?".to_string());
 
     let config = pick_config(&device)?;

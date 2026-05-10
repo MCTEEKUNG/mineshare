@@ -18,7 +18,8 @@
         "minWidth": 880,
         "minHeight": 560,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -28,12 +29,36 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Cross-PC keyboard, mouse, audio, and file bridge",
+    "longDescription": "MineShare is an encrypted KVM-over-IP + bidirectional audio/mic + file-transfer bridge between Windows and Linux PCs on the same LAN. One mouse, one keyboard, one mic — drive both machines as if they were a single virtual desktop. Cursor flows between every monitor of every machine; clipboard, audio, and dragged files follow.",
+    "publisher": "MineShare Contributors",
+    "homepage": "https://github.com/mineshare/mineshare",
+    "copyright": "Copyright (c) 2026 MineShare Contributors",
+    "licenseFile": "../../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "libasound2",
+          "libopus0",
+          "pulseaudio-utils"
+        ],
+        "section": "utility",
+        "priority": "optional",
+        "postInstallScript": "../../installer/linux/deb-postinst",
+        "preRemoveScript": "../../installer/linux/deb-prerm"
+      }
+    },
+    "windows": {}
   }
 }

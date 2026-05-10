@@ -11,10 +11,13 @@
 pub mod audio_status;
 pub mod clipboard;
 pub mod collect;
+pub mod files;
 pub mod identity;
+pub mod latency;
 pub mod layout;
 pub mod logs;
 pub mod pairing;
 pub mod runtime;
+pub mod settings;
 pub mod status;
 pub mod trust;

@@ -55,10 +55,13 @@ static PHASE: Mutex<PairingPhase> = Mutex::new(PairingPhase::None);
 static SUBMITTED_PIN: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn current_phase() -> PairingPhase {
-    PHASE.lock().clone()
+    let p = PHASE.lock().clone();
+    tracing::trace!(phase = ?p, "GUI polled current_phase");
+    p
 }
 
 pub fn set_phase(p: PairingPhase) {
+    tracing::info!(phase = ?p, "pairing phase changed");
     *PHASE.lock() = p;
 }
 

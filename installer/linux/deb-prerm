@@ -1,0 +1,17 @@
+#!/bin/bash
+# MineShare .deb prerm — runs as root before `apt remove` /
+# `dpkg -r` deletes the binary. Cleans up the udev rule we
+# installed in postinst.
+#
+# Deliberately NOT removing users from the `input` group on
+# uninstall — they may have other apps that rely on it (game
+# controllers, accessibility tools, etc.). Group membership is
+# cheap to leave behind; revoking would cause more harm than
+# good.
+
+set -e
+
+rm -f /etc/udev/rules.d/60-mineshare.rules
+udevadm control --reload-rules >/dev/null 2>&1 || true
+
+exit 0

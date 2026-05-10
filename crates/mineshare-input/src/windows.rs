@@ -16,7 +16,7 @@
 
 use std::mem;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -24,7 +24,6 @@ use enigo::{
     Axis, Button as EButton, Coordinate, Direction, Enigo, Key as EKey, Keyboard, Mouse, Settings,
 };
 use parking_lot::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -35,7 +34,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSORINFO, CURSOR_SHOWING, CallNextHookEx, DispatchMessageW, GetClipCursor, GetCursorInfo,
     GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SetCursorPos, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
     WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -52,12 +52,25 @@ use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 const MODE_LOCAL: u8 = 0;
 const MODE_REMOTE: u8 = 1;
 
-static EVENT_SINK: OnceLock<Mutex<Option<UnboundedSender<InputEvent>>>> = OnceLock::new();
+static EVENT_SINK: OnceLock<
+    Mutex<Option<std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>>>,
+> = OnceLock::new();
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
+/// Virtual desktop bounding rectangle. On a single-monitor setup
+/// this matches `SM_CXSCREEN` / `SM_CYSCREEN`; with multiple
+/// monitors it widens to span every connected display.
+/// (Stage 9 — was previously primary-monitor only.)
 static SCREEN_W: AtomicI32 = AtomicI32::new(1920);
 static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
+/// Top-left of the virtual screen in Windows-screen coordinates.
+/// Non-zero when a secondary monitor sits above or to the left of
+/// the primary; required because `WH_MOUSE_LL` and `SetCursorPos`
+/// both work in this coordinate space and a hard-coded "0,0" left
+/// edge becomes wrong as soon as the user adds a left-side monitor.
+static ORIGIN_X: AtomicI32 = AtomicI32::new(0);
+static ORIGIN_Y: AtomicI32 = AtomicI32::new(0);
 /// Approximate peer screen width — used to clamp `VIRT_X` so that pushing
 /// past the peer's right edge stops accumulating instead of letting the
 /// virtual cursor race off into infinity (which makes it impossible to
@@ -68,6 +81,13 @@ static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
 static PEER_W: AtomicI32 = AtomicI32::new(1920);
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
 static VIRT_Y: AtomicI32 = AtomicI32::new(0);
+
+/// Sub-pixel residue for the Stage 10 sensitivity multiplier.
+/// `f32` bits packed into `AtomicU32` — the WH_MOUSE_LL hook is
+/// effectively single-threaded but using atomics keeps the
+/// pattern uniform with the rest of this file.
+static SENS_RESIDUE_X: AtomicU32 = AtomicU32::new(0);
+static SENS_RESIDUE_Y: AtomicU32 = AtomicU32::new(0);
 
 /// Hysteresis buffer in pixels at the left edge of the peer screen. The
 /// user has to drag this much further left than virt_x = 0 before we hand
@@ -87,6 +107,12 @@ const SCAN_HOTKEY: u32 = 0x13; // R
 /// this PC so accidental edge crosses during fullscreen gameplay
 /// don't yank focus.
 const SCAN_HOTKEY_LOCK: u32 = 0x26; // L
+/// Hotkey: Ctrl+Alt+K cycles the keyboard target through
+/// Auto → ForcePeer → ForceLocal → Auto. Lets the user pin
+/// keys to the peer (or back to local) without moving the mouse
+/// cursor — useful for "leave mouse here, type over there"
+/// workflows.
+const SCAN_HOTKEY_KB: u32 = 0x25; // K
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -101,9 +127,9 @@ const MAX_DELTA_PX: i32 = 30;
 
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
-        && let Some(tx) = s.lock().as_ref()
+        && let Some(cb) = s.lock().as_ref()
     {
-        let _ = tx.send(ev);
+        cb(ev);
     }
 }
 
@@ -115,8 +141,16 @@ pub fn local_screen_geometry() -> (u32, u32) {
         // daemon still report DPI-aware physical pixels.
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     });
-    let w = unsafe { GetSystemMetrics(SM_CXSCREEN).max(1) as u32 };
-    let h = unsafe { GetSystemMetrics(SM_CYSCREEN).max(1) as u32 };
+    // Virtual screen — the smallest rectangle that contains every
+    // connected monitor. On a 2-monitor side-by-side setup this is
+    // (combined-width, max-height), and the origin can be negative
+    // if the secondary monitor is to the left of the primary.
+    let ox = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let oy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1) as u32 };
+    let h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1) as u32 };
+    ORIGIN_X.store(ox, Ordering::Relaxed);
+    ORIGIN_Y.store(oy, Ordering::Relaxed);
     SCREEN_W.store(w as i32, Ordering::Relaxed);
     SCREEN_H.store(h as i32, Ordering::Relaxed);
     (w, h)
@@ -128,10 +162,22 @@ pub fn set_peer_screen(w: u32, _h: u32) {
 }
 
 fn anchor() -> (i32, i32) {
-    (
-        SCREEN_W.load(Ordering::Relaxed) / 2,
-        SCREEN_H.load(Ordering::Relaxed) / 2,
-    )
+    // Centre of the virtual desktop, not just primary monitor.
+    let ox = ORIGIN_X.load(Ordering::Relaxed);
+    let oy = ORIGIN_Y.load(Ordering::Relaxed);
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    (ox + w / 2, oy + h / 2)
+}
+
+/// Outer boundary edges of the virtual desktop, in
+/// SetCursorPos / WH_MOUSE_LL coordinates.
+fn bounds() -> (i32, i32, i32, i32) {
+    let ox = ORIGIN_X.load(Ordering::Relaxed);
+    let oy = ORIGIN_Y.load(Ordering::Relaxed);
+    let w = SCREEN_W.load(Ordering::Relaxed);
+    let h = SCREEN_H.load(Ordering::Relaxed);
+    (ox, oy, ox + w - 1, oy + h - 1) // (left, top, right, bottom)
 }
 
 fn enter_remote(entry_y: i32) {
@@ -156,18 +202,17 @@ fn enter_remote(entry_y: i32) {
 }
 
 fn exit_remote(restore_y: i32) {
-    let w = SCREEN_W.load(Ordering::Relaxed);
-    let h = SCREEN_H.load(Ordering::Relaxed);
+    let (left, top, right, bottom) = bounds();
     // Restore the local cursor to the edge that faces the peer
     // (per the configured layout). User came back across that
     // edge to leave Remote, so dropping the OS cursor there
     // matches their hand position on the desk. For top/bottom
     // we keep their horizontal anchor, just snap Y to the edge.
     let (restore_x, restore_y) = match super::peer_side() {
-        super::PeerSide::Right => (w - 1, restore_y.clamp(0, h - 1)),
-        super::PeerSide::Left => (0, restore_y.clamp(0, h - 1)),
-        super::PeerSide::Top => (LAST_X.load(Ordering::Relaxed).clamp(0, w - 1), 0),
-        super::PeerSide::Bottom => (LAST_X.load(Ordering::Relaxed).clamp(0, w - 1), h - 1),
+        super::PeerSide::Right => (right, restore_y.clamp(top, bottom)),
+        super::PeerSide::Left => (left, restore_y.clamp(top, bottom)),
+        super::PeerSide::Top => (LAST_X.load(Ordering::Relaxed).clamp(left, right), top),
+        super::PeerSide::Bottom => (LAST_X.load(Ordering::Relaxed).clamp(left, right), bottom),
     };
     unsafe {
         let _ = SetCursorPos(restore_x, restore_y);
@@ -185,9 +230,12 @@ pub fn local_in_remote() -> bool {
 
 pub fn force_exit_remote() {
     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-        let h = SCREEN_H.load(Ordering::Relaxed);
+        let (_, _, _, bottom) = bounds();
+        let oy = ORIGIN_Y.load(Ordering::Relaxed);
         info!("force_exit_remote — peer asked us to release");
-        exit_remote(h / 2);
+        // Halfway down the virtual desktop is a sensible default
+        // restore-Y when the user only knows we want out, not where.
+        exit_remote((oy + bottom) / 2);
     }
 }
 
@@ -198,13 +246,14 @@ pub fn force_exit_remote() {
 /// fires after a tiny motion in the wrong direction even though the
 /// cursor is mid-screen.
 pub fn on_peer_take_control() {
-    let w = SCREEN_W.load(Ordering::Relaxed);
-    let h = SCREEN_H.load(Ordering::Relaxed);
+    let (left, top, right, bottom) = bounds();
+    let mid_x = (left + right) / 2;
+    let mid_y = (top + bottom) / 2;
     let (x, y) = match super::peer_side() {
-        super::PeerSide::Right => ((w - 1).max(0), (h / 2).clamp(0, (h - 1).max(0))),
-        super::PeerSide::Left => (0, (h / 2).clamp(0, (h - 1).max(0))),
-        super::PeerSide::Top => ((w / 2).clamp(0, (w - 1).max(0)), 0),
-        super::PeerSide::Bottom => ((w / 2).clamp(0, (w - 1).max(0)), (h - 1).max(0)),
+        super::PeerSide::Right => (right, mid_y),
+        super::PeerSide::Left => (left, mid_y),
+        super::PeerSide::Top => (mid_x, top),
+        super::PeerSide::Bottom => (mid_x, bottom),
     };
     unsafe {
         let _ = SetCursorPos(x, y);
@@ -227,7 +276,10 @@ impl HookCapture {
 }
 
 impl InputCapture for HookCapture {
-    fn start(&mut self, sink: UnboundedSender<InputEvent>) -> Result<()> {
+    fn start(
+        &mut self,
+        sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
+    ) -> Result<()> {
         if self.started {
             return Ok(());
         }
@@ -245,16 +297,23 @@ impl InputCapture for HookCapture {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
 
-        // Probe primary screen geometry once at start. Multi-monitor +
-        // hot-plug come in M2 Slice 3.
-        let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        // Probe virtual-screen geometry (Stage 9) — bounding rect
+        // around every connected monitor. Hot-plug isn't tracked
+        // yet; users with monitors that come and go after launch
+        // need to restart the daemon. Static probe at startup is
+        // fine for the 99% case.
+        let ox = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let oy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
         if w > 0 && h > 0 {
+            ORIGIN_X.store(ox, Ordering::Relaxed);
+            ORIGIN_Y.store(oy, Ordering::Relaxed);
             SCREEN_W.store(w, Ordering::Relaxed);
             SCREEN_H.store(h, Ordering::Relaxed);
-            info!(width = w, height = h, "primary screen geometry");
+            info!(origin = ?(ox, oy), width = w, height = h, "virtual screen geometry");
         } else {
-            warn!("GetSystemMetrics returned 0 — falling back to 1920x1080");
+            warn!("GetSystemMetrics returned 0 for virtual screen — falling back to 1920x1080");
         }
 
         let cell = EVENT_SINK.get_or_init(|| Mutex::new(None));
@@ -470,10 +529,29 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
     let last_x = LAST_X.load(Ordering::Relaxed);
     let last_y = LAST_Y.load(Ordering::Relaxed);
 
+    // Click-based focus signal: any local mouse-button DOWN
+    // (regardless of mode) bumps `LOCAL_CLICK_AT`. The next
+    // activity beacon will report the age, and Smart keyboard
+    // routing on the peer side will treat the more recent click
+    // as the "user is focused on that machine" signal.
+    if matches!(
+        wparam.0 as u32,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+    ) {
+        super::bump_local_click();
+    }
+
     match wparam.0 as u32 {
         WM_MOUSEMOVE => {
+            // Stage 11 Smart-keyboard: any HW mouse motion on this
+            // machine (the hook never sees `SetCursorPos`-driven
+            // events) is a signal that the local user is actively
+            // working here. Bump regardless of mode so the peer's
+            // Smart-target can see "Win mouse is in use, don't
+            // route Linux keys back here".
+            super::bump_local_mouse_activity();
             if mode == MODE_LOCAL {
-                let w = SCREEN_W.load(Ordering::Relaxed);
+                let (left, top, right, bottom) = bounds();
                 // Auto-release peer Remote on real local HW motion (the
                 // user is moving Win HW while Ubuntu is driving). Same
                 // pattern as Synergy: any local input on the passive
@@ -489,11 +567,13 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     );
                     super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
                 }
-                let h = SCREEN_H.load(Ordering::Relaxed);
                 LAST_X.store(x, Ordering::Relaxed);
                 LAST_Y.store(y, Ordering::Relaxed);
                 // Edge to watch depends on layout. We treat hitting
-                // the configured boundary edge as the trigger.
+                // the OUTER edge of the virtual desktop as the
+                // trigger (Stage 9) — internal monitor seams don't
+                // count, so a 2-monitor user can drag freely
+                // between displays without falling into Remote.
                 // Game-mode lock pins input to this PC — skip the
                 // edge check entirely so accidental cursor moves
                 // during fullscreen play don't yank focus to the
@@ -501,10 +581,10 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 let crossed_edge = !super::is_input_locked()
                     && last_x != i32::MIN
                     && match super::peer_side() {
-                        super::PeerSide::Right => last_x < w - 1 && x >= w - 1,
-                        super::PeerSide::Left => last_x > 0 && x <= 0,
-                        super::PeerSide::Top => last_y > 0 && y <= 0,
-                        super::PeerSide::Bottom => last_y < h - 1 && y >= h - 1,
+                        super::PeerSide::Right => last_x < right && x >= right,
+                        super::PeerSide::Left => last_x > left && x <= left,
+                        super::PeerSide::Top => last_y > top && y <= top,
+                        super::PeerSide::Bottom => last_y < bottom && y >= bottom,
                     };
                 if crossed_edge {
                     enter_remote(y);
@@ -539,10 +619,20 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 if new_virt_x <= -EXIT_BUFFER_PX {
                     exit_remote(y);
                 } else {
+                    // Stage 10: apply user sensitivity multiplier
+                    // with sub-pixel residue carried in
+                    // SENS_RESIDUE_X/Y so values < 1.0 don't lose
+                    // every other 1-pixel motion to rounding.
+                    let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+                    let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+                    let scaled_dx = super::scale_delta(dx, &mut rx);
+                    let scaled_dy = super::scale_delta(dy, &mut ry);
+                    SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+                    SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
                     // Cap each forwarded step so coalesced HW motion can't
                     // teleport the peer cursor across its screen.
-                    let fdx = dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-                    let fdy = dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
                     if fdx != 0 || fdy != 0 {
                         static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
                         let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -570,46 +660,48 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 return LRESULT(1);
             }
         }
-        WM_LBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Left,
-            down: true,
-        }),
-        WM_LBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Left,
-            down: false,
-        }),
-        WM_RBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Right,
-            down: true,
-        }),
-        WM_RBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Right,
-            down: false,
-        }),
-        WM_MBUTTONDOWN if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Middle,
-            down: true,
-        }),
-        WM_MBUTTONUP if mode == MODE_REMOTE => sink_send(InputEvent::MouseButton {
-            btn: Button::Middle,
-            down: false,
-        }),
-        WM_XBUTTONDOWN | WM_XBUTTONUP if mode == MODE_REMOTE => {
-            let high = (info.mouseData >> 16) as u16;
-            if let Some(btn) = match high {
-                1 => Some(Button::X1),
-                2 => Some(Button::X2),
-                _ => None,
-            } {
-                sink_send(InputEvent::MouseButton {
-                    btn,
-                    down: wparam.0 as u32 == WM_XBUTTONDOWN,
-                });
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+        | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            // Resolve which button + direction. X1 / X2 share the
+            // same WM_* — `info.mouseData` high word disambiguates.
+            let (btn, down) = match wparam.0 as u32 {
+                WM_LBUTTONDOWN => (Some(Button::Left), true),
+                WM_LBUTTONUP => (Some(Button::Left), false),
+                WM_RBUTTONDOWN => (Some(Button::Right), true),
+                WM_RBUTTONUP => (Some(Button::Right), false),
+                WM_MBUTTONDOWN => (Some(Button::Middle), true),
+                WM_MBUTTONUP => (Some(Button::Middle), false),
+                WM_XBUTTONDOWN | WM_XBUTTONUP => {
+                    let down = wparam.0 as u32 == WM_XBUTTONDOWN;
+                    let high = (info.mouseData >> 16) as u16;
+                    let btn = match high {
+                        1 => Some(Button::X1),
+                        2 => Some(Button::X2),
+                        _ => None,
+                    };
+                    (btn, down)
+                }
+                _ => (None, false),
+            };
+            if let Some(btn) = btn {
+                // Held-aware routing: any DOWN previously forwarded
+                // is remembered, and its eventual UP forwards too —
+                // even if the cursor has crossed back to local in
+                // the meantime. Without this the peer ends up with
+                // a button stuck-down (drag-select runs wild, links
+                // never release, etc.).
+                if super::route_mouse_button(btn, down, mode == MODE_REMOTE) {
+                    sink_send(InputEvent::MouseButton { btn, down });
+                    return LRESULT(1);
+                }
             }
         }
         WM_MOUSEWHEEL if mode == MODE_REMOTE => {
             let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
-            sink_send(InputEvent::Scroll { dx: 0.0, dy: delta });
+            // Stage 10: optional Y-axis inversion. Win has no
+            // horizontal-wheel hook here so only Y matters.
+            let dy = if super::invert_scroll_y() { -delta } else { delta };
+            sink_send(InputEvent::Scroll { dx: 0.0, dy });
         }
         _ => {}
     }
@@ -651,19 +743,20 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         {
             if mode == MODE_REMOTE {
                 info!("hotkey Ctrl+Alt+R — forcing exit_remote");
-                let h = SCREEN_H.load(Ordering::Relaxed);
-                exit_remote(h / 2);
+                let (_, top, _, bottom) = bounds();
+                exit_remote((top + bottom) / 2);
             } else if super::peer_in_remote() {
                 info!("hotkey Ctrl+Alt+R — requesting peer to release");
                 super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
             } else {
                 info!("hotkey Ctrl+Alt+R — entering remote");
                 let mut pt = POINT::default();
+                let (_, top, _, bottom) = bounds();
                 let entry_y = unsafe {
                     if GetCursorPos(&mut pt).is_ok() {
                         pt.y
                     } else {
-                        SCREEN_H.load(Ordering::Relaxed) / 2
+                        (top + bottom) / 2
                     }
                 };
                 enter_remote(entry_y);
@@ -683,12 +776,33 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             return LRESULT(1);
         }
 
-        // Keystrokes follow the cursor — only forward when remote.
-        if mode == MODE_REMOTE && (down || up) {
+        // Hotkey: Ctrl+Alt+K cycles keyboard target. ALWAYS handled
+        // here regardless of current target — otherwise pinning
+        // keys to peer would also trap the un-pin hotkey on the
+        // peer side and leave the user stuck.
+        if down
+            && scan == SCAN_HOTKEY_KB
+            && MOD_CTRL.load(Ordering::Relaxed)
+            && MOD_ALT.load(Ordering::Relaxed)
+        {
+            super::cycle_keyboard_target();
+            info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+            return LRESULT(1);
+        }
+
+        // Keystrokes are routed via `route_keystroke`, which combines
+        // the user's keyboard-target preference, the cursor's
+        // current side, AND a held-key tracker that ensures every
+        // key release follows its press to the same destination.
+        // The tracker is what fixes the "Shift-stuck-on-peer →
+        // every letter forced uppercase" Caps-Lock bug when Smart
+        // flips mid-keypress.
+        if (down || up) && super::route_keystroke(scan as u16, down, mode == MODE_REMOTE) {
             sink_send(InputEvent::Key {
                 code: KeyCode(scan as u16),
                 down,
             });
+            super::note_key_forwarded_with_code(scan as u16, down);
             // Consume so Windows doesn't also act on the keystroke.
             return LRESULT(1);
         }
@@ -767,6 +881,7 @@ impl InputInject for EnigoInject {
             .lock()
             .key(EKey::Other(vk as u32), dir)
             .context("enigo key")?;
+        super::note_key_injected_with_code(code.0, down);
         let mut held = self.held.lock();
         if down {
             held.insert(HeldKey::Key(code.0));

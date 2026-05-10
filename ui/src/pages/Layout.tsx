@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useT } from "../i18n";
 
 type PeerSide = "left" | "right" | "top" | "bottom";
 type Layout = { peer_side: PeerSide };
@@ -21,6 +22,7 @@ export default function LayoutPage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const { t } = useT();
 
   useEffect(() => {
     invoke<Layout>("get_layout").then(setLayout).catch((e) => setErr(String(e)));
@@ -47,7 +49,7 @@ export default function LayoutPage() {
   if (!layout) {
     return (
       <p className="text-sm text-neutral-400">
-        {err ? `failed to load layout: ${err}` : "loading layout…"}
+        {err ? `${err}` : t("layout_loading")}
       </p>
     );
   }
@@ -55,10 +57,7 @@ export default function LayoutPage() {
   return (
     <section>
       <p className="text-sm text-neutral-500 mb-6 max-w-prose">
-        Drag the peer monitor against any edge of <em>this</em>{" "}
-        machine's display to set the bridge direction. Edge
-        detection, cursor warps, and Remote-mode sign conventions
-        all flip when you change the side. Auto-saves on drop.
+        {t("layout_intro")}
       </p>
 
       <DragCanvas
@@ -70,11 +69,11 @@ export default function LayoutPage() {
 
       <div className="mt-6 flex items-center justify-between text-sm">
         <p>
-          <span className="text-neutral-500">Peer is on the </span>
+          <span className="text-neutral-500">{t("layout_summary_prefix")} </span>
           <span className="font-semibold">{layout.peer_side}</span>
-          <span className="text-neutral-500"> of this display.</span>
+          <span className="text-neutral-500"> {t("layout_summary_suffix")}</span>
         </p>
-        {pending ? <span className="text-xs text-neutral-400">saving…</span> : null}
+        {pending ? <span className="text-xs text-neutral-400">{t("layout_saving")}</span> : null}
       </div>
       {err ? <p className="text-xs text-red-600 mt-3">{err}</p> : null}
     </section>
@@ -110,6 +109,7 @@ function DragCanvas({
   disabled?: boolean;
   onChoose: (side: PeerSide) => void;
 }) {
+  const { t } = useT();
   const localCx = CANVAS_W / 2;
   const localCy = CANVAS_H / 2;
   const localBox = {
@@ -211,8 +211,8 @@ function DragCanvas({
         y={localBox.y}
         w={localBox.w}
         h={localBox.h}
-        label="this machine"
-        sub="local"
+        label={t("layout_local")}
+        sub={t("layout_local_sub")}
         accent
       />
 
@@ -237,7 +237,7 @@ function DragCanvas({
           y={0}
           w={PEER_W}
           h={PEER_H}
-          label={status?.peer_addr ? "peer" : "no peer"}
+          label={status?.peer_addr ? "peer" : t("layout_no_peer")}
           sub={status?.peer_addr ?? "—"}
           muted={!status?.peer_connected}
           relative

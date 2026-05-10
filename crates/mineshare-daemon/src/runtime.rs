@@ -5,7 +5,7 @@
 //! mouse/keyboard events over UDP. M1 forwards *all* captured events
 //! continuously; M2 will gate forwarding via the source/routing FSMs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +79,7 @@ struct PortAnnounce {
 /// also enter Remote (which would have both ends fighting for the
 /// cursor).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum ControlMsg {
+pub enum ControlMsg {
     TakeControl,
     ReleaseControl,
     /// Peer is requesting that *we* leave Remote (their hotkey was
@@ -115,6 +115,54 @@ enum ControlMsg {
         device_id: String,
         display_name: String,
     },
+    /// Stage 8.5 RTT heartbeat. The sender stamps its own current
+    /// monotonic-ish ms in `ts_ms`, the peer echoes it verbatim
+    /// as a [`ControlMsg::Pong`], the original sender measures
+    /// `now - ts_ms` to learn round-trip time. Carrying our own
+    /// timestamp on both legs avoids any need for clock sync
+    /// between peers.
+    Ping { ts_ms: u64 },
+    Pong { ts_ms: u64 },
+    /// Mouse-activity + click-focus beacon used by the Smart
+    /// keyboard target. Each side periodically advertises:
+    ///   * `mouse_active` — was the local HW mouse in use in the
+    ///     last ~700 ms? Drives the motion-based fallback.
+    ///   * `last_click_ago_ms` — ms since the local user clicked,
+    ///     capped at 60 s, or `None` if no click has been seen
+    ///     this session. Drives the focus-based primary signal.
+    ///
+    /// The receiver back-dates its `PEER_CLICK_AT` by the
+    /// reported age so stale beacons don't reset focus state to
+    /// "now".
+    ActivityBeacon {
+        mouse_active: bool,
+        #[serde(default)]
+        last_click_ago_ms: Option<u32>,
+    },
+    /// Stage 12 file transfer — declares an incoming file. The
+    /// receiver allocates a `.partial` temp file under
+    /// `<download>/MineShare/` and prepares to write chunks.
+    /// Auto-accept: peer is already trusted, so we don't prompt.
+    FileOffer {
+        id: u64,
+        name: String,
+        size_bytes: u64,
+    },
+    /// One slice of bytes belonging to transfer `id`. `offset` is
+    /// included so future out-of-order / parallel-chunk variants
+    /// don't break the wire format. Current sender streams
+    /// strictly sequentially.
+    FileChunk {
+        id: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    /// Sender finished — receiver verifies sha256 against the
+    /// running hash, atomically renames the `.partial` to the
+    /// final destination on match, deletes + fails on mismatch.
+    FileEnd { id: u64, sha256: [u8; 32] },
+    /// Either side aborted the transfer.
+    FileCancel { id: u64 },
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -161,13 +209,32 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         "MineShare daemon starting"
     );
 
+    // Stage 10: load persisted mouse-sensitivity / scroll-invert
+    // prefs and push them into the input layer before any capture
+    // starts. Failure-safe — bad JSON falls back to defaults.
+    crate::settings::install_loaded();
+
     // --- Input capture ----------------------------------------------------
-    // Capture starts in passive mode immediately. Events fan out to every
-    // connected peer via a broadcast channel.
-    let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<InputEvent>();
+    // Input + audio frames share the same broadcast channel so the
+    // per-peer UDP-send task only has to subscribe once. WireFrame's
+    // tagged variants tell the receiver which payload kind to inject.
+    //
+    // The broadcast channel is created BEFORE capture so the callback
+    // closure can capture a sender clone. Events are dispatched directly
+    // from the OS hook / evdev thread into the broadcast with no
+    // intermediate MPSC channel and no extra tokio scheduler round-trip —
+    // cutting the mouse-event pipeline from two async hops to one.
+    let (wire_bcast, _) = broadcast::channel::<WireFrame>(1024);
+
+    let bcast_for_cap = wire_bcast.clone();
+    let cap_sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static> =
+        std::sync::Arc::new(move |ev: InputEvent| {
+            let _ = bcast_for_cap.send(WireFrame::Input(ev));
+        });
+
     let cap_started = if opts.capture {
         match make_capture() {
-            Ok(mut cap) => match cap.start(cap_tx) {
+            Ok(mut cap) => match cap.start(cap_sink) {
                 Ok(()) => {
                     info!("input capture started (passive)");
                     Some(cap)
@@ -186,20 +253,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         info!("capture disabled via --no-capture");
         None
     };
-    // keep alive
     let _cap_alive = cap_started;
-
-    // Input + audio frames share the same broadcast channel so the
-    // per-peer UDP-send task only has to subscribe once. WireFrame's
-    // tagged variants tell the receiver which payload kind to inject.
-    let (wire_bcast, _) = broadcast::channel::<WireFrame>(1024);
-    let bcast_for_input_drain = wire_bcast.clone();
-    tokio::spawn(async move {
-        while let Some(ev) = cap_rx.recv().await {
-            let _ = bcast_for_input_drain.send(WireFrame::Input(ev));
-        }
-        debug!("input capture pump terminated");
-    });
 
     // --- Audio sysout capture (Win loopback / Linux PipeWire monitor) --
     let (audio_cap_tx, mut audio_cap_rx) = mpsc::unbounded_channel::<AudioFrame>();
@@ -372,6 +426,11 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 
     let known_peers: Arc<Mutex<HashMap<DeviceId, PeerAdvert>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // in_flight: peers for which a reconnect-loop task is currently running.
+    // Guards against spawning a second loop for the same peer (e.g. if a stale
+    // task survives across a daemon restart or a rapid PeerOnline/PeerOffline
+    // cycle races with the reconnect sleep).
+    let in_flight: Arc<Mutex<HashSet<DeviceId>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let identity_arc = Arc::new(identity);
     let resp_static = identity_arc.noise_static_priv.clone();
@@ -438,6 +497,19 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                 );
 
                 if local_id.0 < peer.device_id.0 {
+                    // in_flight guard: if a reconnect loop for this peer is
+                    // already running (e.g. from a duplicate mDNS event or a
+                    // stale task that survived a daemon restart), skip the spawn
+                    // so we never have two concurrent sessions to the same peer.
+                    {
+                        let mut f = in_flight.lock();
+                        if f.contains(&peer.device_id) {
+                            debug!(peer = %peer.device_id, "reconnect loop already in-flight — skipping duplicate spawn");
+                            continue;
+                        }
+                        f.insert(peer.device_id);
+                    }
+
                     let init_static = init_static.clone();
                     let init_identity = init_identity.clone();
                     let inject = inject.clone();
@@ -445,6 +517,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     let mic_playback = mic_playback.clone();
                     let bcast = wire_bcast.clone();
                     let known_for_loop = known.clone();
+                    let in_flight_for_loop = in_flight.clone();
                     let peer_id = peer.device_id;
                     // Reconnect loop: redial after each session ends as long
                     // as the peer is still in `known_peers` (mDNS hasn't
@@ -458,6 +531,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                     Some(p) => p.clone(),
                                     None => {
                                         debug!(peer = %peer_id, "peer offline — exiting reconnect loop");
+                                        in_flight_for_loop.lock().remove(&peer_id);
                                         return;
                                     }
                                 }
@@ -632,6 +706,16 @@ async fn run_peer_session(
     // probe and surface a read EOF within ~30 s of silence so
     // the writer/reader/forward tasks can shut down and the
     // caller's reconnect loop kicks in.
+    //
+    // Also disable Nagle: ControlMsg traffic is small + sparse
+    // (Ping/Pong heartbeats, RemoteEvent, ClipboardText, layout
+    // pushes), and Nagle's coalescing buffer adds 40-200 ms of
+    // latency to every one-shot send. With NODELAY the user's
+    // RTT histogram on a LAN drops from ~50 ms to <5 ms — a
+    // huge perceived-responsiveness win.
+    if let Err(e) = stream.set_nodelay(true) {
+        warn!(error = %e, "failed to disable Nagle on control socket");
+    }
     if let Err(e) = enable_tcp_keepalive(&stream) {
         warn!(error = %e, "failed to enable TCP keepalive on control socket");
     }
@@ -663,8 +747,30 @@ async fn run_peer_session(
                 crate::pairing::set_phase(crate::pairing::PairingPhase::Failed {
                     reason: e.to_string(),
                 });
+                // Auto-dismiss the Failed banner after a few
+                // seconds so the GUI doesn't stay stuck on a
+                // stale error after the conflicting peer goes
+                // away (common cause: an old standalone daemon
+                // still running alongside the GUI app on the
+                // other side, conflicting on mDNS).
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    let cur = crate::pairing::current_phase();
+                    if matches!(cur, crate::pairing::PairingPhase::Failed { .. }) {
+                        crate::pairing::set_phase(crate::pairing::PairingPhase::None);
+                    }
+                });
                 return Err(e);
             }
+        }
+    } else {
+        // Trusted peer: clear any leftover pairing phase from a
+        // previous failed attempt with a different peer so the
+        // GUI doesn't keep showing "Pairing failed" once a real
+        // session is healthy.
+        let cur = crate::pairing::current_phase();
+        if !matches!(cur, crate::pairing::PairingPhase::None) {
+            crate::pairing::set_phase(crate::pairing::PairingPhase::None);
         }
     }
 
@@ -712,6 +818,12 @@ async fn run_peer_session(
     let (side_tx, mut side_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
     crate::layout::set_propagate_sender(side_tx);
+    // Stage 8.5 RTT plumbing: a generic ControlMsg pipe used by
+    // both the periodic Ping sender and the reader's Pong echo.
+    // Anything pushed here jumps the queue ahead of whatever the
+    // writer is currently selecting on; capacity is unbounded but
+    // traffic is at most ~4 msgs/s.
+    let (rtt_tx, mut rtt_rx) = tokio::sync::mpsc::unbounded_channel::<ControlMsg>();
     let aead_writer = aead.clone_handle();
     let writer_handle = tokio::spawn(async move {
         loop {
@@ -730,12 +842,94 @@ async fn run_peer_session(
                     Some(s) => ControlMsg::SetPeerSide(s),
                     None => break,
                 },
+                rtt = rtt_rx.recv() => match rtt {
+                    Some(m) => m,
+                    None => break,
+                },
             };
             if let Err(e) = write_encrypted(&mut tcp_write, &aead_writer, &msg).await {
                 warn!(error = %e, "control writer failed — peer probably disconnected");
                 break;
             }
             debug!(?msg, "sent ControlMsg");
+        }
+    });
+
+    // Wipe Smart-keyboard sticky state so a fresh session starts
+    // routing from "neutral" rather than inheriting whichever
+    // side the previous peer was being used on.
+    mineshare_input::reset_smart_decision();
+
+    // Stage 12 file transfer: expose the per-session ControlMsg
+    // sender to the Tauri `send_file` command via a global slot.
+    // Cleared in the session-end teardown below so a stale peer
+    // sender can't outlive the connection.
+    crate::files::set_session_tx(rtt_tx.clone());
+
+    // Periodic Ping sender — fires every 500 ms. Owns its own
+    // sender clone so dropping the rtt channel kills the task at
+    // session teardown. The peer's matching reader echoes each
+    // Ping back as a Pong, and our reader records the RTT into
+    // the `latency` ring.
+    crate::latency::reset();
+    let ping_tx = rtt_tx.clone();
+    let ping_handle = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        // The first tick fires immediately, which is fine — we want
+        // an early sample so the GUI shows non-zero stats fast.
+        loop {
+            tick.tick().await;
+            let ts_ms = crate::latency::now_ms();
+            if ping_tx.send(ControlMsg::Ping { ts_ms }).is_err() {
+                // Writer task is gone → session ended; bail out.
+                break;
+            }
+        }
+    });
+
+    // Periodic ActivityBeacon sender — drives the Smart keyboard
+    // target on the peer side. Cheap (one boolean over the
+    // encrypted control channel every 500 ms). Sent both when
+    // active and when we transition to idle so the peer doesn't
+    // hold stale "peer is active" state forever.
+    let beacon_tx = rtt_tx.clone();
+    let beacon_handle = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut last_sent_active: Option<bool> = None;
+        let mut last_sent_click_age: Option<u32> = None;
+        loop {
+            tick.tick().await;
+            let active = mineshare_input::local_mouse_active_within(700);
+            let click_age = mineshare_input::local_click_age_ms();
+            // Send on EITHER signal changing or every 4 ticks
+            // (~2 s) as a refresh. Click-age changes constantly
+            // (it ticks up by 500 ms each interval), so we only
+            // treat it as "changed" if the freshness category
+            // flipped — a freshly-young click goes from None/old
+            // to <1 s, which is meaningful; a click that was 5 s
+            // old becoming 5.5 s old is not.
+            let click_category = click_age.map(|a| if a < 5_000 { 0 } else { 1 });
+            let prev_category = last_sent_click_age.map(|a| if a < 5_000 { 0 } else { 1 });
+            let active_changed = last_sent_active != Some(active);
+            let click_changed = click_category != prev_category;
+            let refresh = {
+                static COUNTER: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 3
+            };
+            if active_changed || click_changed || refresh {
+                if beacon_tx
+                    .send(ControlMsg::ActivityBeacon {
+                        mouse_active: active,
+                        last_click_ago_ms: click_age,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                last_sent_active = Some(active);
+                last_sent_click_age = click_age;
+            }
         }
     });
 
@@ -746,6 +940,7 @@ async fn run_peer_session(
     // reconnect loop run.
     let aead_reader = aead.clone_handle();
     let inject_for_reader = inject.clone();
+    let pong_tx = rtt_tx.clone();
     let reader_handle = tokio::spawn(async move {
         loop {
             match read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader).await {
@@ -787,6 +982,62 @@ async fn run_peer_session(
                     // their side or someone trying to re-pair —
                     // log + ignore.
                     warn!("received pairing message mid-session — ignored");
+                }
+                Ok(ControlMsg::Ping { ts_ms }) => {
+                    // Echo it straight back; the peer's writer will
+                    // measure round-trip from its own clock. Failure
+                    // to send means the writer task is gone — fine,
+                    // session is winding down anyway.
+                    let _ = pong_tx.send(ControlMsg::Pong { ts_ms });
+                }
+                Ok(ControlMsg::Pong { ts_ms }) => {
+                    let now = crate::latency::now_ms();
+                    let rtt = now.saturating_sub(ts_ms) as f32;
+                    crate::latency::record_rtt_ms(rtt);
+                }
+                Ok(ControlMsg::FileOffer {
+                    id,
+                    name,
+                    size_bytes,
+                }) => {
+                    if let Err(e) = crate::files::begin_incoming(id, &name, size_bytes).await {
+                        warn!(id, error = %e, "failed to start incoming file");
+                        crate::files::mark_failed(id, format!("{e:#}"));
+                    }
+                }
+                Ok(ControlMsg::FileChunk { id, offset, data }) => {
+                    if let Err(e) = crate::files::write_chunk(id, offset, &data).await {
+                        warn!(id, offset, error = %e, "file chunk write failed");
+                        crate::files::mark_failed(id, format!("{e:#}"));
+                    }
+                }
+                Ok(ControlMsg::FileEnd { id, sha256 }) => {
+                    if let Err(e) = crate::files::finalize_incoming(id, sha256).await {
+                        warn!(id, error = %e, "file finalize failed");
+                    }
+                }
+                Ok(ControlMsg::FileCancel { id }) => {
+                    info!(id, "peer cancelled file transfer");
+                    crate::files::mark_cancelled(id);
+                }
+                Ok(ControlMsg::ActivityBeacon {
+                    mouse_active,
+                    last_click_ago_ms,
+                }) => {
+                    // Mouse motion stamp: only bumps on active=true
+                    // beacons (negative beacons leave the timestamp
+                    // alone; peer_mouse_active_within naturally
+                    // ages out).
+                    if mouse_active {
+                        mineshare_input::note_peer_mouse_active();
+                    }
+                    // Click-focus stamp: back-date the recorded
+                    // click time by the reported age so the
+                    // 30 s focus window stays accurate. None
+                    // means peer hasn't clicked this session.
+                    if let Some(age) = last_click_ago_ms {
+                        mineshare_input::note_peer_click(age);
+                    }
                 }
                 Err(e) => {
                     debug!(error = %e, "control reader ended");
@@ -992,8 +1243,15 @@ async fn run_peer_session(
 
     info!(reason = exit_reason, %peer_addr, "peer session ending");
     writer_handle.abort();
+    ping_handle.abort();
+    beacon_handle.abort();
     recv_handle.abort();
     stats_handle.abort();
+    // Wipe RTT samples so the next session's stats start clean.
+    crate::latency::reset();
+    // Drop the file-transfer session sender + fail any in-flight
+    // transfers so the GUI doesn't show a stuck progress bar.
+    crate::files::clear_session_tx();
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::set_peer_in_remote(false);

@@ -21,6 +21,8 @@
 //! boundary so the wire format stays uniform.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 pub mod codec;
 pub mod cpal_mic;
@@ -88,11 +90,51 @@ pub fn make_mic_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(cpal_mic::CpalMic::new()?))
 }
 
+/// 5-second cache for the output / input device lists so the
+/// GUI's Devices tab can poll cheaply without re-entering cpal's
+/// COM-heavy enumeration on every tick. Win cpal enumeration
+/// takes 100–500 ms per call (each device.name() rounds-trips
+/// through IMMDeviceEnumerator), and the GUI used to call this
+/// every 2.5 s — that alone pinned ~10–20 % of CPU on slower
+/// laptops and made the WebView feel laggy. The cache also
+/// short-circuits repeat calls during a device-switch flurry
+/// when the playback thread rebuilds and cross-checks the list.
+const DEVICE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+static OUTPUT_DEVICE_CACHE: parking_lot::Mutex<Option<(Instant, Vec<DeviceInfo>)>> =
+    parking_lot::Mutex::new(None);
+static INPUT_DEVICE_CACHE: parking_lot::Mutex<Option<(Instant, Vec<DeviceInfo>)>> =
+    parking_lot::Mutex::new(None);
+
+fn cached_or_compute(
+    cache: &parking_lot::Mutex<Option<(Instant, Vec<DeviceInfo>)>>,
+    compute: impl FnOnce() -> Vec<DeviceInfo>,
+) -> Vec<DeviceInfo> {
+    {
+        let g = cache.lock();
+        if let Some((ts, ref v)) = *g
+            && ts.elapsed() < DEVICE_CACHE_TTL
+        {
+            return v.clone();
+        }
+    }
+    let fresh = compute();
+    *cache.lock() = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
 /// Enumerate cpal output devices on the local host with the
 /// default flagged. Used by the GUI's Devices tab to surface
 /// what the bridge would render peer audio into. Failures are
 /// non-fatal — we return what we got and log the rest.
 pub fn list_output_devices() -> Vec<DeviceInfo> {
+    cached_or_compute(&OUTPUT_DEVICE_CACHE, list_output_devices_uncached)
+}
+
+/// Bypass the cache. Called by `resolve_output_device()` when the
+/// runtime needs to find a freshly-selected device by name and
+/// can't risk a stale 5 s cache miss.
+pub fn list_output_devices_uncached() -> Vec<DeviceInfo> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let default_name = host
@@ -114,6 +156,10 @@ pub fn list_output_devices() -> Vec<DeviceInfo> {
 
 /// Enumerate cpal input devices on the local host (microphones).
 pub fn list_input_devices() -> Vec<DeviceInfo> {
+    cached_or_compute(&INPUT_DEVICE_CACHE, list_input_devices_uncached)
+}
+
+pub fn list_input_devices_uncached() -> Vec<DeviceInfo> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let default_name = host
@@ -133,10 +179,100 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
     out
 }
 
+/// Wipe the device-list cache. Called from the GUI's "↻ refresh"
+/// button so a freshly-plugged device appears even within the 5 s
+/// TTL window.
+pub fn invalidate_device_cache() {
+    *OUTPUT_DEVICE_CACHE.lock() = None;
+    *INPUT_DEVICE_CACHE.lock() = None;
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
     pub name: String,
     pub is_default: bool,
+}
+
+// ----------------------------------------------------------------------------
+// Runtime device selection (Stage 8.4)
+//
+// `None` means "follow the OS default", which is the behaviour the
+// daemon shipped with up to M5. When the user picks a device on the
+// Devices tab, we stash its name here and bump the version; the
+// playback / mic capture threads notice the bump on their next
+// poll, drop the cpal stream, and rebuild against the new device.
+// Stream re-build pauses audio for ~50 ms — fine for a manual
+// device switch.
+// ----------------------------------------------------------------------------
+
+static SELECTED_OUTPUT: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+static SELECTED_INPUT: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+static OUTPUT_VERSION: AtomicU64 = AtomicU64::new(0);
+static INPUT_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Set the preferred output device by name. Pass `None` to revert
+/// to the system default. The change takes effect within ~200 ms,
+/// when the playback thread next polls [`output_device_version`].
+pub fn set_output_device(name: Option<String>) {
+    *SELECTED_OUTPUT.lock() = name;
+    OUTPUT_VERSION.fetch_add(1, Ordering::Release);
+}
+
+/// Mirror of [`set_output_device`] for the mic capture path.
+pub fn set_input_device(name: Option<String>) {
+    *SELECTED_INPUT.lock() = name;
+    INPUT_VERSION.fetch_add(1, Ordering::Release);
+}
+
+pub fn selected_output_device() -> Option<String> {
+    SELECTED_OUTPUT.lock().clone()
+}
+
+pub fn selected_input_device() -> Option<String> {
+    SELECTED_INPUT.lock().clone()
+}
+
+pub fn output_device_version() -> u64 {
+    OUTPUT_VERSION.load(Ordering::Acquire)
+}
+
+pub fn input_device_version() -> u64 {
+    INPUT_VERSION.load(Ordering::Acquire)
+}
+
+/// Resolve the cpal output device matching the user's selection, or
+/// the system default if no selection / not found. Used by the
+/// playback thread when (re)building a stream.
+pub fn resolve_output_device() -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    if let Some(want) = selected_output_device() {
+        if let Ok(iter) = host.output_devices() {
+            for d in iter {
+                if d.name().ok().as_deref() == Some(want.as_str()) {
+                    return Some(d);
+                }
+            }
+        }
+        // selection no longer present — fall through to default.
+    }
+    host.default_output_device()
+}
+
+/// Mirror of [`resolve_output_device`] for the mic capture path.
+pub fn resolve_input_device() -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    if let Some(want) = selected_input_device() {
+        if let Ok(iter) = host.input_devices() {
+            for d in iter {
+                if d.name().ok().as_deref() == Some(want.as_str()) {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    host.default_input_device()
 }
 
 /// Construct a virtual-mic playback sink — peer mic frames flow into

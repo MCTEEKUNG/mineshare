@@ -53,6 +53,23 @@ pub struct StatusSnapshot {
     /// Hyperion). The GUI surfaces this as a red banner so the
     /// user knows the auto-lock fired for safety reasons.
     pub anticheat_warning: Option<String>,
+    /// How many keystrokes this machine has handed off to the
+    /// peer over the bridge (Win-side: forwarded by the
+    /// keyboard hook in REMOTE mode; Linux-side: forwarded by
+    /// the evdev capture).
+    pub keys_forwarded: u64,
+    /// How many keystrokes this machine has injected into the
+    /// local OS on behalf of the peer (Win-side: enigo;
+    /// Linux-side: uinput virtual keyboard).
+    pub keys_injected: u64,
+    /// Where keystrokes captured on this machine are routed:
+    /// `auto` (follow mouse cursor — default), `force_peer`
+    /// (pinned to the peer regardless of cursor), or
+    /// `force_local` (pinned to this machine regardless of
+    /// cursor). Cycled via Ctrl+Alt+K. Surfaced so the Status
+    /// pill can warn the user when they've left the keyboard
+    /// pinned somewhere they didn't expect.
+    pub keyboard_target: mineshare_input::KeyboardTarget,
 }
 
 pub fn snapshot() -> StatusSnapshot {
@@ -70,6 +87,9 @@ pub fn snapshot() -> StatusSnapshot {
         peer_in_remote: mineshare_input::peer_in_remote(),
         input_locked: mineshare_input::is_input_locked(),
         anticheat_warning: mineshare_input::anticheat_warning(),
+        keys_forwarded: mineshare_input::keys_forwarded(),
+        keys_injected: mineshare_input::keys_injected(),
+        keyboard_target: mineshare_input::keyboard_target(),
     }
 }
 

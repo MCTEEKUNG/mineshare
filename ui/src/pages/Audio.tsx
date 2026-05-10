@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useT } from "../i18n";
 
 type VirtualMicBackend = "pipewire" | "vbcable" | "unavailable";
 
@@ -34,6 +35,7 @@ type Direction = "send" | "play";
 export default function AudioPage() {
   const [status, setStatus] = useState<AudioStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const { t } = useT();
 
   useEffect(() => {
     const tick = () =>
@@ -64,7 +66,7 @@ export default function AudioPage() {
   if (!status) {
     return (
       <p className="text-sm text-neutral-400">
-        {err ? `failed: ${err}` : "loading audio status…"}
+        {err ? `failed: ${err}` : "…"}
       </p>
     );
   }
@@ -72,24 +74,20 @@ export default function AudioPage() {
   return (
     <section>
       <p className="text-sm text-neutral-500 mb-6 max-w-prose">
-        Two pipes per stream — outbound from this machine and
-        inbound from the peer. Toggle either side off and the
-        capture / playback keeps running for stats but the frames
-        stop crossing the silent half. Takes effect on the next
-        audio frame, no daemon restart.
+        {t("audio_intro")}
       </p>
 
       <div className="grid gap-4 mb-8">
         <StreamCard
-          title="System sound"
-          subtitle="WASAPI loopback (Win) / PipeWire monitor (Linux) — captures whatever your default speakers are playing"
+          title={t("audio_sysout_title")}
+          subtitle={t("audio_sysout_sub")}
           sendOn={status.send_sysout}
           playOn={status.play_sysout}
           onToggle={(dir, on) => toggle("sysout", dir, on)}
         />
         <StreamCard
-          title="Microphone"
-          subtitle="cpal default input — your physical mic"
+          title={t("audio_mic_title")}
+          subtitle={t("audio_mic_sub")}
           sendOn={status.send_mic}
           playOn={status.play_mic}
           onToggle={(dir, on) => toggle("mic", dir, on)}
@@ -116,6 +114,7 @@ function StreamCard({
   playOn: boolean;
   onToggle: (direction: Direction, enabled: boolean) => void;
 }) {
+  const { t } = useT();
   return (
     <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
       <div className="mb-4">
@@ -125,14 +124,14 @@ function StreamCard({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <ToggleRow
-          label="Send to peer"
-          hint="forward locally captured frames"
+          label={t("audio_send")}
+          hint={t("audio_send_hint")}
           on={sendOn}
           onChange={(v) => onToggle("send", v)}
         />
         <ToggleRow
-          label="Receive from peer"
-          hint="render peer's frames here"
+          label={t("audio_play")}
+          hint={t("audio_play_hint")}
           on={playOn}
           onChange={(v) => onToggle("play", v)}
         />

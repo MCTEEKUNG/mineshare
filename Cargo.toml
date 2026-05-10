@@ -26,7 +26,7 @@ mineshare-audio = { path = "crates/mineshare-audio" }
 mineshare-ipc = { path = "crates/mineshare-ipc" }
 
 # async runtime
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 

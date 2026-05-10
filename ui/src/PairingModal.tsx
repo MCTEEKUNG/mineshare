@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useT } from "./i18n";
 
 type PairingPhase =
   | { kind: "none" }
@@ -22,6 +23,7 @@ type PairingPhase =
  */
 export default function PairingModal() {
   const [phase, setPhase] = useState<PairingPhase>({ kind: "none" });
+  const { t } = useT();
 
   useEffect(() => {
     const tick = () =>
@@ -39,17 +41,24 @@ export default function PairingModal() {
         {phase.kind === "displayingpin" ? <DisplayPin {...phase} /> : null}
         {phase.kind === "awaitingpin" ? <EnterPin {...phase} /> : null}
         {phase.kind === "verifying" ? (
-          <CenteredMessage title="Verifying…" subtitle="checking the PIN with the peer" />
+          <CenteredMessage
+            title={t("pair_verifying")}
+            subtitle={t("pair_verifying_sub")}
+          />
         ) : null}
         {phase.kind === "trusted" ? (
           <CenteredMessage
-            title="✓ Paired"
-            subtitle={`${phase.peer_name} is now trusted on this machine.`}
+            title={t("pair_success_title")}
+            subtitle={`${phase.peer_name} ${t("pair_success_sub")}`}
             tone="success"
           />
         ) : null}
         {phase.kind === "failed" ? (
-          <CenteredMessage title="Pairing failed" subtitle={phase.reason} tone="error" />
+          <CenteredMessage
+            title={t("pair_failed_title")}
+            subtitle={phase.reason}
+            tone="error"
+          />
         ) : null}
       </div>
     </div>
@@ -57,20 +66,21 @@ export default function PairingModal() {
 }
 
 function DisplayPin({ pin, peer_addr }: { pin: string; peer_addr: string }) {
+  const { t } = useT();
   return (
     <div>
       <p className="text-xs uppercase tracking-wide text-neutral-500 mb-2">
-        Pairing request from
+        {t("pair_title_request")}
       </p>
       <p className="font-mono text-sm mb-6">{peer_addr}</p>
       <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-        Read this PIN to whoever's typing on the other machine:
+        {t("pair_show_pin")}
       </p>
       <p className="font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 my-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800">
         {pin}
       </p>
       <p className="text-[11px] text-neutral-400 mt-4 text-center">
-        Cancel by closing this window or letting it time out (60 s).
+        {t("pair_cancel_note")}
       </p>
     </div>
   );
@@ -79,6 +89,7 @@ function DisplayPin({ pin, peer_addr }: { pin: string; peer_addr: string }) {
 function EnterPin({ peer_addr }: { peer_addr: string }) {
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const { t } = useT();
 
   async function submit() {
     if (value.length !== 6 || submitting) return;
@@ -94,11 +105,11 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
   return (
     <div>
       <p className="text-xs uppercase tracking-wide text-neutral-500 mb-2">
-        Pair with
+        {t("pair_title_pair_with")}
       </p>
       <p className="font-mono text-sm mb-6">{peer_addr}</p>
       <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-        Enter the PIN displayed on that machine:
+        {t("pair_enter_pin")}
       </p>
       <input
         type="text"
@@ -119,10 +130,10 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
         disabled={value.length !== 6 || submitting}
         className="mt-4 w-full rounded-md bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-medium py-2.5 transition-colors"
       >
-        {submitting ? "Sending…" : "Pair"}
+        {submitting ? t("pair_button_sending") : t("pair_button")}
       </button>
       <p className="text-[11px] text-neutral-400 mt-3 text-center">
-        Once paired, this peer auto-connects forever — no PIN next time.
+        {t("pair_after_note")}
       </p>
     </div>
   );

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cpal::SampleFormat;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
@@ -75,89 +75,124 @@ impl AudioCapture for CpalMic {
 }
 
 fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .context("no default audio input device — plug in a mic and try again")?;
-    let device_name = device.name().unwrap_or_else(|_| "?".to_string());
+    // Stage 8.4: outer loop rebuilds the cpal stream when the user
+    // picks a different mic on the Devices tab. The encode-loop
+    // exits cleanly when the version bumps, then we re-enter and
+    // start over with the new device. A small audible glitch on
+    // device switch is fine — manual operation only.
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS)?;
+    let mut seq: u32 = 0;
+    loop {
+        let last_version = crate::input_device_version();
+        let device = crate::resolve_input_device()
+            .context("no default audio input device — plug in a mic and try again")?;
+        let device_name = device.name().unwrap_or_else(|_| "?".to_string());
 
-    let cfg = device
-        .default_input_config()
-        .context("query default input config")?;
-    let in_rate = cfg.sample_rate().0;
-    let in_channels = cfg.channels();
-    info!(
-        device = %device_name,
-        sample_rate = in_rate,
-        channels = in_channels,
-        sample_format = ?cfg.sample_format(),
-        "mic capture device picked"
-    );
+        let cfg = device
+            .default_input_config()
+            .context("query default input config")?;
+        let in_rate = cfg.sample_rate().0;
+        let in_channels = cfg.channels();
+        info!(
+            device = %device_name,
+            sample_rate = in_rate,
+            channels = in_channels,
+            sample_format = ?cfg.sample_format(),
+            "mic capture device picked"
+        );
 
-    if in_channels == 0 {
-        anyhow::bail!("input device reports 0 channels — driver issue");
-    }
+        if in_channels == 0 {
+            anyhow::bail!("input device reports 0 channels — driver issue");
+        }
 
-    let rb = HeapRb::<f32>::new(CAPTURE_RING_CAP);
-    let (producer, consumer) = rb.split();
-    let producer = Arc::new(Mutex::new(producer));
-    let producer_cb = producer.clone();
-    let err_fn = |e| warn!(error = %e, "mic stream error");
+        let rb = HeapRb::<f32>::new(CAPTURE_RING_CAP);
+        let (producer, consumer) = rb.split();
+        let producer = Arc::new(Mutex::new(producer));
+        let producer_cb = producer.clone();
+        let err_fn = |e| warn!(error = %e, "mic stream error");
 
-    let stream = match cfg.sample_format() {
-        SampleFormat::F32 => device.build_input_stream(
-            &cfg.config(),
-            move |data: &[f32], _| {
-                let mut p = producer_cb.lock();
-                let written = p.push_slice(data);
-                if written != data.len() {
-                    debug!(
-                        dropped = data.len() - written,
-                        "mic ring full — dropping samples"
-                    );
-                }
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::I16 => device.build_input_stream(
-            &cfg.config(),
-            move |data: &[i16], _| {
-                let mut p = producer_cb.lock();
-                for &s in data {
-                    let f = s as f32 / i16::MAX as f32;
-                    if p.try_push(f).is_err() {
-                        break;
+        let stream = match cfg.sample_format() {
+            SampleFormat::F32 => device.build_input_stream(
+                &cfg.config(),
+                move |data: &[f32], _| {
+                    let mut p = producer_cb.lock();
+                    let written = p.push_slice(data);
+                    if written != data.len() {
+                        debug!(
+                            dropped = data.len() - written,
+                            "mic ring full — dropping samples"
+                        );
                     }
-                }
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::I32 => device.build_input_stream(
-            &cfg.config(),
-            move |data: &[i32], _| {
-                let mut p = producer_cb.lock();
-                for &s in data {
-                    let f = s as f32 / i32::MAX as f32;
-                    if p.try_push(f).is_err() {
-                        break;
+                },
+                err_fn,
+                None,
+            ),
+            SampleFormat::I16 => device.build_input_stream(
+                &cfg.config(),
+                move |data: &[i16], _| {
+                    let mut p = producer_cb.lock();
+                    for &s in data {
+                        let f = s as f32 / i16::MAX as f32;
+                        if p.try_push(f).is_err() {
+                            break;
+                        }
                     }
-                }
-            },
-            err_fn,
-            None,
-        ),
-        other => anyhow::bail!("unsupported mic sample format: {other:?}"),
+                },
+                err_fn,
+                None,
+            ),
+            SampleFormat::I32 => device.build_input_stream(
+                &cfg.config(),
+                move |data: &[i32], _| {
+                    let mut p = producer_cb.lock();
+                    for &s in data {
+                        let f = s as f32 / i32::MAX as f32;
+                        if p.try_push(f).is_err() {
+                            break;
+                        }
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            other => anyhow::bail!("unsupported mic sample format: {other:?}"),
+        }
+        .context("build mic input stream")?;
+        stream.play().context("cpal play (mic)")?;
+        info!("mic stream started");
+
+        let outcome = drive_encode_loop(
+            consumer,
+            sink.clone(),
+            in_rate,
+            in_channels,
+            &mut encoder,
+            &mut seq,
+            last_version,
+        );
+        drop(stream);
+        match outcome {
+            EncodeLoopExit::SinkClosed => return Ok(()),
+            EncodeLoopExit::DeviceChanged => {
+                info!("input device selection changed — rebuilding mic stream");
+                continue;
+            }
+            EncodeLoopExit::Error(e) => return Err(e),
+        }
     }
-    .context("build mic input stream")?;
-    stream.play().context("cpal play (mic)")?;
-    info!("mic stream started");
+}
 
-    drive_encode_loop(consumer, sink, in_rate, in_channels)?;
-
-    drop(stream);
-    Ok(())
+enum EncodeLoopExit {
+    /// The runtime hung up — daemon is shutting down.
+    SinkClosed,
+    /// User picked a new mic on the Devices tab.
+    DeviceChanged,
+    /// Hard failure (e.g. opus encode crash) — bubble up.
+    /// Currently unused (encode errors only warn-and-skip), but
+    /// reserved so the outer loop can exit on irrecoverable issues
+    /// without changing the function signature later.
+    #[allow(dead_code)]
+    Error(anyhow::Error),
 }
 
 fn drive_encode_loop(
@@ -165,8 +200,10 @@ fn drive_encode_loop(
     sink: UnboundedSender<AudioFrame>,
     in_rate: u32,
     in_channels: u16,
-) -> Result<()> {
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS)?;
+    encoder: &mut OpusEncoder,
+    seq: &mut u32,
+    last_version: u64,
+) -> EncodeLoopExit {
     let in_frames_per_out = ((in_rate as u64 * FRAME_SAMPLES_PER_CHANNEL as u64
         + SAMPLE_RATE as u64 / 2)
         / SAMPLE_RATE as u64) as usize
@@ -175,7 +212,6 @@ fn drive_encode_loop(
 
     let mut in_buf = vec![0f32; in_samples_per_out];
     let mut out_buf = vec![0f32; FRAME_SAMPLES_INTERLEAVED];
-    let mut seq: u32 = 0;
     let needs_resample = in_rate != SAMPLE_RATE;
     let needs_chmap = in_channels != CHANNELS;
     if needs_resample || needs_chmap {
@@ -190,6 +226,12 @@ fn drive_encode_loop(
 
     loop {
         while consumer.occupied_len() < in_samples_per_out {
+            // Cheap poll: if the user picked a different mic on the
+            // Devices tab while we were waiting on samples, abandon
+            // this stream and let the outer loop rebuild.
+            if crate::input_device_version() != last_version {
+                return EncodeLoopExit::DeviceChanged;
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
         let n = consumer.pop_slice(&mut in_buf);
@@ -215,14 +257,14 @@ fn drive_encode_loop(
         };
         let frame = AudioFrame {
             stream: StreamKind::Mic,
-            seq,
+            seq: *seq,
             opus: opus_bytes,
         };
-        seq = seq.wrapping_add(1);
+        *seq = seq.wrapping_add(1);
 
         if sink.send(frame).is_err() {
             info!("mic sink closed — stopping mic capture");
-            return Ok(());
+            return EncodeLoopExit::SinkClosed;
         }
     }
 }

@@ -1,0 +1,56 @@
+#!/bin/bash
+# MineShare .deb postinst — runs as root after `dpkg -i` / `apt install`.
+#
+# Goals:
+#   1. Make /dev/uinput writable by the daemon at runtime
+#      (KVM injection on Linux opens it).
+#   2. Auto-add the user who invoked the install to the `input`
+#      group when we can detect them, so they don't have to do
+#      it by hand. Falls back to a plain-English hint otherwise.
+
+set -e
+
+# Ensure the `input` group exists. Most distros ship it pre-
+# created, but minimal containers / chroots sometimes don't.
+getent group input >/dev/null 2>&1 || groupadd --system input
+
+# Drop a udev rule so the kernel grants 0660 root:input on
+# /dev/uinput at boot. Without this, even adding the user to
+# `input` doesn't help — the device stays root-only.
+RULES_PATH=/etc/udev/rules.d/60-mineshare.rules
+cat > "$RULES_PATH" <<'EOF'
+# MineShare — let processes in the `input` group write to
+# /dev/uinput so the daemon can synthesise mouse/keyboard
+# events for the peer side of the bridge.
+KERNEL=="uinput", GROUP="input", MODE="0660"
+EOF
+
+# Reload + retrigger so the rule applies without a reboot.
+udevadm control --reload-rules >/dev/null 2>&1 || true
+udevadm trigger --subsystem-match=misc --attr-match=name=uinput >/dev/null 2>&1 || true
+
+# `dpkg` (and apt) usually keep $SUDO_USER set when invoked via
+# `sudo apt install …`. When it's set, we add that user to the
+# input group so they don't have to. Skip silently when not set
+# (e.g. unattended automation, where there's no human to bless).
+if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
+    if id -nG "$SUDO_USER" | grep -qw input; then
+        : # already a member
+    else
+        usermod -aG input "$SUDO_USER" >/dev/null 2>&1 || true
+        echo
+        echo "==> Added '$SUDO_USER' to the 'input' group."
+        echo "    Log out and back in once for the membership to take effect,"
+        echo "    then start MineShare from your application menu."
+        echo
+    fi
+else
+    echo
+    echo "==> MineShare installed."
+    echo "    To allow input device access, run once:"
+    echo "        sudo usermod -aG input \"\$USER\""
+    echo "    Then log out and back in."
+    echo
+fi
+
+exit 0

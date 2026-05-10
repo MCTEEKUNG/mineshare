@@ -36,6 +36,7 @@ bincode = { workspace = true }
 arboard = { workspace = true }
 socket2 = { workspace = true }
 rand = { workspace = true }
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hostname = "0.4"
