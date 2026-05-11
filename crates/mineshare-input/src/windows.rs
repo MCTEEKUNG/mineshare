@@ -797,12 +797,23 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         // The tracker is what fixes the "Shift-stuck-on-peer →
         // every letter forced uppercase" Caps-Lock bug when Smart
         // flips mid-keypress.
+
+        // Convert Windows VK code → Linux evdev code for extended keys
+        // (arrow keys, Windows key, nav cluster).  For ordinary keys
+        // the PS/2 scan code already equals the Linux evdev number, so
+        // we fall back to `scan` when the VK is not in the table.
+        let linux_code = EXTENDED_KEY_TABLE
+            .iter()
+            .find(|&&(_, vk)| vk == info.vkCode as u16)
+            .map(|&(evdev, _)| evdev)
+            .unwrap_or(scan as u16);
+
         if (down || up) && super::route_keystroke(scan as u16, down, mode == MODE_REMOTE) {
             sink_send(InputEvent::Key {
-                code: KeyCode(scan as u16),
+                code: KeyCode(linux_code),
                 down,
             });
-            super::note_key_forwarded_with_code(scan as u16, down);
+            super::note_key_forwarded_with_code(linux_code, down);
             // Consume so Windows doesn't also act on the keystroke.
             return LRESULT(1);
         }
@@ -946,7 +957,37 @@ impl InputInject for EnigoInject {
     }
 }
 
+/// Linux evdev codes for the "extended" key cluster that do NOT share
+/// values with their Windows PS/2 scan-code equivalents.  We use this
+/// table in two places:
+///   1. `scancode_to_vk`  — Linux→Windows injection: evdev code → VK
+///   2. `low_kb_hook`     — Windows→Linux capture: VK → evdev code
+///
+/// Bidirectional: left column is Linux evdev, right is Windows VK.
+const EXTENDED_KEY_TABLE: &[(u16, u16)] = &[
+    (103, 0x26), // KEY_UP        ↔ VK_UP
+    (108, 0x28), // KEY_DOWN      ↔ VK_DOWN
+    (105, 0x25), // KEY_LEFT      ↔ VK_LEFT
+    (106, 0x27), // KEY_RIGHT     ↔ VK_RIGHT
+    (102, 0x24), // KEY_HOME      ↔ VK_HOME
+    (107, 0x23), // KEY_END       ↔ VK_END
+    (104, 0x21), // KEY_PAGEUP    ↔ VK_PRIOR
+    (109, 0x22), // KEY_PAGEDOWN  ↔ VK_NEXT
+    (110, 0x2D), // KEY_INSERT    ↔ VK_INSERT
+    (111, 0x2E), // KEY_DELETE    ↔ VK_DELETE
+    (125, 0x5B), // KEY_LEFTMETA  ↔ VK_LWIN
+    (126, 0x5C), // KEY_RIGHTMETA ↔ VK_RWIN
+    (99,  0x2C), // KEY_SYSRQ     ↔ VK_SNAPSHOT (PrintScreen)
+];
+
+/// Linux evdev KeyCode → Windows Virtual Key.
+/// For common keys the PS/2 scan-code number equals the evdev number,
+/// so `MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)` handles them.
+/// Extended keys (arrow cluster, Win key, …) need explicit remapping.
 fn scancode_to_vk(scan: u16) -> u16 {
+    if let Some(&(_, vk)) = EXTENDED_KEY_TABLE.iter().find(|&&(evdev, _)| evdev == scan) {
+        return vk;
+    }
     use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VSC_TO_VK_EX, MapVirtualKeyW};
     unsafe {
         let vk = MapVirtualKeyW(scan as u32, MAPVK_VSC_TO_VK_EX);
