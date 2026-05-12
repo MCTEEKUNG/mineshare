@@ -31,16 +31,22 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CURSORINFO, CURSOR_SHOWING, CallNextHookEx, DispatchMessageW, GetClipCursor, GetCursorInfo,
-    GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SetCursorPos, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_XBUTTONDOWN, WM_XBUTTONUP,
+use windows::Win32::UI::Input::{
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
+    RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
-use windows::Win32::Foundation::{CloseHandle, MAX_PATH, RECT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, CURSORINFO, CURSOR_SHOWING, CallNextHookEx,
+    DispatchMessageW, GetClipCursor, GetCursorInfo, GetCursorPos, GetMessageW,
+    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+    RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SetCursorPos, SetWindowsHookExW, TranslateMessage,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
+    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+};
+use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH, RECT};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     PROCESS_NAME_FORMAT,
@@ -117,12 +123,21 @@ const SCAN_HOTKEY_KB: u32 = 0x25; // K
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
 
-/// Per-event delta cap. Windows coalesces fast HW motion into a single
-/// `WM_MOUSEMOVE` whose pt-delta can be hundreds or thousands of pixels —
-/// large enough to throw the peer cursor straight to a screen edge in one
-/// frame. Cap each forwarded delta so the peer sees a smooth stream of
-/// reasonable steps. 30px keeps Ubuntu cursor smooth even with Win at
-/// 200% DPI and Linux's default acceleration profile.
+/// Set to `true` once `WM_INPUT` raw-mouse registration succeeds in
+/// `hook_thread`.  When true, `low_mouse_hook` skips motion forwarding
+/// (motion comes via `handle_raw_input` instead — raw pre-acceleration
+/// hardware mickeys, identical to what the Linux evdev path forwards,
+/// giving 1:1 mouse feel regardless of whether the peer is Linux or
+/// Windows).
+///
+/// If registration fails (no GUI session, sandboxed environment) we fall
+/// back to the old WH_MOUSE_LL screen-space delta path.
+static USING_RAW_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Fallback per-event delta cap used ONLY when `USING_RAW_INPUT = false`.
+/// The WH_MOUSE_LL path delivers post-acceleration screen-space coords;
+/// the cap prevents a coalesced burst from teleporting the peer cursor.
+/// Irrelevant (not reached) when raw input is active.
 const MAX_DELTA_PX: i32 = 30;
 
 fn sink_send(ev: InputEvent) {
@@ -496,17 +511,145 @@ unsafe fn hook_thread() {
     }
     info!("Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)");
 
+    // Create a message-only window so we can receive WM_INPUT via
+    // RIDEV_INPUTSINK.  Raw input gives pre-acceleration hardware mickeys
+    // — the same unit that Linux evdev forwards — so the peer cursor
+    // behaves naturally under whatever acceleration the receiver applies.
+    if let Some(hwnd) = create_raw_input_window() {
+        let rid = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+            usUsage: 0x02,     // HID_USAGE_GENERIC_MOUSE
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        };
+        match unsafe { RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32) } {
+            Ok(()) => {
+                USING_RAW_INPUT.store(true, Ordering::Release);
+                info!("raw mouse input registered (WM_INPUT / RIDEV_INPUTSINK)");
+            }
+            Err(e) => {
+                warn!(?e, "RegisterRawInputDevices failed — using hook-based delta (may feel slow at high speed)");
+            }
+        }
+    } else {
+        warn!("create_raw_input_window failed — using hook-based delta");
+    }
+
     let mut msg = MSG::default();
     loop {
         let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if r.0 == 0 || r.0 == -1 {
             break;
         }
+        // Raw mouse input: forward pre-acceleration hardware mickeys when
+        // in REMOTE mode.  This runs AFTER low_mouse_hook has already
+        // updated VIRT_X / done the anchor warp for the same event.
+        if msg.message == WM_INPUT {
+            unsafe { handle_raw_input(HRAWINPUT(msg.lParam.0 as *mut _)) };
+        }
         unsafe {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// Minimal window procedure: delegate everything to DefWindowProcW.
+unsafe extern "system" fn raw_input_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Create a message-only (HWND_MESSAGE) window that receives WM_INPUT.
+/// Returns `None` if window class registration or window creation fails.
+fn create_raw_input_window() -> Option<HWND> {
+    use windows::core::PCWSTR;
+    let class_name: Vec<u16> = "MineShareRI\0".encode_utf16().collect();
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(raw_input_wnd_proc),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            ..std::mem::zeroed()
+        };
+        // RegisterClassExW fails harmlessly if the class already exists
+        // (e.g. across reconnects in the same process).
+        let _ = RegisterClassExW(&wc);
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR::null(),
+            WINDOW_STYLE(0),
+            0, 0, 0, 0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        ).ok()
+    }
+}
+
+/// Process one WM_INPUT message: extract raw mouse deltas and forward
+/// them to the peer when in REMOTE mode.
+///
+/// Because these are pre-acceleration hardware mickeys (same unit as
+/// Linux evdev REL_X/REL_Y), the peer OS applies its own pointer
+/// acceleration naturally — giving the same 1:1 "natural mouse" feel
+/// regardless of whether the peer is Windows or Linux.
+unsafe fn handle_raw_input(h: HRAWINPUT) {
+    if !USING_RAW_INPUT.load(Ordering::Relaxed) { return; }
+    if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE { return; }
+
+    // Two-pass: first get required buffer size, then read data.
+    let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+    let mut size: u32 = 0;
+    unsafe {
+        GetRawInputData(h, RID_INPUT, None, &mut size, header_size);
+    }
+    if size == 0 || size > 1024 { return; }
+
+    let mut buf = vec![0u8; size as usize];
+    let written = unsafe {
+        GetRawInputData(
+            h,
+            RID_INPUT,
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            header_size,
+        )
+    };
+    if written == u32::MAX || written == 0 { return; }
+
+    let raw = unsafe { &*(buf.as_ptr() as *const RAWINPUT) };
+    // Only handle mouse events (dwType == 0 == RIM_TYPEMOUSE).
+    if raw.header.dwType != RIM_TYPEMOUSE.0 { return; }
+
+    let mouse = unsafe { &raw.data.mouse };
+    // Skip absolute-position events (touch digitiser, graphics tablet…).
+    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 { return; }
+
+    let dx = mouse.lLastX;
+    let dy = mouse.lLastY;
+    if dx == 0 && dy == 0 { return; }
+
+    // Apply user sensitivity multiplier with sub-pixel residue.
+    let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+    let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+    let sdx = super::scale_delta(dx, &mut rx);
+    let sdy = super::scale_delta(dy, &mut ry);
+    SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+    SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+
+    static RAW_FWD: AtomicI32 = AtomicI32::new(0);
+    let n = RAW_FWD.fetch_add(1, Ordering::Relaxed);
+    if n % 500 == 0 {
+        info!(raw_dx = dx, raw_dy = dy, sdx, sdy, n, "sample raw motion forward");
+    }
+    sink_send(InputEvent::MouseMove { dx: sdx, dy: sdy });
 }
 
 const LLMHF_INJECTED: u32 = 0x00000001;
@@ -619,40 +762,37 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 if new_virt_x <= -EXIT_BUFFER_PX {
                     exit_remote(y);
                 } else {
-                    // Stage 10: apply user sensitivity multiplier
-                    // with sub-pixel residue carried in
-                    // SENS_RESIDUE_X/Y so values < 1.0 don't lose
-                    // every other 1-pixel motion to rounding.
-                    let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
-                    let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
-                    let scaled_dx = super::scale_delta(dx, &mut rx);
-                    let scaled_dy = super::scale_delta(dy, &mut ry);
-                    SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
-                    SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
-                    // Cap each forwarded step so coalesced HW motion can't
-                    // teleport the peer cursor across its screen.
-                    let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-                    let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-                    if fdx != 0 || fdy != 0 {
-                        static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
-                        let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
-                        if n % 200 == 0 {
-                            info!(
-                                raw_dx = dx,
-                                raw_dy = dy,
-                                fdx,
-                                fdy,
-                                virt_x = new_virt_x,
-                                n,
-                                "sample motion forward"
-                            );
-                        }
-                        sink_send(InputEvent::MouseMove { dx: fdx, dy: fdy });
-                    }
+                    // Anchor warp: keeps WH_MOUSE_LL firing so edge-exit
+                    // detection (VIRT_X above) continues to work.
+                    // Motion forwarding is handled by `handle_raw_input`
+                    // (WM_INPUT, pre-acceleration hardware mickeys) when
+                    // raw input is active.  Fall back to screen-space
+                    // delta here only when raw input registration failed.
                     let (ax, ay) = anchor();
-                    unsafe {
-                        let _ = SetCursorPos(ax, ay);
+                    if !USING_RAW_INPUT.load(Ordering::Relaxed) {
+                        // Fallback: send post-accel screen-space delta with cap.
+                        let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+                        let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+                        let scaled_dx = super::scale_delta(dx, &mut rx);
+                        let scaled_dy = super::scale_delta(dy, &mut ry);
+                        SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+                        SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+                        let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                        let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                        if fdx != 0 || fdy != 0 {
+                            static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+                            let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
+                            if n % 200 == 0 {
+                                info!(
+                                    raw_dx = dx, raw_dy = dy, fdx, fdy,
+                                    virt_x = new_virt_x, n,
+                                    "sample motion forward (hook fallback)"
+                                );
+                            }
+                            sink_send(InputEvent::MouseMove { dx: fdx, dy: fdy });
+                        }
                     }
+                    unsafe { let _ = SetCursorPos(ax, ay); }
                     LAST_X.store(ax, Ordering::Relaxed);
                     LAST_Y.store(ay, Ordering::Relaxed);
                 }
