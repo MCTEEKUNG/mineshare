@@ -215,21 +215,29 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     crate::settings::install_loaded();
 
     // --- Input capture ----------------------------------------------------
-    // Input + audio frames share the same broadcast channel so the
-    // per-peer UDP-send task only has to subscribe once. WireFrame's
-    // tagged variants tell the receiver which payload kind to inject.
+    // SPLIT channels for priority:
+    //   * `input_bcast` — small, high-priority. Mouse/keyboard events
+    //     bypass the audio queue so a burst of audio frames sitting in
+    //     the wire channel can't add ~20-40 ms (one Opus frame each) of
+    //     latency to cursor motion.
+    //   * `wire_bcast` — larger, audio + future bulk traffic.
     //
-    // The broadcast channel is created BEFORE capture so the callback
-    // closure can capture a sender clone. Events are dispatched directly
-    // from the OS hook / evdev thread into the broadcast with no
-    // intermediate MPSC channel and no extra tokio scheduler round-trip —
-    // cutting the mouse-event pipeline from two async hops to one.
+    // The per-peer UDP-send task subscribes to BOTH and uses
+    // `tokio::select! { biased; … }` with the input arm first so it
+    // drains pending input on every wakeup before touching audio.
+    //
+    // Capacity 64 on the input channel is ~64 ms of headroom at a
+    // 1000 Hz polling mouse — large enough to ride out a momentary
+    // tokio-runtime stall, small enough that we don't ship a backlog
+    // of stale motion after a network blip (the `RecvError::Lagged`
+    // arm logs the drop and recovers).
+    let (input_bcast, _) = broadcast::channel::<InputEvent>(64);
     let (wire_bcast, _) = broadcast::channel::<WireFrame>(1024);
 
-    let bcast_for_cap = wire_bcast.clone();
+    let input_for_cap = input_bcast.clone();
     let cap_sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static> =
         std::sync::Arc::new(move |ev: InputEvent| {
-            let _ = bcast_for_cap.send(WireFrame::Input(ev));
+            let _ = input_for_cap.send(ev);
         });
 
     let cap_started = if opts.capture {
@@ -438,6 +446,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let resp_inject = inject.clone();
     let resp_playback = playback.clone();
     let resp_mic_playback = mic_playback.clone();
+    let resp_input_bcast = input_bcast.clone();
     let resp_bcast = wire_bcast.clone();
     tokio::spawn(async move {
         accept_loop(
@@ -447,6 +456,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
             resp_inject,
             resp_playback,
             resp_mic_playback,
+            resp_input_bcast,
             resp_bcast,
         )
         .await;
@@ -515,6 +525,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     let inject = inject.clone();
                     let playback = playback.clone();
                     let mic_playback = mic_playback.clone();
+                    let input_bcast_for_loop = input_bcast.clone();
                     let bcast = wire_bcast.clone();
                     let known_for_loop = known.clone();
                     let in_flight_for_loop = in_flight.clone();
@@ -543,6 +554,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                 inject.clone(),
                                 playback.clone(),
                                 mic_playback.clone(),
+                                input_bcast_for_loop.clone(),
                                 bcast.clone(),
                             )
                             .await
@@ -574,6 +586,7 @@ async fn accept_loop(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
+    input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) {
     loop {
@@ -585,6 +598,7 @@ async fn accept_loop(
                 let inject = inject.clone();
                 let playback = playback.clone();
                 let mic_playback = mic_playback.clone();
+                let input_bcast = input_bcast.clone();
                 let bcast = bcast.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_inbound(
@@ -594,6 +608,7 @@ async fn accept_loop(
                         inject,
                         playback,
                         mic_playback,
+                        input_bcast,
                         bcast,
                     )
                     .await
@@ -617,6 +632,7 @@ async fn handle_inbound(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
+    input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
@@ -635,6 +651,7 @@ async fn handle_inbound(
         inject,
         playback,
         mic_playback,
+        input_bcast,
         bcast,
     )
     .await
@@ -647,6 +664,7 @@ async fn dial_and_run(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
+    input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let addr = peer
@@ -673,6 +691,7 @@ async fn dial_and_run(
         inject,
         playback,
         mic_playback,
+        input_bcast,
         bcast,
     )
     .await
@@ -692,6 +711,7 @@ async fn run_peer_session(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
+    input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let peer_static = session.remote_static.clone();
@@ -1201,38 +1221,56 @@ async fn run_peer_session(
     // it; when the TCP control channel closes the reader returns and we
     // break out, tearing down every other task in the session so the
     // caller's reconnect loop can redial.
+    //
+    // PRIORITY: input events drain before audio.  `tokio::select!` with
+    // `biased;` polls arms top-to-bottom, so when a mouse-motion event
+    // arrives while an audio frame is also pending the input arm wins
+    // and the cursor goes out immediately.  Without this, a backlog of
+    // 1–2 Opus frames (~20–40 ms each) sitting ahead of input in the
+    // shared queue added a corresponding ~20–40 ms of perceived ping
+    // to drag-across motion.
+    let mut input_sub = input_bcast.subscribe();
     let mut sub = bcast.subscribe();
     tokio::pin!(reader_handle);
     let exit_reason = loop {
+        // Each arm goes through this same encode → encrypt → send →
+        // stats path; macro keeps the two arms terse without the
+        // lifetime gymnastics of a closure that borrows `aead`/`udp`.
+        macro_rules! send_wire {
+            ($wire:expr, $err_label:expr) => {{
+                let pt = match bincode::serde::encode_to_vec(&$wire, standard()) {
+                    Ok(b) => b,
+                    Err(e) => { warn!(error = %e, "encode failed"); continue; }
+                };
+                let ct = match aead.seal(&pt) {
+                    Ok(b) => b,
+                    Err(e) => { warn!(error = %e, "encrypt failed"); continue; }
+                };
+                let len = ct.len();
+                if let Err(e) = udp.send_to(&ct, peer_udp).await {
+                    warn!(error = %e, label = $err_label, "UDP send failed — ending session");
+                    break "UDP send error";
+                }
+                stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
+                stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
+            }};
+        }
         tokio::select! {
             biased;
             _ = &mut reader_handle => {
                 break "TCP control reader ended";
             }
-            recv = sub.recv() => match recv {
-                Ok(ev) => {
-                    let pt = match bincode::serde::encode_to_vec(ev, standard()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!(error = %e, "encode failed");
-                            continue;
-                        }
-                    };
-                    let ct = match aead.seal(&pt) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!(error = %e, "encrypt failed");
-                            continue;
-                        }
-                    };
-                    let len = ct.len();
-                    if let Err(e) = udp.send_to(&ct, peer_udp).await {
-                        warn!(error = %e, "UDP send failed — ending session");
-                        break "UDP send error";
-                    }
-                    stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
-                    stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
+            // HIGH-PRIORITY: input events skip the audio queue.
+            recv = input_sub.recv() => match recv {
+                Ok(ev) => { send_wire!(WireFrame::Input(ev), "input"); }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "input subscriber lagged — events dropped");
                 }
+                Err(broadcast::error::RecvError::Closed) => break "input broadcast closed",
+            },
+            // LOWER-PRIORITY: audio + future bulk traffic.
+            recv = sub.recv() => match recv {
+                Ok(ev) => { send_wire!(ev, "wire"); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "broadcast subscriber lagged — events dropped");
                 }
