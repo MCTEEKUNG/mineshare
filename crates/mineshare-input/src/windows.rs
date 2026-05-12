@@ -16,7 +16,7 @@
 
 use std::mem;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -133,6 +133,76 @@ static MOD_ALT: AtomicBool = AtomicBool::new(false);
 /// If registration fails (no GUI session, sandboxed environment) we fall
 /// back to the old WH_MOUSE_LL screen-space delta path.
 static USING_RAW_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Timestamp (`super::now_ms`) of the most recent raw input motion event
+/// received via `WM_INPUT`.  The hook fallback uses this as a liveness
+/// check — if registration succeeded but no WM_INPUT actually arrives
+/// (some Windows builds / message-only-window quirks silently drop the
+/// delivery), the hook path takes over so the cursor still moves on the
+/// peer.  300ms window picks up >3 ticks of a 125 Hz mouse.
+static LAST_RAW_INPUT_MS: AtomicU64 = AtomicU64::new(0);
+const RAW_INPUT_STALE_MS: u64 = 300;
+
+// --- Motion coalescing (port of linux.rs 8ms window) ---------------------
+//
+// Raw input on Windows can fire at the mouse's polling rate (often 1000 Hz
+// on gaming mice).  Sending one UDP packet per event saturates the peer's
+// receive-and-inject loop — each `Enigo::move_mouse` call holds a mutex
+// and serialises through a single tokio task, so 1000 events/sec arrives
+// as a stuttery batch on the peer's cursor.
+//
+// Fix: accumulate dx/dy into `PENDING_*` and dispatch one combined event
+// every 8 ms (~125 Hz, indistinguishable from a 125 Hz polling mouse).
+// Mirrors `linux.rs::flush_pending` so both sides behave identically.
+const FLUSH_INTERVAL_MS: u64 = 8;
+static PENDING_DX: AtomicI32 = AtomicI32::new(0);
+static PENDING_DY: AtomicI32 = AtomicI32::new(0);
+static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
+static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static FLUSH_FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+
+/// Atomically drain `PENDING_DX/DY` and forward the combined delta.
+/// Skips no-op events when both axes are zero.
+fn flush_pending_motion() {
+    let dx = PENDING_DX.swap(0, Ordering::AcqRel);
+    let dy = PENDING_DY.swap(0, Ordering::AcqRel);
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
+    sink_send(InputEvent::MouseMove { dx, dy });
+    let n = FLUSH_FWD_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n % 100 == 0 {
+        info!(dx, dy, n, "win coalesced motion forward (8ms-window)");
+    }
+}
+
+/// Spawn the periodic flush thread once.  Wakes every `FLUSH_INTERVAL_MS`
+/// and drains pending motion if `CURSOR_MODE == REMOTE`.  Mirrors the
+/// Linux watchdog — needed so a "moved 2 px then paused" residual
+/// doesn't sit in the accumulator until the next motion event.
+fn start_motion_flush_watchdog() {
+    if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Err(e) = thread::Builder::new()
+        .name("win-motion-flush".into())
+        .spawn(|| loop {
+            thread::sleep(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+            if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+                continue;
+            }
+            let now = super::now_ms();
+            let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+                flush_pending_motion();
+            }
+        })
+    {
+        warn!(error = %e, "failed to spawn motion flush watchdog");
+        FLUSH_WATCHDOG_STARTED.store(false, Ordering::Release);
+    }
+}
 
 /// Fallback per-event delta cap used ONLY when `USING_RAW_INPUT = false`.
 /// The WH_MOUSE_LL path delivers post-acceleration screen-space coords;
@@ -511,6 +581,11 @@ unsafe fn hook_thread() {
     }
     info!("Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)");
 
+    // 8ms motion coalescer: batches raw input + hook fallback events
+    // into one MouseMove every ~8ms so the peer's inject loop isn't
+    // overwhelmed by a 1000 Hz mouse.  Same pattern as linux.rs.
+    start_motion_flush_watchdog();
+
     // Create a message-only window so we can receive WM_INPUT via
     // RIDEV_INPUTSINK.  Raw input gives pre-acceleration hardware mickeys
     // — the same unit that Linux evdev forwards — so the peer cursor
@@ -644,12 +719,28 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
     SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
     SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
 
+    // Record liveness so the hook fallback knows raw input is delivering.
+    LAST_RAW_INPUT_MS.store(super::now_ms(), Ordering::Release);
+
     static RAW_FWD: AtomicI32 = AtomicI32::new(0);
     let n = RAW_FWD.fetch_add(1, Ordering::Relaxed);
     if n % 500 == 0 {
-        info!(raw_dx = dx, raw_dy = dy, sdx, sdy, n, "sample raw motion forward");
+        info!(raw_dx = dx, raw_dy = dy, sdx, sdy, n, "sample raw motion captured");
     }
-    sink_send(InputEvent::MouseMove { dx: sdx, dy: sdy });
+
+    // Coalesce into the 8ms accumulator instead of firing one packet
+    // per HW event.  The flush watchdog (or opportunistic flush below)
+    // dispatches the combined delta — keeps event rate at ~125 Hz so
+    // the peer's inject loop stays responsive even with a 1000 Hz mouse.
+    PENDING_DX.fetch_add(sdx, Ordering::AcqRel);
+    PENDING_DY.fetch_add(sdy, Ordering::AcqRel);
+    // Opportunistic flush: if the 8 ms window has already lapsed since
+    // the last dispatch, send now instead of waiting for the watchdog.
+    let now = super::now_ms();
+    let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+        flush_pending_motion();
+    }
 }
 
 const LLMHF_INJECTED: u32 = 0x00000001;
@@ -766,11 +857,21 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     // detection (VIRT_X above) continues to work.
                     // Motion forwarding is handled by `handle_raw_input`
                     // (WM_INPUT, pre-acceleration hardware mickeys) when
-                    // raw input is active.  Fall back to screen-space
-                    // delta here only when raw input registration failed.
+                    // raw input is *actually delivering events*.  If
+                    // registration succeeded but WM_INPUT never arrives
+                    // (HWND_MESSAGE quirks on some Win builds, anti-
+                    // cheat conflicts, etc.), `LAST_RAW_INPUT_MS` stays
+                    // stale and we fall back here so the cursor still
+                    // moves on the peer.
                     let (ax, ay) = anchor();
-                    if !USING_RAW_INPUT.load(Ordering::Relaxed) {
-                        // Fallback: send post-accel screen-space delta with cap.
+                    let last_raw = LAST_RAW_INPUT_MS.load(Ordering::Acquire);
+                    let raw_is_live = last_raw != 0
+                        && super::now_ms().saturating_sub(last_raw) < RAW_INPUT_STALE_MS;
+                    if !raw_is_live {
+                        // Fallback: post-accel screen-space delta with cap.
+                        // Same accumulator as raw input path — the flush
+                        // watchdog dispatches at ~125 Hz so the peer sees
+                        // a steady event rate regardless of source.
                         let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
                         let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
                         let scaled_dx = super::scale_delta(dx, &mut rx);
@@ -780,16 +881,23 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                         let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
                         let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
                         if fdx != 0 || fdy != 0 {
-                            static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
-                            let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
+                            static HOOK_CAPTURED: AtomicI32 = AtomicI32::new(0);
+                            let n = HOOK_CAPTURED.fetch_add(1, Ordering::Relaxed);
                             if n % 200 == 0 {
                                 info!(
                                     raw_dx = dx, raw_dy = dy, fdx, fdy,
                                     virt_x = new_virt_x, n,
-                                    "sample motion forward (hook fallback)"
+                                    "sample motion captured (hook fallback)"
                                 );
                             }
-                            sink_send(InputEvent::MouseMove { dx: fdx, dy: fdy });
+                            PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
+                            PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+                            // Opportunistic flush if the 8ms window has lapsed.
+                            let now = super::now_ms();
+                            let last_flush = LAST_FLUSH_MS.load(Ordering::Relaxed);
+                            if now.saturating_sub(last_flush) >= FLUSH_INTERVAL_MS {
+                                flush_pending_motion();
+                            }
                         }
                     }
                     unsafe { let _ = SetCursorPos(ax, ay); }
