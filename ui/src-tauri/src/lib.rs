@@ -196,14 +196,30 @@ fn set_audio_input_device(name: Option<String>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if let Err(e) = state::bootstrap_runtime() {
-        eprintln!("daemon bootstrap failed: {e:#}");
-    }
     info!("MineShare GUI starting");
 
     tauri::Builder::default()
+        // MUST be the first plugin: its setup hook runs before our
+        // `.setup()` below, so a duplicate launch is detected and
+        // exits *before* we ever call `bootstrap_runtime()` — the
+        // embedded daemon therefore never double-spawns. The callback
+        // fires in the EXISTING instance to surface its window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            info!("second instance launched — focusing existing window");
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Spawn the daemon here (not before the builder) so it
+            // only ever starts in the surviving single instance.
+            if let Err(e) = state::bootstrap_runtime() {
+                eprintln!("daemon bootstrap failed: {e:#}");
+            }
             tray::install(app.handle())?;
             Ok(())
         })

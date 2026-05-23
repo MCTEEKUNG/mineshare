@@ -28,6 +28,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+# Single-instance guard: a second launch hands its argv to the
+# already-running instance (which focuses its window) and exits,
+# so the embedded daemon never double-spawns and fights itself
+# over the same ports / mDNS name / input hooks.
+tauri-plugin-single-instance = "2"
 
 # Wire the workspace crates so the Tauri backend can drive the daemon
 # directly. M5 rewires the GUI to embed the full daemon runtime
