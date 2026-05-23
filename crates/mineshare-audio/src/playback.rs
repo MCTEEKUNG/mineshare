@@ -11,9 +11,11 @@
 //! arrive, the callback fills with silence (zeros). Better than
 //! introducing latency by blocking the device.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use cpal::SampleFormat;
@@ -85,18 +87,38 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
     // permanently-broken device doesn't hot-loop calling cpal.
     let mut stream_ctx: Option<StreamCtx> = None;
     let mut last_version = crate::output_device_version();
-    let mut next_build_attempt = std::time::Instant::now();
+    let mut next_build_attempt = Instant::now();
     const RETRY_BACKOFF: Duration = Duration::from_secs(3);
     let mut dropped_frames_since_warn: u64 = 0;
-    let mut last_drop_warn = std::time::Instant::now();
+    let mut last_drop_warn = Instant::now();
+
+    // Device-loss watchdog state. The cpal data callback bumps
+    // `callback_ticks` every time the device pulls samples; if frames
+    // keep arriving from the peer but the tick stops advancing, the
+    // OS audio callback has silently stopped (device unplugged, default
+    // switched, SoundWire/Bluetooth dropout) WITHOUT firing `err_fn`.
+    // We detect that and force a rebuild — `resolve_output_device()`
+    // then re-picks whatever the current default/selection is.
+    const WATCHDOG_INTERVAL: Duration = Duration::from_millis(500);
+    let mut last_watchdog = Instant::now();
+    let mut last_tick_snapshot: u64 = 0;
+    let mut frames_since_watchdog: u64 = 0;
 
     loop {
-        // (Re)build the stream when we need one. Either we have
-        // none yet (startup or a previous build failed) or the
-        // user picked a different device on the GUI Devices tab.
+        // (Re)build the stream when we need one:
+        //   * none yet (startup or a previous build failed), OR
+        //   * the user picked a different device on the GUI tab, OR
+        //   * the cpal error callback fired (device error), OR
+        //   * the device-loss watchdog flagged a stalled callback.
         let v = crate::output_device_version();
-        let want_rebuild = stream_ctx.is_none() || v != last_version;
-        if want_rebuild && std::time::Instant::now() >= next_build_attempt {
+        let errored = stream_ctx
+            .as_ref()
+            .is_some_and(|c| c.stream_error.load(Ordering::Acquire));
+        let want_rebuild = stream_ctx.is_none() || v != last_version || errored;
+        if want_rebuild && Instant::now() >= next_build_attempt {
+            if errored {
+                warn!("cpal playback stream errored — rebuilding");
+            }
             // Drop any old stream first so the device handle is
             // released before we ask cpal for it back — some
             // Windows drivers refuse exclusive re-acquire
@@ -104,14 +126,17 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
             stream_ctx = None;
             match build_stream() {
                 Ok(s) => {
+                    last_tick_snapshot = s.callback_ticks.load(Ordering::Relaxed);
                     stream_ctx = Some(s);
                     last_version = v;
+                    last_watchdog = Instant::now();
+                    frames_since_watchdog = 0;
                     info!("cpal playback ready");
                 }
                 Err(e) => {
                     warn!(error = %e, "cpal playback build failed — retrying in 3 s");
                     last_version = v; // don't busy-retry on the same version
-                    next_build_attempt = std::time::Instant::now() + RETRY_BACKOFF;
+                    next_build_attempt = Instant::now() + RETRY_BACKOFF;
                 }
             }
         }
@@ -131,11 +156,35 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                 };
                 if let Some(ctx) = stream_ctx.as_mut() {
                     let pushed = ctx.producer.push_slice(&scratch[..n]);
+                    frames_since_watchdog += 1;
                     if pushed != n {
                         warn!(
                             dropped = n - pushed,
                             "cpal playback ring full — dropping samples"
                         );
+                    }
+
+                    // Device-loss watchdog: if frames have been arriving
+                    // for a full interval but the callback tick hasn't
+                    // moved, the device callback is dead — tear the
+                    // stream down so the top of the loop rebuilds it
+                    // against the current default device.
+                    if last_watchdog.elapsed() >= WATCHDOG_INTERVAL {
+                        let tick_now = ctx.callback_ticks.load(Ordering::Relaxed);
+                        if frames_since_watchdog > 0 && tick_now == last_tick_snapshot {
+                            warn!(
+                                "cpal playback callback stalled \
+                                 (device removed / default changed) — rebuilding"
+                            );
+                            stream_ctx = None;
+                            next_build_attempt = Instant::now();
+                            last_watchdog = Instant::now();
+                            frames_since_watchdog = 0;
+                            continue;
+                        }
+                        last_tick_snapshot = tick_now;
+                        last_watchdog = Instant::now();
+                        frames_since_watchdog = 0;
                     }
                 } else {
                     // Stream not built yet (or last build failed).
@@ -177,6 +226,13 @@ struct StreamCtx {
     #[allow(dead_code)]
     stream: cpal::Stream,
     producer: ringbuf::HeapProd<f32>,
+    /// Bumped by the cpal data callback every time the device pulls
+    /// samples. The playback thread's watchdog samples this to tell a
+    /// live device callback from one that has silently stopped.
+    callback_ticks: Arc<AtomicU64>,
+    /// Set by the cpal error callback when the OS reports a stream
+    /// error (device disconnected, format change, exclusive grab).
+    stream_error: Arc<AtomicBool>,
 }
 
 fn build_stream() -> Result<StreamCtx> {
@@ -199,11 +255,22 @@ fn build_stream() -> Result<StreamCtx> {
     let rb = HeapRb::<f32>::new(RING_CAPACITY);
     let (producer, mut consumer) = rb.split();
 
-    let err_fn = |e| warn!(error = %e, "cpal playback stream error");
+    let callback_ticks = Arc::new(AtomicU64::new(0));
+    let stream_error = Arc::new(AtomicBool::new(false));
+
+    let err_flag = stream_error.clone();
+    let err_fn = move |e| {
+        warn!(error = %e, "cpal playback stream error");
+        err_flag.store(true, Ordering::Release);
+    };
+
+    let ticks_f32 = callback_ticks.clone();
+    let ticks_i16 = callback_ticks.clone();
     let stream = match config.sample_format() {
         SampleFormat::F32 => device.build_output_stream(
             &config.config(),
             move |out: &mut [f32], _| {
+                ticks_f32.fetch_add(1, Ordering::Relaxed);
                 fill_callback(out, &mut consumer);
             },
             err_fn,
@@ -214,6 +281,7 @@ fn build_stream() -> Result<StreamCtx> {
             device.build_output_stream(
                 &config.config(),
                 move |out: &mut [i16], _| {
+                    ticks_i16.fetch_add(1, Ordering::Relaxed);
                     tmp.resize(out.len(), 0.0);
                     fill_callback(&mut tmp, &mut consumer);
                     for (dst, &src) in out.iter_mut().zip(tmp.iter()) {
@@ -229,7 +297,12 @@ fn build_stream() -> Result<StreamCtx> {
     .context("build cpal output stream")?;
     stream.play().context("cpal play")?;
 
-    Ok(StreamCtx { stream, producer })
+    Ok(StreamCtx {
+        stream,
+        producer,
+        callback_ticks,
+        stream_error,
+    })
 }
 
 fn fill_callback(out: &mut [f32], consumer: &mut ringbuf::HeapCons<f32>) {
