@@ -6,7 +6,22 @@ Drive two PCs with one keyboard + one mouse. Hear and speak through both. Cursor
 
 **Status:** working end-to-end on Win 11 + Ubuntu 24.04 (Wayland/GNOME). Single user, single LAN. Pre-1.0 — see [PLAN.md](PLAN.md) for the full design.
 
-![status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange) ![rust](https://img.shields.io/badge/rust-1.94+-orange) ![license](https://img.shields.io/badge/license-MIT-blue)
+![status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange) ![rust](https://img.shields.io/badge/rust-1.94+-orange) ![license](https://img.shields.io/badge/license-MIT-blue) [![latest release](https://img.shields.io/github/v/release/MCTEEKUNG/mineshare?label=download&sort=semver&color=brightgreen)](https://github.com/MCTEEKUNG/mineshare/releases/latest)
+
+---
+
+## ⬇️ Download
+
+Grab the newest installer for your OS from the **[latest release ›](https://github.com/MCTEEKUNG/mineshare/releases/latest)** — no toolchain required.
+
+| OS | File | Install |
+|---|---|---|
+| 🪟 **Windows** | [`MineShare_<ver>_x64-setup.exe`](https://github.com/MCTEEKUNG/mineshare/releases/latest) (NSIS, ~3 MB) or [`_x64_en-US.msi`](https://github.com/MCTEEKUNG/mineshare/releases/latest) (WiX, ~5 MB) | double-click → install |
+| 🐧 **Ubuntu / Debian** | [`MineShare_<ver>_amd64.deb`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `sudo apt install ./<file>` |
+| 🎩 **Fedora / RHEL** | [`MineShare-<ver>-1.x86_64.rpm`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `sudo rpm -i <file>` |
+| 🐧 **Any Linux** | [`MineShare_<ver>_amd64.AppImage`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `chmod +x <file>` → run |
+
+> Binaries aren't code-signed yet (hobby project). On Windows, SmartScreen will warn on first launch — click **More info → Run anyway**. Full setup notes in [Install](#install) below.
 
 ---
 
@@ -66,7 +81,7 @@ Hotkeys:
 
 ## Install
 
-Pre-built installers are attached to each [GitHub Release](https://github.com/mineshare/mineshare/releases). For end users that's the recommended path — no toolchain required.
+Pre-built installers are attached to each [GitHub Release](https://github.com/MCTEEKUNG/mineshare/releases). For end users that's the recommended path — no toolchain required.
 
 ### Windows
 
