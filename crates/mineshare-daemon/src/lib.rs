@@ -21,3 +21,27 @@ pub mod runtime;
 pub mod settings;
 pub mod status;
 pub mod trust;
+
+use std::sync::OnceLock;
+
+/// Process-exit hook registry. The daemon runtime registers a closure
+/// (currently: broadcast the mDNS goodbye) that the GUI's tray "Quit"
+/// path fires before `app.exit(0)` — a hard exit that would otherwise
+/// skip all teardown and leave peers waiting out the mDNS cache TTL.
+type ShutdownHook = Box<dyn Fn() + Send + Sync + 'static>;
+static GOODBYE_HOOK: OnceLock<ShutdownHook> = OnceLock::new();
+
+/// Register the graceful-exit hook. Called once by the runtime after it
+/// announces over mDNS. Ignored if already set.
+pub fn register_shutdown_hook(hook: ShutdownHook) {
+    let _ = GOODBYE_HOOK.set(hook);
+}
+
+/// Fire the graceful-exit hook (mDNS goodbye, …). Safe to call from any
+/// thread; a no-op if nothing was registered. Call before a hard
+/// process exit so peers learn we're leaving immediately.
+pub fn run_shutdown_hook() {
+    if let Some(h) = GOODBYE_HOOK.get() {
+        h();
+    }
+}

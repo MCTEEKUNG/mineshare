@@ -128,7 +128,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                // Broadcast the mDNS goodbye before the hard exit so the
+                // peer drops our stale advert immediately and can rebind
+                // on our next launch without waiting out the cache TTL.
+                mineshare_daemon::run_shutdown_hook();
+                app.exit(0);
+            }
             "game_lock" => {
                 let now = mineshare_input::is_input_locked();
                 mineshare_input::set_input_locked(!now);

@@ -473,6 +473,12 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     };
     discovery.announce(&advert)?;
 
+    // Register the mDNS goodbye as the process-exit hook so a graceful
+    // quit (GUI tray "Quit" → app.exit(0), which skips teardown) still
+    // tells peers we're leaving immediately instead of stranding a stale
+    // advert until the cache TTL expires.
+    crate::register_shutdown_hook(Box::new(discovery.goodbye_fn()));
+
     let (tx, mut rx) = mpsc::channel::<DiscoveryEvent>(32);
     discovery.browse(tx)?;
 
@@ -488,33 +494,47 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     debug!("ignoring own advert");
                     continue;
                 }
-                let already_known = {
+                // Always refresh the stored advert so the endpoint is
+                // current. A live reconnect loop re-reads `known_peers`
+                // every iteration, so a peer that restarted with a new
+                // ephemeral port / DHCP IP is picked up automatically once
+                // discovery forwards the changed endpoint (see P0).
+                let was_new = {
                     let mut k = known.lock();
                     let new = !k.contains_key(&peer.device_id);
                     k.insert(peer.device_id, peer.clone());
-                    !new
+                    new
                 };
-                if already_known {
-                    continue;
+                if was_new {
+                    info!(
+                        peer = %peer.device_id,
+                        name = %peer.display_name,
+                        os = %peer.os,
+                        addrs = ?peer.addresses,
+                        port = peer.control_port,
+                        "peer discovered"
+                    );
+                } else {
+                    info!(
+                        peer = %peer.device_id,
+                        addrs = ?peer.addresses,
+                        port = peer.control_port,
+                        "peer re-announced — endpoint refreshed"
+                    );
                 }
-                info!(
-                    peer = %peer.device_id,
-                    name = %peer.display_name,
-                    os = %peer.os,
-                    addrs = ?peer.addresses,
-                    port = peer.control_port,
-                    "peer discovered"
-                );
 
                 if local_id.0 < peer.device_id.0 {
-                    // in_flight guard: if a reconnect loop for this peer is
-                    // already running (e.g. from a duplicate mDNS event or a
-                    // stale task that survived a daemon restart), skip the spawn
-                    // so we never have two concurrent sessions to the same peer.
+                    // in_flight guard does double duty:
+                    //   * dedupes concurrent spawns (duplicate mDNS events), and
+                    //   * lets a re-announce RE-ARM the dial when the previous
+                    //     loop has exited (peer went offline then came back).
+                    // If a loop is already running it stays — it will read the
+                    // refreshed `known_peers` entry and dial the new endpoint
+                    // on its next iteration, so skipping the spawn is correct.
                     {
                         let mut f = in_flight.lock();
                         if f.contains(&peer.device_id) {
-                            debug!(peer = %peer.device_id, "reconnect loop already in-flight — skipping duplicate spawn");
+                            debug!(peer = %peer.device_id, "reconnect loop already running — it will pick up the refreshed endpoint");
                             continue;
                         }
                         f.insert(peer.device_id);
@@ -667,15 +687,33 @@ async fn dial_and_run(
     input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
-    let addr = peer
-        .addresses
-        .iter()
-        .copied()
-        .next()
-        .context("peer has no addresses")?;
-    let sock = SocketAddr::new(addr, peer.control_port);
-    debug!(%sock, "dialing peer");
-    let mut stream = TcpStream::connect(sock).await?;
+    if peer.addresses.is_empty() {
+        anyhow::bail!("peer has no addresses");
+    }
+    // Try every advertised address with a short per-address timeout.
+    // During a DHCP-IP change mdns-sd can briefly advertise BOTH the old
+    // (dead) and new IP; without bounding the connect, a dead old IP can
+    // hang ~20 s on the OS default before we'd even try the live one and
+    // before the reconnect loop could cycle. 4 s keeps re-arming snappy.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+    let mut stream = {
+        let mut connected = None;
+        let mut last_err: Option<String> = None;
+        for addr in peer.addresses.iter().copied() {
+            let sock = SocketAddr::new(addr, peer.control_port);
+            debug!(%sock, "dialing peer");
+            match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(sock)).await {
+                Ok(Ok(s)) => {
+                    connected = Some(s);
+                    break;
+                }
+                Ok(Err(e)) => last_err = Some(format!("{sock}: {e}")),
+                Err(_) => last_err = Some(format!("{sock}: connect timed out after {CONNECT_TIMEOUT:?}")),
+            }
+        }
+        connected
+            .with_context(|| format!("all addresses failed (last: {})", last_err.as_deref().unwrap_or("none")))?
+    };
     let mut init = Initiator::new(static_priv)?;
     let session = init.handshake(&mut stream).await?;
     info!(
