@@ -105,6 +105,11 @@ const en: Strings = {
   pair_success_title: "✓ Paired",
   pair_success_sub: "is now trusted on this machine.",
   pair_failed_title: "Pairing failed",
+
+  // Version footer
+  ver_peer: "Peer",
+  ver_same_build: "same build",
+  ver_diff_build: "different build",
 };
 
 const th: Strings = {
@@ -178,6 +183,10 @@ const th: Strings = {
   pair_success_title: "✓ จับคู่สำเร็จ",
   pair_success_sub: "ถูกเพิ่มเป็น trusted บนเครื่องนี้แล้ว",
   pair_failed_title: "จับคู่ไม่สำเร็จ",
+
+  ver_peer: "อีกเครื่อง",
+  ver_same_build: "build ตรงกัน",
+  ver_diff_build: "build ไม่ตรงกัน",
 };
 
 const dicts: Record<Locale, Strings> = { en, th };

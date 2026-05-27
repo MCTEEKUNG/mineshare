@@ -27,6 +27,8 @@ type Status = {
   keys_forwarded: number;
   keys_injected: number;
   keyboard_target: "smart" | "auto" | "force_peer" | "force_local";
+  local_version: string;
+  peer_version: string | null;
 };
 
 type Latency = {
@@ -265,6 +267,7 @@ export default function App() {
         </nav>
         <div className="mt-auto px-3 pt-4">
           <LanguageToggle />
+          <VersionFooter status={status} />
         </div>
       </aside>
       <main className="flex-1 px-10 py-8">
@@ -291,6 +294,38 @@ export default function App() {
         {tab === "hotkeys" ? <HotkeysPage /> : null}
         {tab === "advanced" ? <AdvancedPage /> : null}
       </main>
+    </div>
+  );
+}
+
+/**
+ * Always-visible build identity in the sidebar footer. Shows this
+ * machine's precise build id (semver · git-hash · date) and, when a
+ * peer is connected, whether the peer runs the SAME build — so you can
+ * tell at a glance if both machines are in sync (the bare semver used
+ * to hide newer code under an unchanged "0.0.x"). Text is selectable
+ * so the id can be copied into a bug report.
+ */
+function VersionFooter({ status }: { status: Status | null }) {
+  const { t } = useT();
+  const local = status?.local_version ?? "";
+  const peer = status?.peer_version ?? null;
+  const connected = status?.peer_connected ?? false;
+  const same = connected && peer != null && peer === local;
+  return (
+    <div className="mt-3 text-[10px] leading-snug text-neutral-400 dark:text-neutral-500 select-text break-all">
+      <div title={local}>MineShare {local || "…"}</div>
+      {connected && peer ? (
+        same ? (
+          <div className="text-emerald-600 dark:text-emerald-400">
+            ✓ {t("ver_same_build")}
+          </div>
+        ) : (
+          <div className="text-amber-600 dark:text-amber-400" title={peer}>
+            ⚠ {t("ver_diff_build")} ({t("ver_peer")}: {peer})
+          </div>
+        )
+      ) : null}
     </div>
   );
 }

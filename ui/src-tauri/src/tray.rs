@@ -89,6 +89,18 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show MineShare", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit MineShare", true, None::<&str>)?;
 
+    // ---- Build identity (disabled, info-only) ------------------------
+    // Shows this machine's precise build id so you can confirm at a
+    // glance which build is running without opening the window. Static —
+    // the build id never changes at runtime, so it's set once here.
+    let version = MenuItem::with_id(
+        app,
+        "version",
+        mineshare_daemon::build_id(),
+        false,
+        None::<&str>,
+    )?;
+
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
@@ -103,6 +115,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &sep2,
             &show,
             &sep3,
+            &version,
             &quit,
         ],
     )?;
@@ -123,7 +136,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("mineshare-tray")
         .icon(icon)
-        .tooltip("MineShare")
+        .tooltip(format!("MineShare {}", mineshare_daemon::build_id_short()))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -183,12 +196,22 @@ fn refresh(live: &LiveMenu) {
     let s = snapshot();
     let header = if !s.peer_connected {
         "no peer".to_string()
-    } else if let Some(name) = s.peer_name.as_deref() {
-        format!("paired with {name}")
-    } else if let Some(addr) = s.peer_addr.as_deref() {
-        format!("paired with {addr}")
     } else {
-        "paired".to_string()
+        let base = if let Some(name) = s.peer_name.as_deref() {
+            format!("paired with {name}")
+        } else if let Some(addr) = s.peer_addr.as_deref() {
+            format!("paired with {addr}")
+        } else {
+            "paired".to_string()
+        };
+        // Surface whether the peer runs the same build, so a forgotten
+        // half-upgraded pair is obvious from the tray alone.
+        let suffix = match &s.peer_version {
+            Some(pv) if *pv == s.local_version => "  ·  ✓ same build",
+            Some(_) => "  ·  ⚠ build mismatch",
+            None => "",
+        };
+        format!("{base}{suffix}")
     };
     let _ = live.status.set_text(header);
 

@@ -26,6 +26,9 @@ static DECRYPT_ERRS: AtomicU64 = AtomicU64::new(0);
 
 static PEER_ADDR: Mutex<Option<String>> = Mutex::new(None);
 static PEER_NAME: Mutex<Option<String>> = Mutex::new(None);
+/// The peer's `build_id()` string, learned from the PortAnnounce handshake.
+/// `None` until a session is established; cleared on disconnect.
+static PEER_VERSION: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct StatusSnapshot {
@@ -70,6 +73,13 @@ pub struct StatusSnapshot {
     /// pill can warn the user when they've left the keyboard
     /// pinned somewhere they didn't expect.
     pub keyboard_target: mineshare_input::KeyboardTarget,
+    /// This machine's precise build identity (`build_id()`):
+    /// `"<semver> · <hash>[-dirty] · <date>"`. Always present.
+    pub local_version: String,
+    /// The connected peer's build identity, or `None` when no peer is
+    /// connected. The GUI compares it against `local_version` to show a
+    /// "same build" / "different build" indicator.
+    pub peer_version: Option<String>,
 }
 
 pub fn snapshot() -> StatusSnapshot {
@@ -90,6 +100,8 @@ pub fn snapshot() -> StatusSnapshot {
         keys_forwarded: mineshare_input::keys_forwarded(),
         keys_injected: mineshare_input::keys_injected(),
         keyboard_target: mineshare_input::keyboard_target(),
+        local_version: crate::build_id(),
+        peer_version: PEER_VERSION.lock().clone(),
     }
 }
 
@@ -105,6 +117,12 @@ pub(crate) fn clear_peer_connected() {
     PEER_CONNECTED.store(false, Ordering::Relaxed);
     *PEER_ADDR.lock() = None;
     *PEER_NAME.lock() = None;
+    *PEER_VERSION.lock() = None;
+}
+
+/// Record the peer's `build_id()` learned from the PortAnnounce handshake.
+pub(crate) fn set_peer_version(v: Option<String>) {
+    *PEER_VERSION.lock() = v;
 }
 
 pub(crate) fn add_sent_pkts(n: u64) {

@@ -24,6 +24,32 @@ pub mod trust;
 
 use std::sync::OnceLock;
 
+/// Precise build identity: `"<semver> · <hash>[-dirty] · <date>"`,
+/// e.g. `0.0.6 · 1a2b3c4 · 2026-05-27`. The hash/date come from `build.rs`
+/// (git); the `-dirty` suffix marks a build made with uncommitted tracked
+/// changes. Two machines built from the same commit produce the *same*
+/// string — which is what lets the GUI/tray show "same build" vs the bare
+/// semver that previously hid newer code under an unchanged version number.
+pub fn build_id() -> String {
+    format!(
+        "{} · {}{} · {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("MINESHARE_GIT_HASH"),
+        env!("MINESHARE_GIT_DIRTY"),
+        env!("MINESHARE_BUILD_DATE"),
+    )
+}
+
+/// Compact identity for tray tooltips: `"<semver> · <hash>[-dirty]"`.
+pub fn build_id_short() -> String {
+    format!(
+        "{} · {}{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("MINESHARE_GIT_HASH"),
+        env!("MINESHARE_GIT_DIRTY"),
+    )
+}
+
 /// Process-exit hook registry. The daemon runtime registers a closure
 /// (currently: broadcast the mDNS goodbye) that the GUI's tray "Quit"
 /// path fires before `app.exit(0)` — a hard exit that would otherwise

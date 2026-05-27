@@ -841,7 +841,7 @@ async fn run_peer_session(
     let (local_w, local_h) = mineshare_input::local_screen_geometry();
     let announce = PortAnnounce {
         udp_port: local_udp_port,
-        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        daemon_version: crate::build_id(),
         screen_w: local_w,
         screen_h: local_h,
     };
@@ -849,6 +849,7 @@ async fn run_peer_session(
     let peer_announce: PortAnnounce = read_encrypted(&mut stream, &aead).await?;
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
     mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
+    crate::status::set_peer_version(Some(peer_announce.daemon_version.clone()));
     info!(
         %peer_addr,
         local_udp = local_udp_port,
