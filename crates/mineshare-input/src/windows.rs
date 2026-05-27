@@ -143,18 +143,25 @@ static USING_RAW_INPUT: AtomicBool = AtomicBool::new(false);
 static LAST_RAW_INPUT_MS: AtomicU64 = AtomicU64::new(0);
 const RAW_INPUT_STALE_MS: u64 = 300;
 
-// --- Motion coalescing (port of linux.rs 8ms window) ---------------------
+// --- Motion coalescing -----------------------------------------------------
 //
-// Raw input on Windows can fire at the mouse's polling rate (often 1000 Hz
-// on gaming mice).  Sending one UDP packet per event saturates the peer's
-// receive-and-inject loop — each `Enigo::move_mouse` call holds a mutex
-// and serialises through a single tokio task, so 1000 events/sec arrives
-// as a stuttery batch on the peer's cursor.
+// Raw input on Windows can fire at the mouse's polling rate (often 1000 Hz on
+// gaming mice). Forwarding one UDP packet per event saturates the peer's
+// receive-and-inject loop — each `Enigo::move_mouse` holds a mutex and
+// serialises through a single tokio task — so we coalesce: accumulate dx/dy
+// into `PENDING_*` and dispatch one combined delta per flush window.
 //
-// Fix: accumulate dx/dy into `PENDING_*` and dispatch one combined event
-// every 8 ms (~125 Hz, indistinguishable from a 125 Hz polling mouse).
-// Mirrors `linux.rs::flush_pending` so both sides behave identically.
-const FLUSH_INTERVAL_MS: u64 = 8;
+// The window is a fidelity-vs-load tradeoff. The original 8 ms (~125 Hz) was
+// fine for desktop cursor work but downsampled a 1000 Hz gaming mouse into
+// choppy lumps that feel "wrong" / uncontrollable inside GAMES on the
+// receiver — the game reads motion (via Raw Input) as a stream of coarse
+// 125 Hz jumps instead of smooth high-rate deltas. 2 ms (~500 Hz) preserves
+// enough motion resolution to feel like a real mouse in-game while still
+// halving event volume vs a raw 1000 Hz stream, and stays well within the
+// inject loop's per-event budget (one SendInput ≈ tens of µs ≪ 2 ms spacing).
+// Forwarding only happens while CURSOR_MODE == REMOTE, so this rate applies
+// only when actively driving the peer — never during idle local desktop use.
+const FLUSH_INTERVAL_MS: u64 = 2;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
@@ -1077,6 +1084,42 @@ enum HeldKey {
     Key(u16),
 }
 
+// --- Inject-cadence instrumentation ---------------------------------------
+// Confirms the receive→inject path actually keeps up with the sender's
+// forward rate (see FLUSH_INTERVAL_MS). Once per window of injected motion
+// events it logs the effective rate and the worst inter-inject gap. A healthy
+// 500 Hz stream reads approx_hz≈500 with max_gap_ms≈2–4; a stalled inject
+// loop shows low Hz or large gaps, which would mean the bottleneck is
+// injection (mutex/tokio serialisation) rather than coalescing — the signal
+// that a user-mode fidelity bump has hit its ceiling.
+static INJECT_COUNT: AtomicU64 = AtomicU64::new(0);
+static INJECT_WINDOW_START_MS: AtomicU64 = AtomicU64::new(0);
+static INJECT_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static INJECT_MAX_GAP_MS: AtomicU64 = AtomicU64::new(0);
+
+fn record_inject_cadence() {
+    let now = super::now_ms();
+    let last = INJECT_LAST_MS.swap(now, Ordering::Relaxed);
+    if last != 0 {
+        INJECT_MAX_GAP_MS.fetch_max(now.saturating_sub(last), Ordering::Relaxed);
+    }
+    let c = INJECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if c % 500 == 0 {
+        let ws = INJECT_WINDOW_START_MS.swap(now, Ordering::Relaxed);
+        let max_gap = INJECT_MAX_GAP_MS.swap(0, Ordering::Relaxed);
+        if ws != 0 {
+            let elapsed = now.saturating_sub(ws).max(1);
+            let approx_hz = 500_000 / elapsed;
+            info!(
+                approx_hz,
+                max_gap_ms = max_gap,
+                elapsed_ms = elapsed,
+                "inject motion cadence (per 500 events)"
+            );
+        }
+    }
+}
+
 pub struct EnigoInject {
     inner: Mutex<Enigo>,
     /// Codes the peer has injected `down` without a matching `up`.
@@ -1103,6 +1146,7 @@ impl InputInject for EnigoInject {
             .lock()
             .move_mouse(dx, dy, Coordinate::Rel)
             .context("enigo move_mouse")?;
+        record_inject_cadence();
         Ok(())
     }
 
