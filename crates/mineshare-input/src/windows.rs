@@ -211,11 +211,26 @@ fn start_motion_flush_watchdog() {
     }
 }
 
-/// Fallback per-event delta cap used ONLY when `USING_RAW_INPUT = false`.
-/// The WH_MOUSE_LL path delivers post-acceleration screen-space coords;
-/// the cap prevents a coalesced burst from teleporting the peer cursor.
-/// Irrelevant (not reached) when raw input is active.
-const MAX_DELTA_PX: i32 = 30;
+/// Per-event delta cap used in the WH_MOUSE_LL fallback path. The fallback
+/// fires whenever raw input goes stale for >`RAW_INPUT_STALE_MS`, which on
+/// real hardware happens at **motion onset** after each pause — the user
+/// stops aiming for a moment, then flicks. The first event(s) of that
+/// flick come through the hook before raw input resumes.
+///
+/// The cap was originally 30 px to prevent a single coalesced burst from
+/// teleporting the peer cursor. That value is fine for desktop cursor work
+/// but **brutally clips game flicks**: an observed hook event of -964 px
+/// (a fast aim swing) got clamped to -30 px, throwing away 97% of the
+/// movement. The user experiences this as a micro-stutter / dead zone at
+/// the start of every aim swing — *not* a "low rate" problem (raw input is
+/// firing fine during continuous motion), just the first event of each
+/// burst getting truncated.
+///
+/// 1500 px allows realistic fast flicks (~94000 px/s at 60 Hz hook cadence)
+/// while still preventing pathologically large teleports from genuine
+/// driver glitches. A real mouse can't physically produce a single 60-Hz
+/// delta beyond a few thousand pixels.
+const MAX_DELTA_PX: i32 = 1500;
 
 fn sink_send(ev: InputEvent) {
     if let Some(s) = EVENT_SINK.get()
