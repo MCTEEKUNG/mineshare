@@ -565,15 +565,26 @@ fn clear_held_buttons() {
 ///      the physical local mouse keeps emitting HW motion while it
 ///      drives the peer cursor, so a raw motion race would wrongly
 ///      say local.
-///   2. Neither side ever active this session → keep the sticky
-///      decision (defaults to local).
+///   2. Both sides stale (idle past `ACTIVITY_FRESH_MS`, or never
+///      active) → keep the sticky decision (defaults to local).
 ///   3. Otherwise the more-recently-active side wins.
 ///
 /// "Active" = a deliberate drag (see `bump_local_mouse_activity`) or
 /// any click. A brief nudge does NOT count, so it can't steal the
 /// keyboard from a peer you are actively using — that debounce, not
 /// a timing margin, is what keeps the routing stable.
+///
+/// Step 2 must check *staleness*, not just "never active": the peer's
+/// age is capped at 60 s on the wire while the local age is uncapped,
+/// so without it a minute of mutual idle would let the capped peer age
+/// "win" the race and silently flip the keyboard across.
 pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
+    /// Once both sides have been idle longer than this, stop racing
+    /// ages and hold the last decision. Comfortably below the 60 s
+    /// wire cap so a capped peer age always reads as stale, and above
+    /// any normal pause between mouse moves while actively working.
+    const ACTIVITY_FRESH_MS: u64 = 10_000;
+
     match keyboard_target() {
         KeyboardTarget::Smart => {
             let to_peer = if cursor_in_remote {
@@ -581,8 +592,8 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
             } else {
                 let la = local_activity_age();
                 let pa = peer_activity_age();
-                if la == u64::MAX && pa == u64::MAX {
-                    // Nobody has been active yet — hold the last call.
+                if la >= ACTIVITY_FRESH_MS && pa >= ACTIVITY_FRESH_MS {
+                    // Both idle (or never active) — hold the last call.
                     LAST_SMART_TO_PEER.load(Ordering::Relaxed)
                 } else {
                     // Smaller age = more recent. A tie falls to local.
@@ -1013,6 +1024,29 @@ mod tests {
         assert!(!should_forward_keys(false));
         // Sticky honours a prior peer decision.
         LAST_SMART_TO_PEER.store(true, Relaxed);
+        assert!(should_forward_keys(false));
+    }
+
+    #[test]
+    fn both_stale_keeps_sticky_not_capped_peer() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        // Last decision was local. The peer's reported age is capped
+        // at 60 s on the wire, so PEER_ACTIVITY_AT tops out ~60 s old
+        // while the uncapped local age keeps climbing. Without a
+        // "both stale → sticky" guard the race wrongly picks peer
+        // (60_000 < 70_000) after a minute of mutual idle.
+        LAST_SMART_TO_PEER.store(false, Relaxed);
+        LOCAL_MOUSE_AT.store(now - 70_000, Relaxed);
+        PEER_ACTIVITY_AT.store(now - 60_000, Relaxed);
+        assert!(!should_forward_keys(false));
+
+        // And it honours a prior peer decision the same way.
+        reset();
+        LAST_SMART_TO_PEER.store(true, Relaxed);
+        LOCAL_MOUSE_AT.store(now - 70_000, Relaxed);
+        PEER_ACTIVITY_AT.store(now - 60_000, Relaxed);
         assert!(should_forward_keys(false));
     }
 

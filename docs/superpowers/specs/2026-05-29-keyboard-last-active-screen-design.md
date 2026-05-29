@@ -46,11 +46,19 @@ click. Evaluated top to bottom:
    drives the peer cursor, so "most recent local motion" would wrongly say
    local. Crossing is an unambiguous "the pointer is on the peer now" signal.
 
-2. else if BOTH la and pa are "never" (== u64::MAX):
+2. else if BOTH la and pa are stale (≥ ACTIVITY_FRESH_MS ≈ 10 s, which
+   includes the "never active" u64::MAX case):
         keep the sticky decision (LAST_SMART_TO_PEER; default = local).
 
 3. else: more recent wins → to_peer = (pa < la).
 ```
+
+Step 2 tests *staleness*, not just "never active": the peer's age is
+**capped at 60 s** on the wire (`local_input_age_ms`) while `la` is uncapped,
+so without it a minute of mutual idle would let the capped peer age win the
+race and silently flip the keyboard across. `ACTIVITY_FRESH_MS` sits well below
+the 60 s cap (so a capped peer age always reads stale) and above any normal
+pause between mouse moves during active work.
 
 Every path that reaches a concrete decision writes it back to
 `LAST_SMART_TO_PEER` so step 2 has a value to fall back to.
