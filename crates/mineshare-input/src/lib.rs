@@ -412,6 +412,9 @@ static LAST_SMART_TO_PEER: AtomicBool = AtomicBool::new(false);
 /// peer.
 pub fn reset_smart_decision() {
     LAST_SMART_TO_PEER.store(false, Ordering::Relaxed);
+    // Drop stale peer-activity timing so a new session doesn't race
+    // against the previous peer's last-seen activity.
+    PEER_ACTIVITY_AT.store(0, Ordering::Relaxed);
     clear_held_forwarded();
     clear_held_buttons();
 }
@@ -556,44 +559,34 @@ fn clear_held_buttons() {
 /// Should this side forward an incoming keystroke to the peer?
 /// `cursor_in_remote` is the capture-side mouse-mode flag.
 ///
-/// Smart-mode decision tree (priority order):
-///   1. Cursor crossed to peer       → peer  (legacy Auto behaviour)
-///   2. Recent click on either side  → most-recent-click wins  (focus signal!)
-///   3. Local mouse moved < 1.5 s    → local (immediate claim-back)
-///   4. Peer mouse moved < 2.5 s     → peer  (peer is being used)
-///   5. Both mice idle               → keep the last decision (sticky)
+/// Smart rule — "the keyboard follows the screen whose mouse was
+/// active most recently":
+///   1. Cursor crossed onto the peer screen → peer. Hard override:
+///      the physical local mouse keeps emitting HW motion while it
+///      drives the peer cursor, so a raw motion race would wrongly
+///      say local.
+///   2. Neither side ever active this session → keep the sticky
+///      decision (defaults to local).
+///   3. Otherwise the more-recently-active side wins.
 ///
-/// Step 2 is the focus-based upgrade: a click is a stronger
-/// "user attention" signal than motion, because it focuses a
-/// window. As long as either side clicked within the last 30 s,
-/// we follow whichever click is more recent and ignore motion.
-///
-/// Step 5 is the sticky fix for the "user types for 30 s without
-/// touching mouse → Smart times out and routes back" gotcha.
+/// "Active" = a deliberate drag (see `bump_local_mouse_activity`) or
+/// any click. A brief nudge does NOT count, so it can't steal the
+/// keyboard from a peer you are actively using — that debounce, not
+/// a timing margin, is what keeps the routing stable.
 pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
-    /// Window where a click is treated as a fresh focus signal.
-    /// Long enough to cover sustained typing into the just-
-    /// clicked field; short enough that an old click from
-    /// minutes ago doesn't keep hijacking the keyboard.
-    const CLICK_FRESH_MS: u64 = 30_000;
-
     match keyboard_target() {
         KeyboardTarget::Smart => {
             let to_peer = if cursor_in_remote {
                 true
             } else {
-                let lc = local_click_age();
-                let pc = peer_click_age();
-                if lc < CLICK_FRESH_MS || pc < CLICK_FRESH_MS {
-                    // Either side has a fresh click — most-recent
-                    // wins. (Lower age = more recent.)
-                    pc < lc
-                } else if local_mouse_active_within(1500) {
-                    false
-                } else if peer_mouse_active_within(2500) {
-                    true
-                } else {
+                let la = local_activity_age();
+                let pa = peer_activity_age();
+                if la == u64::MAX && pa == u64::MAX {
+                    // Nobody has been active yet — hold the last call.
                     LAST_SMART_TO_PEER.load(Ordering::Relaxed)
+                } else {
+                    // Smaller age = more recent. A tie falls to local.
+                    pa < la
                 }
             };
             LAST_SMART_TO_PEER.store(to_peer, Ordering::Relaxed);
@@ -617,8 +610,26 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
 // `peer_mouse_active_within`.
 // ---------------------------------------------------------------------------
 
+/// Wall-clock ms of the most recent *deliberate* local mouse drag
+/// (see the debounce in `bump_local_mouse_activity`). 0 = never.
 static LOCAL_MOUSE_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static PEER_MOUSE_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// Debounce state for distinguishing a deliberate drag from an
+// accidental nudge. A "run" of motion must last past `DEBOUNCE_MS`
+// before it counts as routing activity — otherwise a single twitch
+// of the resting hand would yank the keyboard back from a peer the
+// user is actively driving.
+static MOTION_RUN_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_MOTION_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A motion run must be sustained at least this long to count as a
+/// deliberate drag. Shorter bursts (flicks / resting-hand nudges)
+/// are ignored for keyboard routing.
+const DEBOUNCE_MS: u64 = 120;
+/// A gap longer than this ends the current run; the next motion
+/// begins a fresh one, so two separate nudges don't accumulate into
+/// a false "drag".
+const IDLE_RESET_MS: u64 = 250;
 
 pub(crate) fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -628,84 +639,87 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Called from the OS-specific capture path on each genuine
-/// hardware mouse motion. Cheap (one atomic store + one
-/// SystemTime call). Does NOT fire on injected events because
-/// our hooks only see real HW input (Win: `SetCursorPos` doesn't
-/// trigger WH_MOUSE_LL; Linux: our virtual uinput device is
-/// excluded from the evdev grab).
+/// Called from the OS-specific capture path on each genuine hardware
+/// mouse motion. Does NOT fire on injected events because our hooks
+/// only see real HW input (Win: `SetCursorPos` doesn't trigger
+/// WH_MOUSE_LL; Linux: our virtual uinput device is excluded from the
+/// evdev grab).
+///
+/// Only a *sustained* run (≥ `DEBOUNCE_MS`) advances the routing
+/// activity clock `LOCAL_MOUSE_AT`; a brief nudge is dropped. Cheap:
+/// a couple of atomic ops + one SystemTime read.
 pub(crate) fn bump_local_mouse_activity() {
-    LOCAL_MOUSE_AT.store(now_ms(), Ordering::Relaxed);
-}
-
-/// Called by the daemon when an ActivityBeacon arrives from the
-/// peer reporting their mouse was just active. We stamp our own
-/// clock (not the peer's) so age comparisons stay sane without
-/// any clock-sync.
-pub fn note_peer_mouse_active() {
-    PEER_MOUSE_AT.store(now_ms(), Ordering::Relaxed);
-}
-
-pub fn local_mouse_active_within(ms: u64) -> bool {
-    let a = LOCAL_MOUSE_AT.load(Ordering::Relaxed);
-    a > 0 && now_ms().saturating_sub(a) < ms
-}
-
-pub fn peer_mouse_active_within(ms: u64) -> bool {
-    let a = PEER_MOUSE_AT.load(Ordering::Relaxed);
-    a > 0 && now_ms().saturating_sub(a) < ms
+    let now = now_ms();
+    let last = LAST_MOTION_AT.swap(now, Ordering::Relaxed);
+    if last == 0 || now.saturating_sub(last) > IDLE_RESET_MS {
+        // First motion, or a fresh run after an idle gap.
+        MOTION_RUN_START.store(now, Ordering::Relaxed);
+    }
+    let run_start = MOTION_RUN_START.load(Ordering::Relaxed);
+    if now.saturating_sub(run_start) >= DEBOUNCE_MS {
+        LOCAL_MOUSE_AT.store(now, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Click-based focus signal — stronger than motion for Smart routing.
+// Activity recency — the single signal Smart routing races on.
 //
-// When the user clicks on a window, that window takes keyboard
-// focus. A click is therefore the strongest available "where is
-// the user's attention" signal short of querying the OS for the
-// focused window class (which is hard cross-platform).
-//
-// Each side stamps `LOCAL_CLICK_AT` on every local mouse-button
-// down. The activity beacon carries the age of that click
-// (capped at 60 s) so the receiver can fold it into its own
-// "peer click recency" tracker. Smart's decision tree consults
-// both before falling back to motion.
+// A click always counts (it focuses a window — the strongest
+// "user attention" signal); a mouse drag counts once it's
+// deliberate (debounced above). Each side tracks its own local
+// stamps; the periodic ActivityBeacon carries the *age* of the
+// peer's most recent activity so the receiver can back-date a
+// single `PEER_ACTIVITY_AT` and compare apples to apples on its
+// own clock, with no clock-sync.
 // ---------------------------------------------------------------------------
 
+/// Wall-clock ms of the most recent local mouse-button down. 0 = never.
 static LOCAL_CLICK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static PEER_CLICK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Most recent peer activity, expressed on OUR clock (back-dated from
+/// the age the beacon reports). 0 = never this session.
+static PEER_ACTIVITY_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn bump_local_click() {
     LOCAL_CLICK_AT.store(now_ms(), Ordering::Relaxed);
 }
 
-/// Called by the daemon when a beacon arrives carrying a fresh
-/// click age (`Some(age_ms)`). We back-date PEER_CLICK_AT by the
-/// reported age so comparisons stay accurate across network jitter.
-pub fn note_peer_click(age_ms: u32) {
+/// Called by the daemon when an ActivityBeacon arrives carrying the
+/// age (ms) of the peer's most recent activity (deliberate drag OR
+/// click). We back-date our own clock by that age so the recency
+/// race stays accurate to network latency, no clock-sync needed.
+pub fn note_peer_activity(age_ms: u32) {
     let stamp = now_ms().saturating_sub(age_ms as u64);
-    PEER_CLICK_AT.store(stamp, Ordering::Relaxed);
+    PEER_ACTIVITY_AT.store(stamp, Ordering::Relaxed);
 }
 
-/// ms since the local user clicked, capped at 60 000. Used by
-/// the daemon's beacon sender. None if no click recorded this
-/// session.
-pub fn local_click_age_ms() -> Option<u32> {
-    let at = LOCAL_CLICK_AT.load(Ordering::Relaxed);
+/// Raw ms of the most recent local activity (drag or click), 0 if none.
+fn local_activity_at() -> u64 {
+    LOCAL_MOUSE_AT
+        .load(Ordering::Relaxed)
+        .max(LOCAL_CLICK_AT.load(Ordering::Relaxed))
+}
+
+/// Age (ms) of the most recent local activity; `u64::MAX` = never.
+fn local_activity_age() -> u64 {
+    let at = local_activity_at();
+    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
+}
+
+/// Age (ms) of the most recent peer activity; `u64::MAX` = never.
+fn peer_activity_age() -> u64 {
+    let at = PEER_ACTIVITY_AT.load(Ordering::Relaxed);
+    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
+}
+
+/// ms since the local user's most recent activity (drag or click),
+/// capped at 60 000. `None` if neither has happened this session.
+/// Feeds the daemon's ActivityBeacon sender.
+pub fn local_input_age_ms() -> Option<u32> {
+    let at = local_activity_at();
     if at == 0 {
         return None;
     }
-    let age = now_ms().saturating_sub(at).min(60_000) as u32;
-    Some(age)
-}
-
-fn local_click_age() -> u64 {
-    let at = LOCAL_CLICK_AT.load(Ordering::Relaxed);
-    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
-}
-
-fn peer_click_age() -> u64 {
-    let at = PEER_CLICK_AT.load(Ordering::Relaxed);
-    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
+    Some(now_ms().saturating_sub(at).min(60_000) as u32)
 }
 
 /// Apply the mouse sensitivity multiplier with sub-pixel residue
@@ -924,5 +938,145 @@ pub fn make_inject() -> anyhow::Result<Box<dyn InputInject>> {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         anyhow::bail!("input injection is not implemented on this platform")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    /// All routing state lives in process-global statics, so the tests
+    /// must run one at a time. Each test takes this lock and resets the
+    /// world first.
+    static TEST_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
+
+    fn reset() {
+        LOCAL_MOUSE_AT.store(0, Relaxed);
+        LOCAL_CLICK_AT.store(0, Relaxed);
+        PEER_ACTIVITY_AT.store(0, Relaxed);
+        MOTION_RUN_START.store(0, Relaxed);
+        LAST_MOTION_AT.store(0, Relaxed);
+        LAST_SMART_TO_PEER.store(false, Relaxed);
+        set_keyboard_target(KeyboardTarget::Smart);
+        clear_held_forwarded();
+        clear_held_buttons();
+    }
+
+    #[test]
+    fn local_activity_newer_routes_local() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        PEER_ACTIVITY_AT.store(now - 1000, Relaxed);
+        LOCAL_MOUSE_AT.store(now - 50, Relaxed);
+        assert!(!should_forward_keys(false));
+    }
+
+    #[test]
+    fn peer_activity_newer_routes_peer() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        LOCAL_MOUSE_AT.store(now - 1000, Relaxed);
+        PEER_ACTIVITY_AT.store(now - 50, Relaxed);
+        assert!(should_forward_keys(false));
+    }
+
+    #[test]
+    fn click_counts_as_activity() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        PEER_ACTIVITY_AT.store(now - 1000, Relaxed);
+        // Local click is more recent than peer → keyboard stays local.
+        LOCAL_CLICK_AT.store(now - 20, Relaxed);
+        assert!(!should_forward_keys(false));
+    }
+
+    #[test]
+    fn cursor_in_remote_overrides_to_peer() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        // Local mouse just moved, but the cursor has crossed onto the
+        // peer screen — that wins.
+        LOCAL_MOUSE_AT.store(now - 5, Relaxed);
+        assert!(should_forward_keys(true));
+    }
+
+    #[test]
+    fn both_idle_keeps_sticky_default_local() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        // Never active this session, sticky defaults to local.
+        assert!(!should_forward_keys(false));
+        // Sticky honours a prior peer decision.
+        LAST_SMART_TO_PEER.store(true, Relaxed);
+        assert!(should_forward_keys(false));
+    }
+
+    #[test]
+    fn manual_targets_ignore_activity() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        LOCAL_MOUSE_AT.store(now - 5, Relaxed); // local most recent
+
+        set_keyboard_target(KeyboardTarget::ForcePeer);
+        assert!(should_forward_keys(false));
+
+        set_keyboard_target(KeyboardTarget::ForceLocal);
+        assert!(!should_forward_keys(true));
+
+        set_keyboard_target(KeyboardTarget::Auto);
+        assert!(should_forward_keys(true));
+        assert!(!should_forward_keys(false));
+    }
+
+    #[test]
+    fn held_key_release_follows_the_press() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        // Cursor on peer → the down is forwarded and remembered.
+        LOCAL_MOUSE_AT.store(now - 5, Relaxed);
+        assert!(route_keystroke(30, true, true)); // KEY 'a' down → peer
+        // Decision flips back to local (cursor home), but the up of the
+        // already-forwarded key must still go to the peer.
+        assert!(route_keystroke(30, false, false));
+        // A fresh key now follows the current (local) decision.
+        assert!(!route_keystroke(31, true, false));
+    }
+
+    #[test]
+    fn nudge_does_not_claim_keyboard() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        // A motion run that just started (< DEBOUNCE_MS) is a nudge.
+        MOTION_RUN_START.store(now, Relaxed);
+        LAST_MOTION_AT.store(now, Relaxed);
+        bump_local_mouse_activity();
+        assert_eq!(
+            LOCAL_MOUSE_AT.load(Relaxed),
+            0,
+            "a brief nudge must not advance the routing activity clock"
+        );
+    }
+
+    #[test]
+    fn sustained_drag_claims_keyboard() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        // A run that has lasted well past DEBOUNCE_MS, still ongoing.
+        MOTION_RUN_START.store(now - 200, Relaxed);
+        LAST_MOTION_AT.store(now - 10, Relaxed);
+        bump_local_mouse_activity();
+        assert!(
+            LOCAL_MOUSE_AT.load(Relaxed) > 0,
+            "a sustained drag must advance the routing activity clock"
+        );
     }
 }
