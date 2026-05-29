@@ -184,9 +184,12 @@ export default function App() {
   // Watch transfers for completed / failed ones the user hasn't
   // seen yet → pop a toast for each. Tracking via a ref of "last
   // seen ids" so completed transfers only toast once even though
-  // we poll forever.
+  // we poll forever. Paused when the window is hidden to tray (same
+  // rationale as the get_status/get_latency polls above) so we don't
+  // churn IPC + React renders every 700 ms for an invisible UI.
   const seenTerminalIds = useRef<Set<number>>(new Set());
   useEffect(() => {
+    let id: ReturnType<typeof setInterval> | undefined;
     const tick = async () => {
       try {
         const list = await invoke<Transfer[]>("get_transfers");
@@ -221,9 +224,27 @@ export default function App() {
         /* daemon not ready yet */
       }
     };
-    tick();
-    const id = setInterval(tick, 700);
-    return () => clearInterval(id);
+    const start = () => {
+      if (id !== undefined) return;
+      tick();
+      id = setInterval(tick, 700);
+    };
+    const stop = () => {
+      if (id !== undefined) {
+        clearInterval(id);
+        id = undefined;
+      }
+    };
+    const onVis = () => {
+      if (document.hidden) stop();
+      else start();
+    };
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      stop();
+    };
   }, []);
 
   function dismissToast(id: number) {
