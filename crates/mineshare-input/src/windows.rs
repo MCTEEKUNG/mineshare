@@ -204,6 +204,22 @@ fn start_motion_flush_watchdog() {
             if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
                 flush_pending_motion();
             }
+            // Safety net: if VIRT_X has drifted negative while the mouse
+            // has been idle (no motion in the last second), snap it back
+            // to 0.  Leftward sensor jitter is unbounded on the negative
+            // side while rightward jitter is bounded by `PEER_W`, so
+            // without this tiny vibrations (desk fan, chair wobble) can
+            // silently accumulate to -EXIT_BUFFER_PX and pop the cursor
+            // back to the local screen.  We only reset below zero, so a
+            // deliberate exit gesture (actively dragging backward past
+            // the threshold) still works correctly.
+            const REMOTE_IDLE_SNAP_MS: u64 = 1_000;
+            if VIRT_X.load(Ordering::Relaxed) < 0
+                && last != 0
+                && now.saturating_sub(last) >= REMOTE_IDLE_SNAP_MS
+            {
+                VIRT_X.store(0, Ordering::Relaxed);
+            }
         })
     {
         warn!(error = %e, "failed to spawn motion flush watchdog");
@@ -776,6 +792,19 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
     }
     let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     if info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 {
+        // When the peer is driving us (peer_in_remote=true), track where
+        // its injected moves have put our cursor.  Without this update,
+        // LAST_X/LAST_Y stay frozen at the boundary-entry point set by
+        // `on_peer_take_control`, so the first real local HW event
+        // (e.g. a laptop touchpad brush while the peer is driving)
+        // computes delta vs the stale boundary rather than vs the actual
+        // current cursor position — a tiny touchpad nudge appears as
+        // hundreds of pixels and fires a spurious `RequestPeerExit` that
+        // bounces the peer's cursor back to its own screen.
+        if wparam.0 as u32 == WM_MOUSEMOVE && super::peer_in_remote() {
+            LAST_X.store(info.pt.x, Ordering::Relaxed);
+            LAST_Y.store(info.pt.y, Ordering::Relaxed);
+        }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
