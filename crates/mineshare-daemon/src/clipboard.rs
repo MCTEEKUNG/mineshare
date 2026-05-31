@@ -40,10 +40,38 @@ const MAX_BYTES: usize = 64 * 1024;
 static LAST_TEXT: Mutex<String> = Mutex::new(String::new());
 static WATCHER_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Channel to the single clipboard-owning thread. `apply_from_peer`
+/// pushes inbound peer text here instead of touching `arboard`
+/// itself.
+///
+/// **Why single-threaded.** `arboard` on Windows drives the OLE
+/// clipboard (`OleInitialize` / `OleSetClipboard` / `OleGetClipboard`).
+/// The old design polled `get_text` on the watcher thread while
+/// `apply_from_peer` — running on an arbitrary tokio worker — built a
+/// *fresh* `arboard::Clipboard` (another `OleInitialize`/`OleUninitialize`
+/// pair) and called `set_text` concurrently. On a fresh peer session
+/// both sides immediately exchange clipboard, so those two threads hit
+/// the OLE clipboard at the same instant — and, inside the Tauri GUI
+/// process, alongside WebView2's own clipboard use. That concurrent /
+/// re-entrant OLE access corrupted the process heap
+/// (`STATUS_HEAP_CORRUPTION` / 0xc0000374, faulting in ntdll), crashing
+/// the GUI ~60–90% of the time on a simultaneous launch. Confirmed by
+/// bisection: disabling clipboard sync took the crash rate to 0/12.
+/// Funnelling every clipboard touch onto one thread removes the race.
+static APPLY_TX: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
+
 /// Spawn the clipboard watcher thread (idempotent). Only the first
 /// call actually starts the OS-side thread; subsequent calls are
 /// no-ops, so it's safe to invoke this from every peer session.
 pub fn ensure_watcher(tx: UnboundedSender<String>) {
+    // DIAGNOSTIC GATE (crash hunt): MINESHARE_NO_CLIPBOARD=1 disables
+    // all clipboard sync, to test whether Win32 clipboard / OLE access
+    // from the watcher thread + apply_from_peer racing with WebView2
+    // is the STATUS_HEAP_CORRUPTION trigger.
+    if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
+        warn!("clipboard sync disabled via MINESHARE_NO_CLIPBOARD");
+        return;
+    }
     if WATCHER_RUNNING.swap(true, Ordering::AcqRel) {
         // Already running. Replace the active sender so the new
         // peer session receives change notifications instead of the
@@ -52,6 +80,12 @@ pub fn ensure_watcher(tx: UnboundedSender<String>) {
         return;
     }
     *REPLACE_TX_GUARD.lock() = Some(tx);
+
+    // Channel for inbound peer clipboard payloads. The watcher thread
+    // is the *only* thread that ever touches `arboard`; everything
+    // else (apply_from_peer) hands work to it through here.
+    let (apply_tx, apply_rx) = std::sync::mpsc::channel::<String>();
+    *APPLY_TX.lock() = Some(apply_tx);
 
     thread::Builder::new()
         .name("clipboard-watcher".into())
@@ -66,7 +100,34 @@ pub fn ensure_watcher(tx: UnboundedSender<String>) {
             info!(poll_ms = POLL_MS, "clipboard watcher started");
 
             loop {
-                thread::sleep(Duration::from_millis(POLL_MS));
+                // Block up to POLL_MS for an inbound peer payload. A
+                // payload wakes us immediately to apply it; a timeout
+                // is the cue to poll the local clipboard for changes.
+                // Either way, all `arboard` calls stay on this thread.
+                match apply_rx.recv_timeout(Duration::from_millis(POLL_MS)) {
+                    Ok(text) => {
+                        // Update LAST_TEXT first so our own next poll
+                        // sees this value as already-known and doesn't
+                        // echo it back to the peer.
+                        *LAST_TEXT.lock() = text.clone();
+                        if let Err(e) = clipboard.set_text(text) {
+                            debug!(error = %e, "failed to apply peer clipboard text");
+                        } else {
+                            debug!("applied peer clipboard text (on watcher thread)");
+                        }
+                        // Drain any further queued payloads cheaply on
+                        // the next loop iterations; go poll afterwards.
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Fall through to the change-detection poll.
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // The static holds the Sender for the process
+                        // lifetime, so this is unreachable in practice;
+                        // keep polling rather than killing the thread.
+                    }
+                }
                 let current = match clipboard.get_text() {
                     Ok(t) => t,
                     Err(arboard::Error::ContentNotAvailable) => continue,
@@ -103,14 +164,32 @@ pub fn ensure_watcher(tx: UnboundedSender<String>) {
         .expect("spawn clipboard-watcher thread");
 }
 
-/// Apply a clipboard payload that arrived from the peer. Updates
-/// `LAST_TEXT` first so the watcher's next poll sees the value as
-/// "already known" and doesn't echo it back.
+/// Apply a clipboard payload that arrived from the peer.
+///
+/// This does **not** touch `arboard` directly — doing so from the
+/// tokio reader thread is what raced the watcher thread's OLE
+/// clipboard access and corrupted the heap inside the GUI process
+/// (see `APPLY_TX`). Instead we hand the text to the single
+/// clipboard-owning watcher thread, which sets it (and updates
+/// `LAST_TEXT` for the echo guard) on its own thread.
 pub fn apply_from_peer(text: &str) -> Result<()> {
-    *LAST_TEXT.lock() = text.to_string();
-    let mut clipboard = arboard::Clipboard::new()?;
-    clipboard.set_text(text.to_string())?;
-    info!(len = text.len(), "applied peer clipboard text");
+    if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
+        return Ok(());
+    }
+    let guard = APPLY_TX.lock();
+    match guard.as_ref() {
+        Some(tx) => {
+            // Unbounded std channel; send only fails if the watcher
+            // thread is gone, which doesn't happen in practice.
+            let _ = tx.send(text.to_string());
+            debug!(len = text.len(), "queued peer clipboard text for watcher thread");
+        }
+        None => {
+            // Watcher never started (init failed or clipboard disabled)
+            // — drop silently; clipboard sync is best-effort.
+            debug!("clipboard apply skipped — watcher not running");
+        }
+    }
     Ok(())
 }
 
