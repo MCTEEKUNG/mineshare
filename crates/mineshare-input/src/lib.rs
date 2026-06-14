@@ -187,6 +187,42 @@ pub fn is_input_locked() -> bool {
     INPUT_LOCKED.load(Ordering::Acquire)
 }
 
+/// Game Drive mode — a user-toggled mode that forwards raw relative
+/// mouse + keyboard continuously to the peer, bypassing cursor-crossing,
+/// warp, handover, and game-lock so a cursor-locked game running on the
+/// peer can be driven smoothly from the local machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameDrive {
+    /// Normal cursor-crossing behavior.
+    Off = 0,
+    /// This machine forwards raw mouse+keyboard continuously to the peer.
+    Driving = 1,
+    /// This machine injects the peer's pure-relative input (game runs here).
+    Receiving = 2,
+}
+
+static GAME_DRIVE: AtomicU8 = AtomicU8::new(0);
+
+pub fn game_drive() -> GameDrive {
+    match GAME_DRIVE.load(Ordering::Acquire) {
+        1 => GameDrive::Driving,
+        2 => GameDrive::Receiving,
+        _ => GameDrive::Off,
+    }
+}
+
+pub fn set_game_drive(s: GameDrive) {
+    GAME_DRIVE.store(s as u8, Ordering::Release);
+}
+
+pub fn is_game_driving() -> bool {
+    matches!(game_drive(), GameDrive::Driving)
+}
+
+pub fn is_game_receiving() -> bool {
+    matches!(game_drive(), GameDrive::Receiving)
+}
+
 // ---------------------------------------------------------------------------
 // Stage 10 game-compat polish: capture-side knobs.
 //
@@ -1061,8 +1097,29 @@ mod tests {
         LAST_MOTION_AT.store(0, Relaxed);
         LAST_SMART_TO_PEER.store(false, Relaxed);
         set_keyboard_target(KeyboardTarget::Smart);
+        set_game_drive(GameDrive::Off);
         clear_held_forwarded();
         clear_held_buttons();
+    }
+
+    #[test]
+    fn game_drive_state_roundtrips() {
+        let _g = TEST_LOCK.lock();
+        set_game_drive(GameDrive::Off);
+        assert_eq!(game_drive(), GameDrive::Off);
+        assert!(!is_game_driving());
+        assert!(!is_game_receiving());
+
+        set_game_drive(GameDrive::Driving);
+        assert_eq!(game_drive(), GameDrive::Driving);
+        assert!(is_game_driving());
+        assert!(!is_game_receiving());
+
+        set_game_drive(GameDrive::Receiving);
+        assert!(!is_game_driving());
+        assert!(is_game_receiving());
+
+        set_game_drive(GameDrive::Off); // reset for other tests
     }
 
     #[test]
