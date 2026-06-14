@@ -1030,13 +1030,15 @@ async fn run_peer_session(
                 Ok(ControlMsg::GameDrive { active }) => {
                     if active {
                         mineshare_input::set_game_drive(mineshare_input::GameDrive::Receiving);
-                        tracing::info!("game-drive: peer started driving — receiving");
+                        info!("game-drive: peer started driving — receiving");
                     } else {
                         mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
                         // Drop any keys/buttons the peer left held so WASD
                         // doesn't stick when the game session ends.
-                        let _ = inject_for_reader.release_all_held();
-                        tracing::info!("game-drive: peer stopped driving");
+                        if let Err(e) = inject_for_reader.release_all_held() {
+                            warn!(error = %e, "release_all_held failed on game-drive stop");
+                        }
+                        info!("game-drive: peer stopped driving");
                     }
                 }
                 Ok(ControlMsg::ClipboardText(text)) => {
