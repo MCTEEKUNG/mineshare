@@ -9,6 +9,7 @@ export default function HomePage({ status, latency }: { status: Status; latency:
       <ConnectionHero status={status} latency={latency} />
       <ModePill s={status} />
       <GameLockCard s={status} onChange={(v) => invoke("set_input_lock", { locked: v })} />
+      <GameDriveCard s={status} />
       <StatusGrid s={status} />
       {status.peer_connected ? <LatencyCard latency={latency} /> : null}
     </>
@@ -99,6 +100,49 @@ function GameLockCard({
         }
       >
         {locked ? t("game_mode_unlock") : t("game_mode_lock")}
+      </button>
+    </div>
+  );
+}
+
+function GameDriveCard({ s }: { s: Status }) {
+  const { t } = useT();
+  const state = s.game_drive;
+  const active = state !== "off";
+  return (
+    <div
+      className={
+        "rounded-xl border p-4 mb-6 flex items-center justify-between transition-all duration-150 " +
+        (active
+          ? "border-purple-500/30 bg-purple-500/10"
+          : "border-ds-border bg-ds-surface")
+      }
+    >
+      <div className="min-w-0">
+        <p className={"text-sm font-semibold " + (active ? "text-purple-300" : "text-ds-text")}>
+          {state === "driving"
+            ? "🎮 " + t("gd_driving")
+            : state === "receiving"
+              ? "🎮 " + t("gd_receiving")
+              : t("gd_title")}
+        </p>
+        <p className="text-xs text-ds-text-muted mt-1 max-w-prose leading-relaxed">
+          {t("gd_desc")}{" "}
+          <kbd className="font-mono text-ds-text bg-ds-hover px-1 py-0.5 rounded text-[10px]">Ctrl+Alt+G</kbd>.
+          {active ? " " + t("gd_anticheat_note") : ""}
+        </p>
+      </div>
+      <button
+        onClick={() => invoke("toggle_game_drive")}
+        disabled={!s.peer_connected}
+        className={
+          "rounded-lg px-4 py-2 text-sm font-medium transition-all duration-150 shrink-0 ml-4 " +
+          (active
+            ? "bg-purple-500 hover:bg-purple-400 text-white shadow-lg shadow-purple-500/20"
+            : "border border-ds-border bg-ds-hover hover:bg-ds-hover text-ds-text disabled:opacity-40")
+        }
+      >
+        {active ? t("gd_stop") : t("gd_start")}
       </button>
     </div>
   );

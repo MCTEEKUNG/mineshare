@@ -71,6 +71,16 @@ const en: Strings = {
   game_mode_lock: "Lock",
   game_mode_unlock: "Unlock",
 
+  // Game Drive card
+  gd_title: "Game Drive — off",
+  gd_driving: "Driving peer's game",
+  gd_receiving: "Peer is driving (game)",
+  gd_desc:
+    "Drive a game running on the peer with this machine's mouse + keyboard (pure relative, no cursor crossing). Toggle with",
+  gd_anticheat_note: "Injected input — an anti-cheat may flag it.",
+  gd_start: "Start",
+  gd_stop: "Stop",
+
   // Anti-cheat banner
   ac_title: "⚠ Anti-cheat-protected game detected:",
   ac_desc:
@@ -164,6 +174,15 @@ const th: Strings = {
   game_mode_shortcut: "สลับด้วย",
   game_mode_lock: "ล็อก",
   game_mode_unlock: "ปลดล็อก",
+
+  gd_title: "Game Drive — ปิดอยู่",
+  gd_driving: "กำลังขับเกมบน peer",
+  gd_receiving: "peer กำลังขับ (เกม)",
+  gd_desc:
+    "ขับเกมที่รันอยู่บน peer ด้วยเมาส์ + คีย์บอร์ดของเครื่องนี้ (relative ล้วน ไม่มี cursor crossing) สลับด้วย",
+  gd_anticheat_note: "เป็น injected input — anti-cheat อาจตรวจจับได้",
+  gd_start: "เริ่ม",
+  gd_stop: "หยุด",
 
   ac_title: "⚠ ตรวจพบเกมที่มีระบบ anti-cheat:",
   ac_desc:

@@ -13,6 +13,7 @@ export type Status = {
   local_in_remote: boolean;
   peer_in_remote: boolean;
   input_locked: boolean;
+  game_drive: "off" | "driving" | "receiving";
   anticheat_warning: string | null;
   keys_forwarded: number;
   keys_injected: number;
