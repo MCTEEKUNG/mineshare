@@ -1123,9 +1123,14 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         }
         _ => {}
     }
-    // In remote mode every mouse event has been forwarded; consume it so
-    // the OS doesn't double-process it locally.
-    if mode == MODE_REMOTE {
+    // In remote mode — and while Game Driving — every mouse event has been
+    // forwarded to the peer; consume it so the OS doesn't process it locally.
+    // For Game Drive this is what pins the controller's cursor: consuming the
+    // move event freezes the local cursor in place (raw input still forwards
+    // the hardware delta), so it never drifts to a screen edge where motion
+    // would clamp and stall the driven camera, and local clicks/scroll don't
+    // leak onto this machine's desktop.
+    if forwarding_active() {
         return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
