@@ -75,6 +75,11 @@ fn set_keyboard_target(target: mineshare_input::KeyboardTarget) {
 }
 
 #[tauri::command]
+fn get_mouse_rate_stats() -> mineshare_input::MouseRateStats {
+    mineshare_input::mouse_rate_stats()
+}
+
+#[tauri::command]
 fn get_latency() -> LatencySnapshot {
     mineshare_daemon::latency::snapshot()
 }
@@ -246,6 +251,7 @@ pub fn run() {
             set_input_lock,
             cycle_keyboard_target,
             set_keyboard_target,
+            get_mouse_rate_stats,
             get_latency,
             send_file,
             get_transfers,

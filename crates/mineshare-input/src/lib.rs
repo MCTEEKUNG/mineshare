@@ -214,6 +214,70 @@ pub fn set_invert_scroll(x: bool, y: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime-tunable mouse rate (Phase 1).
+//
+// The user picks a forward/inject rate (60..=1000 Hz) from the GUI;
+// `set_mouse_rate_hz` converts it to a flush interval in microseconds
+// and stores it in `TARGET_FLUSH_US`. The Windows forward watchdog and
+// the Linux capture-forward coalescer read `target_flush_us()` each
+// cycle so a slider drag takes effect live. Replaces the old
+// compile-time `FLUSH_INTERVAL_MS` constants on both platforms.
+//
+// `FWD_EVENTS` / `INJ_EVENTS` count actual forwarded (Windows) and
+// injected (Linux/receiver) mouse motions so the GUI can show the
+// *measured* rate next to the *set* rate — if the live rate stays
+// below the setting, the hardware / inject path is the ceiling.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::AtomicU64;
+
+/// Runtime flush interval in microseconds, derived from the user's
+/// mouse-rate setting. Read each cycle by the Windows forward
+/// watchdog and the Linux inject coalescer. Default 2000 us = 500 Hz.
+static TARGET_FLUSH_US: AtomicU64 = AtomicU64::new(2_000);
+
+/// Pure mapping Hz -> flush microseconds, clamped to 60..=1000 Hz.
+pub(crate) fn hz_to_flush_us(hz: u32) -> u64 {
+    let hz = hz.clamp(60, 1000) as u64;
+    1_000_000 / hz
+}
+
+/// Set the target mouse rate. Called from `settings::push_to_input_layer`.
+pub fn set_mouse_rate_hz(hz: u32) {
+    TARGET_FLUSH_US.store(hz_to_flush_us(hz), Ordering::Relaxed);
+}
+
+/// Current flush interval in microseconds (read by platform flush loops).
+pub(crate) fn target_flush_us() -> u64 {
+    TARGET_FLUSH_US.load(Ordering::Relaxed)
+}
+
+static FWD_EVENTS: AtomicU64 = AtomicU64::new(0); // forwarded MouseMove flushes (Windows)
+static INJ_EVENTS: AtomicU64 = AtomicU64::new(0); // injected mouse moves (Linux/receiver)
+
+pub(crate) fn bump_fwd_events() {
+    FWD_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn bump_inj_events() {
+    INJ_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct MouseRateStats {
+    pub set_hz: u32,
+    pub fwd_total: u64,
+    pub inj_total: u64,
+}
+
+pub fn mouse_rate_stats() -> MouseRateStats {
+    MouseRateStats {
+        set_hz: (1_000_000 / target_flush_us().max(1)) as u32,
+        fwd_total: FWD_EVENTS.load(Ordering::Relaxed),
+        inj_total: INJ_EVENTS.load(Ordering::Relaxed),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 2: Auto-focus click on peer take-control (opt-in).
 //
 // On GNOME-Wayland (Ubuntu's default desktop), keyboard focus is
@@ -981,6 +1045,16 @@ mod tests {
         set_keyboard_target(KeyboardTarget::Smart);
         clear_held_forwarded();
         clear_held_buttons();
+    }
+
+    #[test]
+    fn hz_maps_to_flush_micros() {
+        assert_eq!(hz_to_flush_us(1000), 1_000);
+        assert_eq!(hz_to_flush_us(500), 2_000);
+        assert_eq!(hz_to_flush_us(125), 8_000);
+        // clamp guards against div-by-zero / absurd values
+        assert_eq!(hz_to_flush_us(0), hz_to_flush_us(60));
+        assert_eq!(hz_to_flush_us(99999), hz_to_flush_us(1000));
     }
 
     #[test]

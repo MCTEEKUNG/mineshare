@@ -52,8 +52,21 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_FORMAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
+
+/// RAII guard that releases the raised system timer resolution
+/// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
+/// forward watchdog thread so the finer scheduler tick is only in
+/// effect while the bridge is actively forwarding motion.
+struct HighResTimerGuard;
+
+impl Drop for HighResTimerGuard {
+    fn drop(&mut self) {
+        unsafe { timeEndPeriod(1) };
+    }
+}
 
 const MODE_LOCAL: u8 = 0;
 const MODE_REMOTE: u8 = 1;
@@ -155,13 +168,12 @@ const RAW_INPUT_STALE_MS: u64 = 300;
 // fine for desktop cursor work but downsampled a 1000 Hz gaming mouse into
 // choppy lumps that feel "wrong" / uncontrollable inside GAMES on the
 // receiver — the game reads motion (via Raw Input) as a stream of coarse
-// 125 Hz jumps instead of smooth high-rate deltas. 2 ms (~500 Hz) preserves
-// enough motion resolution to feel like a real mouse in-game while still
-// halving event volume vs a raw 1000 Hz stream, and stays well within the
-// inject loop's per-event budget (one SendInput ≈ tens of µs ≪ 2 ms spacing).
-// Forwarding only happens while CURSOR_MODE == REMOTE, so this rate applies
-// only when actively driving the peer — never during idle local desktop use.
-const FLUSH_INTERVAL_MS: u64 = 2;
+// 125 Hz jumps instead of smooth high-rate deltas. The window is now a
+// runtime value (`super::target_flush_us()`, default 2 ms = 500 Hz) driven
+// by the user's mouse-rate setting, so it is tunable 60..=1000 Hz from the
+// GUI instead of being a compile-time constant. Forwarding only happens
+// while CURSOR_MODE == REMOTE, so this rate applies only when actively
+// driving the peer — never during idle local desktop use.
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
@@ -195,14 +207,16 @@ fn flush_pending_motion() {
     }
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
     sink_send(InputEvent::MouseMove { dx, dy });
+    super::bump_fwd_events();
     let n = FLUSH_FWD_COUNT.fetch_add(1, Ordering::Relaxed);
     if n % 100 == 0 {
         info!(dx, dy, n, "win coalesced motion forward (8ms-window)");
     }
 }
 
-/// Spawn the periodic flush thread once.  Wakes every `FLUSH_INTERVAL_MS`
-/// and drains pending motion if `CURSOR_MODE == REMOTE`.  Mirrors the
+/// Spawn the periodic flush thread once.  Wakes every
+/// `super::target_flush_us()` microseconds and drains pending motion if
+/// `CURSOR_MODE == REMOTE`.  Mirrors the
 /// Linux watchdog — needed so a "moved 2 px then paused" residual
 /// doesn't sit in the accumulator until the next motion event.
 fn start_motion_flush_watchdog() {
@@ -211,14 +225,28 @@ fn start_motion_flush_watchdog() {
     }
     if let Err(e) = thread::Builder::new()
         .name("win-motion-flush".into())
-        .spawn(|| loop {
-            thread::sleep(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+        .spawn(|| {
+            // Raise the system timer resolution to 1 ms for the lifetime
+            // of this watchdog thread. The default Windows scheduler tick
+            // is ~15.6 ms, which makes sub-2 ms sleeps (needed for
+            // >500 Hz rates) round up badly. timeBeginPeriod(1) gives us
+            // ~1 ms sleep granularity. Minor system-wide power cost, only
+            // paid while the bridge's forward watchdog is running. The
+            // matching timeEndPeriod(1) is issued if the loop ever exits
+            // (it normally runs for the process lifetime).
+            unsafe { timeBeginPeriod(1) };
+            let _timer_guard = HighResTimerGuard;
+            loop {
+            let flush_us = super::target_flush_us();
+            thread::sleep(std::time::Duration::from_micros(flush_us));
             if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
                 continue;
             }
             let now = super::now_ms();
             let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-            if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+            // compare in micros where possible; ms granularity is fine for
+            // the residual-drain guard.
+            if now.saturating_sub(last) * 1000 >= flush_us {
                 flush_pending_motion();
             }
             // Safety net: if VIRT_X has drifted negative while the mouse
@@ -232,6 +260,7 @@ fn start_motion_flush_watchdog() {
             // the threshold) still works correctly.
             if should_snap_virt_x(VIRT_X.load(Ordering::Relaxed), last, now) {
                 VIRT_X.store(0, Ordering::Relaxed);
+            }
             }
         })
     {
@@ -785,11 +814,13 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
     // the peer's inject loop stays responsive even with a 1000 Hz mouse.
     PENDING_DX.fetch_add(sdx, Ordering::AcqRel);
     PENDING_DY.fetch_add(sdy, Ordering::AcqRel);
-    // Opportunistic flush: if the 8 ms window has already lapsed since
-    // the last dispatch, send now instead of waiting for the watchdog.
+    // Opportunistic flush: if the runtime flush window has already
+    // lapsed since the last dispatch, send now instead of waiting for
+    // the watchdog.
+    let flush_us = super::target_flush_us();
     let now = super::now_ms();
     let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+    if now.saturating_sub(last) * 1000 >= flush_us {
         flush_pending_motion();
     }
 }
@@ -956,10 +987,11 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                             }
                             PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
                             PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
-                            // Opportunistic flush if the 8ms window has lapsed.
+                            // Opportunistic flush if the runtime window has lapsed.
+                            let flush_us = super::target_flush_us();
                             let now = super::now_ms();
                             let last_flush = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                            if now.saturating_sub(last_flush) >= FLUSH_INTERVAL_MS {
+                            if now.saturating_sub(last_flush) * 1000 >= flush_us {
                                 flush_pending_motion();
                             }
                         }
@@ -1143,7 +1175,7 @@ enum HeldKey {
 
 // --- Inject-cadence instrumentation ---------------------------------------
 // Confirms the receive→inject path actually keeps up with the sender's
-// forward rate (see FLUSH_INTERVAL_MS). Once per window of injected motion
+// forward rate (see `super::target_flush_us`). Once per window of injected motion
 // events it logs the effective rate and the worst inter-inject gap. A healthy
 // 500 Hz stream reads approx_hz≈500 with max_gap_ms≈2–4; a stalled inject
 // loop shows low Hz or large gaps, which would mean the bottleneck is

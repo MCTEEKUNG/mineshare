@@ -122,17 +122,16 @@ static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 // user perceives as **stutter** even on a 0 ms RTT link (the
 // jitter the user reported).
 //
-// We aggregate dx/dy here for `FLUSH_INTERVAL_MS` then forward a
-// single combined delta. Aligning the wire rate with the receiver's
-// display rate cuts UDP traffic ~8×, ~8× the SendInput calls, and
-// removes the visible stutter. 8 ms ≈ 125 Hz which matches Windows'
-// default cursor update rate.
+// We aggregate dx/dy here for the runtime flush window
+// (`super::target_flush_us()`, default 2 ms = 500 Hz) then forward a
+// single combined delta. The window is now driven by the user's
+// mouse-rate setting (60..=1000 Hz) instead of a fixed 8 ms / 125 Hz
+// constant — lifting the old floor that bottlenecked Linux→peer motion.
 //
 // Static atomics rather than per-thread state because multiple
 // pump threads (one per device) all feed a single peer cursor —
 // summing across devices is the correct combined motion.
 // ---------------------------------------------------------------------------
-const FLUSH_INTERVAL_MS: u64 = 8;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -297,12 +296,12 @@ fn flush_pending<F: Fn(InputEvent) + ?Sized>(sink: &F) {
 }
 
 /// Spawn the periodic flush thread once. Wakes every
-/// `FLUSH_INTERVAL_MS` to deliver any pending motion that the pump
-/// thread couldn't dispatch (e.g. user moved 2 px then paused —
-/// without this the residual would sit in `PENDING_*` until the
+/// `super::target_flush_us()` microseconds to deliver any pending motion
+/// that the pump thread couldn't dispatch (e.g. user moved 2 px then
+/// paused — without this the residual would sit in `PENDING_*` until the
 /// next motion event, producing a perceptible "phantom step" when
-/// the user resumes). Cheap: ~125 wakeups/sec, only does atomic
-/// loads when nothing is pending.
+/// the user resumes). Cheap: a few hundred wakeups/sec at most, only
+/// does atomic loads when nothing is pending.
 fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>) {
     if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -311,13 +310,14 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(FLUSH_INTERVAL_MS));
+                let flush_us = super::target_flush_us();
+                thread::sleep(Duration::from_micros(flush_us));
                 if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
                     continue;
                 }
                 let n = super::now_ms();
                 let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                if n.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+                if n.saturating_sub(last) * 1000 >= flush_us {
                     flush_pending(&*sink);
                 }
             }
@@ -813,7 +813,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // retreats toward -EXIT_BUFFER_PX as the user pulls back.
         // (This bookkeeping has to run on EVERY SYN_REPORT so the
         // exit-edge detection stays accurate, even though we only
-        // *forward* an aggregate every FLUSH_INTERVAL_MS below.)
+        // *forward* an aggregate every flush window below.)
         let depth_dx = match super::peer_side() {
             super::PeerSide::Left => -dx,
             super::PeerSide::Right => dx,
@@ -859,10 +859,12 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // the watchdog tick. Keeps the worst-case latency bounded
         // by the time between SYN_REPORTs (~1 ms) when the user is
         // actively moving — only when motion *stops* does the
-        // watchdog's 8 ms tick determine the final-fragment delay.
+        // watchdog's runtime-interval tick determine the
+        // final-fragment delay.
+        let flush_us = super::target_flush_us();
         let now_ms = super::now_ms();
         let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+        if now_ms.saturating_sub(last) * 1000 >= flush_us {
             flush_pending(sink);
         }
     }
@@ -1004,6 +1006,7 @@ impl InputInject for UinputInject {
         }
         if !events.is_empty() {
             self.emit_mouse(&events)?;
+            super::bump_inj_events();
         }
         Ok(())
     }
