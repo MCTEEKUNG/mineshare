@@ -59,6 +59,21 @@ pub trait InputCapture: Send {
     fn set_grab(&mut self, _grab: bool) {}
 }
 
+/// Hard ceiling on the per-event relative mouse delta we will inject.
+///
+/// Defense-in-depth against a single pathological MouseMove teleporting a
+/// mouse-look game's camera. The proven failure (daemon log): at peer
+/// take-control the cursor is warped to the screen edge and the *first*
+/// forwarded delta is computed against a stale anchor, yielding a
+/// ~screen-half delta (e.g. `MouseMove { dx: -969, dy: 453 }`). Injected
+/// as one relative move that flings the in-game camera to the sky.
+///
+/// Real aiming peaks around a few dozen pixels per 500 Hz forward event
+/// (observed ~64), so 200 leaves generous headroom while neutralising the
+/// half-screen artifact regardless of which layer produced it. Tunable; a
+/// future handover-suppression fix can make this purely a safety net.
+pub(crate) const MAX_INJECT_DELTA_PX: i32 = 200;
+
 pub trait InputInject: Send + Sync {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> anyhow::Result<()>;
     fn mouse_button(&self, btn: Button, down: bool) -> anyhow::Result<()>;
@@ -67,7 +82,10 @@ pub trait InputInject: Send + Sync {
 
     fn dispatch(&self, event: InputEvent) -> anyhow::Result<()> {
         match event {
-            InputEvent::MouseMove { dx, dy } => self.mouse_move_rel(dx, dy),
+            InputEvent::MouseMove { dx, dy } => self.mouse_move_rel(
+                dx.clamp(-MAX_INJECT_DELTA_PX, MAX_INJECT_DELTA_PX),
+                dy.clamp(-MAX_INJECT_DELTA_PX, MAX_INJECT_DELTA_PX),
+            ),
             InputEvent::MouseButton { btn, down } => self.mouse_button(btn, down),
             InputEvent::Key { code, down } => self.key(code, down),
             InputEvent::Scroll { dx, dy } => self.scroll(dx, dy),
@@ -1055,6 +1073,44 @@ mod tests {
         // clamp guards against div-by-zero / absurd values
         assert_eq!(hz_to_flush_us(0), hz_to_flush_us(60));
         assert_eq!(hz_to_flush_us(99999), hz_to_flush_us(1000));
+    }
+
+    #[test]
+    fn dispatch_clamps_oversized_mouse_move() {
+        use std::sync::Mutex;
+        // Mock injector that records the (dx, dy) actually handed to the
+        // OS — lets us assert what `dispatch` forwards after clamping.
+        struct Rec(Mutex<(i32, i32)>);
+        impl InputInject for Rec {
+            fn mouse_move_rel(&self, dx: i32, dy: i32) -> anyhow::Result<()> {
+                *self.0.lock().unwrap() = (dx, dy);
+                Ok(())
+            }
+            fn mouse_button(&self, _: Button, _: bool) -> anyhow::Result<()> { Ok(()) }
+            fn key(&self, _: KeyCode, _: bool) -> anyhow::Result<()> { Ok(()) }
+            fn scroll(&self, _: f32, _: f32) -> anyhow::Result<()> { Ok(()) }
+        }
+        let r = Rec(Mutex::new((0, 0)));
+
+        // The proven fling: a single ~screen-half delta generated at the
+        // peer-take-control warp (see log: "warped cursor" then
+        // MouseMove { dx: -969, dy: 453 }). It MUST be clamped so one bad
+        // event can't teleport a mouse-look game's camera.
+        r.dispatch(InputEvent::MouseMove { dx: -969, dy: 453 }).unwrap();
+        assert_eq!(
+            *r.0.lock().unwrap(),
+            (-MAX_INJECT_DELTA_PX, MAX_INJECT_DELTA_PX),
+            "oversized handover delta must be clamped"
+        );
+
+        // Normal in-game motion (observed peak ~64 px/event) passes through
+        // untouched — the clamp must not throttle real aiming.
+        r.dispatch(InputEvent::MouseMove { dx: 64, dy: -18 }).unwrap();
+        assert_eq!(
+            *r.0.lock().unwrap(),
+            (64, -18),
+            "normal motion must be unaffected"
+        );
     }
 
     #[test]
