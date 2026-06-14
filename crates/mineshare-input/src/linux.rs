@@ -312,7 +312,9 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
             loop {
                 let flush_us = super::target_flush_us();
                 thread::sleep(Duration::from_micros(flush_us));
-                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                    && !super::is_game_driving()
+                {
                     continue;
                 }
                 let n = super::now_ms();
@@ -710,6 +712,29 @@ fn pump_device(
 /// triggers `enter_remote`, or forwards the delta to the peer and tracks
 /// `VIRT_X` for the right-edge exit.
 fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
+    // Game Drive: forward raw relative motion continuously to the peer
+    // without entering the cursor-crossing state machine. No edge FSM,
+    // no virt_x / exit bookkeeping (those stay REMOTE-only). Mirrors the
+    // Windows raw-input path, which forwards via the same accumulator.
+    if super::is_game_driving() {
+        let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+        let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+        let scaled_dx = super::scale_delta(dx, &mut rx);
+        let scaled_dy = super::scale_delta(dy, &mut ry);
+        SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+        SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+        let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+        let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+        PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
+        PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        let flush_us = super::target_flush_us();
+        let now_ms = super::now_ms();
+        let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) * 1000 >= flush_us {
+            flush_pending(sink);
+        }
+        return;
+    }
     let mode = CURSOR_MODE.load(Ordering::Acquire);
     if mode == MODE_LOCAL {
         // When the peer is currently driving (peer_in_remote) we *do*

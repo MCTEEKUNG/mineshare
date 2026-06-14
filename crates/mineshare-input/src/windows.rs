@@ -71,6 +71,14 @@ impl Drop for HighResTimerGuard {
 const MODE_LOCAL: u8 = 0;
 const MODE_REMOTE: u8 = 1;
 
+/// True when the capture path should forward + pin motion to the peer:
+/// either the cursor has crossed into Remote mode, or Game Drive is
+/// actively driving the peer (which forwards continuously without ever
+/// entering the cursor-crossing state machine).
+fn forwarding_active() -> bool {
+    CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::is_game_driving()
+}
+
 static EVENT_SINK: OnceLock<
     Mutex<Option<std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>>>,
 > = OnceLock::new();
@@ -239,7 +247,7 @@ fn start_motion_flush_watchdog() {
             loop {
             let flush_us = super::target_flush_us();
             thread::sleep(std::time::Duration::from_micros(flush_us));
-            if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+            if !forwarding_active() {
                 continue;
             }
             let now = super::now_ms();
@@ -819,7 +827,7 @@ fn create_raw_input_window() -> Option<HWND> {
 /// regardless of whether the peer is Windows or Linux.
 unsafe fn handle_raw_input(h: HRAWINPUT) {
     if !USING_RAW_INPUT.load(Ordering::Relaxed) { return; }
-    if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE { return; }
+    if !forwarding_active() { return; }
 
     // Two-pass: first get required buffer size, then read data.
     let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
