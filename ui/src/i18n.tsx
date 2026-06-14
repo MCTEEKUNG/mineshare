@@ -33,6 +33,16 @@ const en: Strings = {
   nav_files: "Files",
   nav_hotkeys: "Hotkeys",
   nav_advanced: "Advanced",
+  nav_home: "Home",
+  nav_audio_devices: "Audio & Devices",
+  nav_settings: "Settings",
+
+  // Section headers (composed pages)
+  section_audio: "Audio",
+  section_devices: "Devices",
+  section_hotkeys: "Hotkeys",
+  section_advanced: "Advanced",
+  section_performance: "Performance",
 
   // Connection pill
   conn_offline: "daemon offline:",
@@ -120,6 +130,15 @@ const th: Strings = {
   nav_files: "ไฟล์",
   nav_hotkeys: "คีย์ลัด",
   nav_advanced: "ขั้นสูง",
+  nav_home: "หน้าหลัก",
+  nav_audio_devices: "เสียงและอุปกรณ์",
+  nav_settings: "ตั้งค่า",
+
+  section_audio: "เสียง",
+  section_devices: "อุปกรณ์",
+  section_hotkeys: "คีย์ลัด",
+  section_advanced: "ขั้นสูง",
+  section_performance: "ประสิทธิภาพ",
 
   conn_offline: "daemon ไม่ทำงาน:",
   conn_connecting: "กำลังเชื่อมต่อ…",
