@@ -706,6 +706,11 @@ fn clear_held_buttons() {
 /// so without it a minute of mutual idle would let the capped peer age
 /// "win" the race and silently flip the keyboard across.
 pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
+    // Game Drive: while we are driving the peer's game, every key goes to
+    // the peer regardless of cursor position or Smart routing.
+    if is_game_driving() {
+        return true;
+    }
     /// Once both sides have been idle longer than this, stop racing
     /// ages and hold the last decision. Comfortably below the 60 s
     /// wire cap so a capped peer age always reads as stale, and above
@@ -1134,6 +1139,17 @@ mod tests {
         let a = RemoteEvent::GameDriveStart;
         let b = RemoteEvent::GameDriveStop;
         assert_ne!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    #[test]
+    fn game_driving_forces_keys_to_peer() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        set_keyboard_target(KeyboardTarget::ForceLocal); // even pinned-local…
+        set_game_drive(GameDrive::Driving);
+        assert!(should_forward_keys(false), "Driving must forward keys to peer");
+        set_game_drive(GameDrive::Off);
+        assert!(!should_forward_keys(false), "Off + ForceLocal stays local");
     }
 
     #[test]
