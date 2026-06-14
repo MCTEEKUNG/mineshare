@@ -37,7 +37,7 @@ export default function PairingModal() {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-2xl border border-white/[0.08] bg-ds-surface p-6 shadow-2xl shadow-black/40">
+      <div className="w-full max-w-md rounded-2xl border border-ds-border bg-ds-surface p-6 shadow-2xl shadow-black/40">
         {phase.kind === "displayingpin" ? <DisplayPin {...phase} /> : null}
         {phase.kind === "awaitingpin" ? <EnterPin {...phase} /> : null}
         {phase.kind === "verifying" ? (
@@ -69,15 +69,15 @@ function DisplayPin({ pin, peer_addr }: { pin: string; peer_addr: string }) {
   const { t } = useT();
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-widest text-slate-400 mb-2">
+      <p className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-2">
         {t("pair_title_request")}
       </p>
-      <p className="font-mono text-sm mb-6 text-slate-300">{peer_addr}</p>
-      <p className="text-sm text-slate-400 mb-3">{t("pair_show_pin")}</p>
+      <p className="font-mono text-sm mb-6 text-ds-text">{peer_addr}</p>
+      <p className="text-sm text-ds-text-muted mb-3">{t("pair_show_pin")}</p>
       <p className="font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 my-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300">
         {pin}
       </p>
-      <p className="text-[11px] text-slate-400 mt-4 text-center">{t("pair_cancel_note")}</p>
+      <p className="text-[11px] text-ds-text-muted mt-4 text-center">{t("pair_cancel_note")}</p>
     </div>
   );
 }
@@ -100,11 +100,11 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
 
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-widest text-slate-400 mb-2">
+      <p className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-2">
         {t("pair_title_pair_with")}
       </p>
-      <p className="font-mono text-sm mb-6 text-slate-300">{peer_addr}</p>
-      <p className="text-sm text-slate-400 mb-3">{t("pair_enter_pin")}</p>
+      <p className="font-mono text-sm mb-6 text-ds-text">{peer_addr}</p>
+      <p className="text-sm text-ds-text-muted mb-3">{t("pair_enter_pin")}</p>
       <input
         type="text"
         inputMode="numeric"
@@ -114,7 +114,7 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
         value={value}
         onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 6))}
         onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-        className="w-full font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 rounded-xl bg-white/[0.04] border-2 border-white/[0.10] text-slate-100 focus:outline-none focus:border-emerald-500/60 transition-colors placeholder-slate-700"
+        className="w-full font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 rounded-xl bg-ds-hover border-2 border-ds-border text-ds-text focus:outline-none focus:border-emerald-500/60 transition-colors placeholder-slate-700"
         placeholder="──────"
       />
       <button
@@ -124,7 +124,7 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
       >
         {submitting ? t("pair_button_sending") : t("pair_button")}
       </button>
-      <p className="text-[11px] text-slate-400 mt-3 text-center">{t("pair_after_note")}</p>
+      <p className="text-[11px] text-ds-text-muted mt-3 text-center">{t("pair_after_note")}</p>
     </div>
   );
 }
@@ -143,11 +143,11 @@ function CenteredMessage({
       ? "text-emerald-400"
       : tone === "error"
         ? "text-red-400"
-        : "text-slate-300";
+        : "text-ds-text";
   return (
     <div className="text-center py-4">
       <p className={"text-2xl font-semibold mb-2 " + accent}>{title}</p>
-      <p className="text-sm text-slate-400">{subtitle}</p>
+      <p className="text-sm text-ds-text-muted">{subtitle}</p>
     </div>
   );
 }

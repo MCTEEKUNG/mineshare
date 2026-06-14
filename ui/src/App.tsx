@@ -206,21 +206,21 @@ export default function App() {
   const tabTitle = t(`nav_${tab}`);
 
   return (
-    <div className="h-screen flex bg-ds-bg text-slate-100 overflow-hidden">
+    <div className="h-screen flex bg-ds-bg text-ds-text overflow-hidden">
       <PairingModal />
       <DropOverlay visible={dropOverlay} />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <ActiveTransfersBadge count={activeTransfers} onClick={() => setTab("files")} />
 
       {/* Sidebar */}
-      <aside className="w-[220px] shrink-0 bg-ds-sidebar border-r border-white/[0.06] flex flex-col py-5">
+      <aside className="w-[220px] shrink-0 bg-ds-sidebar border-r border-ds-border flex flex-col py-5">
         {/* Logo */}
         <div className="px-4 mb-7">
           <div className="flex items-center gap-2.5">
             <div className="size-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0">
               <IconActivity className="size-3.5 text-emerald-400" />
             </div>
-            <span className="text-sm font-semibold text-white tracking-tight">MineShare</span>
+            <span className="text-sm font-semibold text-ds-text tracking-tight">MineShare</span>
           </div>
         </div>
 
@@ -244,7 +244,7 @@ export default function App() {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 pt-4 border-t border-white/[0.06]">
+        <div className="px-4 pt-4 border-t border-ds-border">
           <LanguageToggle />
           <VersionFooter status={status} />
         </div>
@@ -254,7 +254,7 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         <div className="px-8 py-6">
           <header className="mb-6 flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-white">{tabTitle}</h2>
+            <h2 className="text-xl font-semibold text-ds-text">{tabTitle}</h2>
             <ConnectionPill status={status} error={error} />
           </header>
 
@@ -276,7 +276,7 @@ function VersionFooter({ status }: { status: Status | null }) {
   const connected = status?.peer_connected ?? false;
   const same = connected && peer != null && peer === local;
   return (
-    <div className="mt-3 text-[10px] leading-snug text-slate-400 select-text break-all">
+    <div className="mt-3 text-[10px] leading-snug text-ds-text-muted select-text break-all">
       <div title={local}>MineShare {local || "…"}</div>
       {connected && peer ? (
         same ? (
@@ -301,7 +301,7 @@ function DropOverlay({ visible }: { visible: boolean }) {
         </div>
         <div className="text-center">
           <p className="text-base font-semibold text-emerald-300">Drop to send to peer</p>
-          <p className="text-xs text-slate-400 mt-1">Encrypted · auto-saves to Downloads/MineShare</p>
+          <p className="text-xs text-ds-text-muted mt-1">Encrypted · auto-saves to Downloads/MineShare</p>
         </div>
       </div>
     </div>
@@ -368,7 +368,7 @@ function Toast({
         ? "border-emerald-500/30 bg-emerald-500/10"
         : "border-blue-500/30 bg-blue-500/10"
       : entry.status === "cancelled"
-        ? "border-white/[0.08] bg-ds-surface"
+        ? "border-ds-border bg-ds-surface"
         : "border-red-500/30 bg-red-500/10";
 
   const iconEl =
@@ -379,7 +379,7 @@ function Toast({
         <IconArrowDownLeft className="size-4 text-blue-400" />
       )
     ) : entry.status === "cancelled" ? (
-      <IconX className="size-4 text-slate-400" />
+      <IconX className="size-4 text-ds-text-muted" />
     ) : (
       <IconAlertTriangle className="size-4 text-red-400" />
     );
@@ -411,16 +411,16 @@ function Toast({
       <div className="flex items-start gap-2.5">
         <span className="shrink-0 mt-0.5">{iconEl}</span>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-semibold text-slate-200">{title}</p>
-          <p className="text-sm font-medium truncate text-slate-100">{entry.name}</p>
+          <p className="text-xs font-semibold text-ds-text">{title}</p>
+          <p className="text-sm font-medium truncate text-ds-text">{entry.name}</p>
           {canOpen ? (
-            <p className="text-[11px] text-slate-400 mt-0.5">Click to open Downloads/MineShare</p>
+            <p className="text-[11px] text-ds-text-muted mt-0.5">Click to open Downloads/MineShare</p>
           ) : null}
         </div>
         <button
           onClick={(e) => { e.stopPropagation(); onDismiss(); }}
           aria-label="Dismiss"
-          className="text-slate-500 hover:text-slate-200 transition-colors text-xs px-1 shrink-0"
+          className="text-ds-text-muted hover:text-ds-text transition-colors text-xs px-1 shrink-0"
         >
           <IconX className="size-3" />
         </button>
@@ -447,7 +447,7 @@ function ConnectionPill({
   }
   if (!status) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+      <span className="inline-flex items-center gap-1.5 text-xs text-ds-text-muted">
         <span className="size-1.5 rounded-full bg-slate-500 animate-pulse" />
         {t("conn_connecting")}
       </span>
@@ -455,7 +455,7 @@ function ConnectionPill({
   }
   if (!status.peer_connected) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-slate-400 bg-white/[0.04] border border-white/[0.06] rounded-full px-2.5 py-1">
+      <span className="inline-flex items-center gap-1.5 text-xs text-ds-text-muted bg-ds-hover border border-ds-border rounded-full px-2.5 py-1">
         <span className="size-1.5 rounded-full bg-slate-500" />
         {t("conn_no_peer")}
       </span>
@@ -488,14 +488,14 @@ function NavItem({
       className={
         "relative w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-150 text-sm group " +
         (active
-          ? "bg-white/[0.08] text-white font-medium"
-          : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200")
+          ? "bg-ds-hover text-ds-text font-medium"
+          : "text-ds-text-muted hover:bg-ds-hover hover:text-ds-text")
       }
     >
       {active && (
         <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-emerald-400 rounded-r-full" />
       )}
-      <span className={active ? "text-emerald-400" : "group-hover:text-slate-300 transition-colors"}>
+      <span className={active ? "text-emerald-400" : "group-hover:text-ds-text transition-colors"}>
         {icon}
       </span>
       <span className="flex-1">{children}</span>

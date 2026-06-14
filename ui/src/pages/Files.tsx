@@ -90,9 +90,9 @@ export default function FilesPage() {
 
   return (
     <section>
-      <p className="text-sm text-slate-400 mb-5 max-w-prose leading-relaxed">
+      <p className="text-sm text-ds-text-muted mb-5 max-w-prose leading-relaxed">
         Drag any file onto this window to send it to the paired peer. Files
-        arrive in <code className="font-mono text-[11px] text-slate-300">Downloads/MineShare/</code>{" "}
+        arrive in <code className="font-mono text-[11px] text-ds-text">Downloads/MineShare/</code>{" "}
         on the other machine, integrity-checked with SHA-256 before being
         renamed into place.
       </p>
@@ -102,22 +102,22 @@ export default function FilesPage() {
           "rounded-xl border-2 border-dashed p-10 text-center transition-all duration-150 " +
           (dragOver
             ? "border-emerald-500/60 bg-emerald-500/[0.08] scale-[1.01]"
-            : "border-white/[0.08] bg-white/[0.02]")
+            : "border-ds-border bg-ds-hover")
         }
       >
         <div className={
           "mx-auto mb-3 size-12 rounded-full flex items-center justify-center transition-all duration-150 " +
-          (dragOver ? "bg-emerald-500/20" : "bg-white/[0.05]")
+          (dragOver ? "bg-emerald-500/20" : "bg-ds-hover")
         }>
           {dragOver
             ? <IconArrowDown className="size-6 text-emerald-400" />
-            : <IconUpload className="size-6 text-slate-400" />
+            : <IconUpload className="size-6 text-ds-text-muted" />
           }
         </div>
-        <p className={"text-sm font-medium " + (dragOver ? "text-emerald-300" : "text-slate-300")}>
+        <p className={"text-sm font-medium " + (dragOver ? "text-emerald-300" : "text-ds-text")}>
           {dragOver ? "Drop to send" : "Drag a file anywhere on this window"}
         </p>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-ds-text-muted mt-1">
           Auto-sends to the paired peer · multi-file drop OK · multi-GB OK
         </p>
       </div>
@@ -125,7 +125,7 @@ export default function FilesPage() {
       <div className="flex justify-end mt-3">
         <button
           onClick={openDownloads}
-          className="text-xs text-slate-500 hover:text-slate-200 transition-colors flex items-center gap-1.5"
+          className="text-xs text-ds-text-muted hover:text-ds-text transition-colors flex items-center gap-1.5"
         >
           <IconFolder className="size-3.5" />
           Open Downloads/MineShare folder
@@ -136,7 +136,7 @@ export default function FilesPage() {
 
       {active.length > 0 && (
         <>
-          <h3 className="text-[10px] uppercase tracking-widest text-slate-400 mt-8 mb-2">
+          <h3 className="text-[10px] uppercase tracking-widest text-ds-text-muted mt-8 mb-2">
             In progress
           </h3>
           <div className="space-y-2">
@@ -149,7 +149,7 @@ export default function FilesPage() {
 
       {recent.length > 0 && (
         <>
-          <h3 className="text-[10px] uppercase tracking-widest text-slate-400 mt-8 mb-2">
+          <h3 className="text-[10px] uppercase tracking-widest text-ds-text-muted mt-8 mb-2">
             Recent
           </h3>
           <div className="space-y-2">
@@ -161,7 +161,7 @@ export default function FilesPage() {
       )}
 
       {active.length === 0 && recent.length === 0 ? (
-        <p className="text-xs text-slate-400 mt-8 text-center">No transfers yet.</p>
+        <p className="text-xs text-ds-text-muted mt-8 text-center">No transfers yet.</p>
       ) : null}
     </section>
   );
@@ -187,7 +187,7 @@ function TransferRow({
       ? "text-emerald-400"
       : t.status === "failed" || t.status === "cancelled"
         ? "text-red-400"
-        : "text-slate-400";
+        : "text-ds-text-muted";
   const inFlight = ["pending", "active", "verifying"].includes(t.status);
   const rate =
     t.seconds_elapsed > 0.1
@@ -195,13 +195,13 @@ function TransferRow({
       : "—";
 
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-3">
+    <div className="rounded-xl border border-ds-border bg-ds-surface p-3">
       <div className="flex items-center justify-between gap-3 mb-1.5">
         <div className="min-w-0 flex-1 flex items-start gap-2">
           <span className="mt-0.5">{dirIcon}</span>
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate text-slate-200">{t.name}</p>
-            <p className="text-[11px] text-slate-400">
+            <p className="text-sm font-medium truncate text-ds-text">{t.name}</p>
+            <p className="text-[11px] text-ds-text-muted">
               {formatBytes(t.bytes_so_far)} / {formatBytes(t.size_bytes)}
               {inFlight && ` · ${rate}`}
               <span className={" ml-2 font-medium " + statusTone}>· {t.status}</span>
@@ -212,14 +212,14 @@ function TransferRow({
         {inFlight && onCancel ? (
           <button
             onClick={onCancel}
-            className="text-[11px] text-slate-500 hover:text-red-400 px-2 py-1 rounded-lg border border-white/[0.08] hover:border-red-500/30 transition-colors shrink-0"
+            className="text-[11px] text-ds-text-muted hover:text-red-400 px-2 py-1 rounded-lg border border-ds-border hover:border-red-500/30 transition-colors shrink-0"
           >
             Cancel
           </button>
         ) : null}
       </div>
       {inFlight ? (
-        <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+        <div className="h-1.5 rounded-full bg-ds-hover overflow-hidden">
           <div
             className={
               "h-full transition-all " +

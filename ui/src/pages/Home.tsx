@@ -19,7 +19,7 @@ function ConnectionHero({ status, latency }: { status: Status; latency: Latency 
   const connected = status.peer_connected;
   const headlineMs = latency?.p50_ms ?? latency?.last_ms ?? null;
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-ds-surface p-6 mb-6">
+    <div className="rounded-2xl border border-ds-border bg-ds-surface p-6 mb-6">
       <div className="flex items-center justify-between gap-6">
         <div className="flex items-center gap-4">
           <MachineBadge label="This PC" active />
@@ -27,11 +27,11 @@ function ConnectionHero({ status, latency }: { status: Status; latency: Latency 
           <MachineBadge label={status.peer_name ?? "Peer"} active={connected} />
         </div>
         <div className="text-right">
-          <p className="text-[10px] uppercase tracking-widest text-slate-500">Latency</p>
-          <p className="text-2xl font-semibold text-white">
+          <p className="text-[10px] uppercase tracking-widest text-ds-text-muted">Latency</p>
+          <p className="text-2xl font-semibold text-ds-text">
             {connected && headlineMs != null ? `${headlineMs < 10 ? headlineMs.toFixed(1) : headlineMs.toFixed(0)} ms` : "—"}
           </p>
-          <p className="text-xs text-slate-400">{connected ? `paired with ${status.peer_addr ?? "peer"}` : "waiting for a peer on the LAN…"}</p>
+          <p className="text-xs text-ds-text-muted">{connected ? `paired with ${status.peer_addr ?? "peer"}` : "waiting for a peer on the LAN…"}</p>
         </div>
       </div>
     </div>
@@ -40,7 +40,7 @@ function ConnectionHero({ status, latency }: { status: Status; latency: Latency 
 
 function MachineBadge({ label, active }: { label: string; active: boolean }) {
   return (
-    <div className={"rounded-xl border px-4 py-3 text-sm font-medium " + (active ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border-white/[0.08] bg-white/[0.03] text-slate-400")}>
+    <div className={"rounded-xl border px-4 py-3 text-sm font-medium " + (active ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border-ds-border bg-ds-hover text-ds-text-muted")}>
       {label}
     </div>
   );
@@ -75,17 +75,17 @@ function GameLockCard({
         "rounded-xl border p-4 mb-6 flex items-center justify-between transition-all duration-150 " +
         (locked
           ? "border-amber-500/30 bg-amber-500/10"
-          : "border-white/[0.08] bg-ds-surface")
+          : "border-ds-border bg-ds-surface")
       }
     >
       <div>
-        <p className={"text-sm font-semibold " + (locked ? "text-amber-300" : "text-slate-100")}>
+        <p className={"text-sm font-semibold " + (locked ? "text-amber-300" : "text-ds-text")}>
           {locked ? t("game_mode_on_title") : t("game_mode_off_title")}
         </p>
-        <p className="text-xs text-slate-400 mt-1 max-w-prose leading-relaxed">
+        <p className="text-xs text-ds-text-muted mt-1 max-w-prose leading-relaxed">
           {t("game_mode_desc")}{" "}
-          <span className="text-slate-400">
-            {t("game_mode_shortcut")} <kbd className="font-mono text-slate-300 bg-white/[0.08] px-1 py-0.5 rounded text-[10px]">Ctrl+Alt+L</kbd>.
+          <span className="text-ds-text-muted">
+            {t("game_mode_shortcut")} <kbd className="font-mono text-ds-text bg-ds-hover px-1 py-0.5 rounded text-[10px]">Ctrl+Alt+L</kbd>.
           </span>
         </p>
       </div>
@@ -95,7 +95,7 @@ function GameLockCard({
           "rounded-lg px-4 py-2 text-sm font-medium transition-all duration-150 shrink-0 ml-4 " +
           (locked
             ? "bg-amber-500 hover:bg-amber-400 text-white shadow-lg shadow-amber-500/20"
-            : "border border-white/[0.10] bg-white/[0.04] hover:bg-white/[0.08] text-slate-300")
+            : "border border-ds-border bg-ds-hover hover:bg-ds-hover text-ds-text")
         }
       >
         {locked ? t("game_mode_unlock") : t("game_mode_lock")}
@@ -112,7 +112,7 @@ function StatusGrid({ s }: { s: Status }) {
       ? t("cursor_driven_by_peer")
       : t("cursor_local");
   return (
-    <dl className="grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-5 rounded-xl border border-white/[0.08] bg-ds-surface p-5 mb-6">
+    <dl className="grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-5 rounded-xl border border-ds-border bg-ds-surface p-5 mb-6">
       <Stat label={t("stat_cursor")} value={cursor} />
       <Stat label={t("stat_peer_addr")} value={s.peer_addr ?? "—"} mono />
       <Stat label={t("stat_sent_pkts")} value={s.sent_pkts.toLocaleString()} />
@@ -146,7 +146,7 @@ function ModePill({ s }: { s: Status }) {
   } else {
     label = "● Local";
     detail = "Cursor on this machine. Cross to the peer to start driving them.";
-    tone = "border-white/[0.08] bg-ds-surface text-slate-300";
+    tone = "border-ds-border bg-ds-surface text-ds-text";
   }
   return (
     <div className="mb-6 grid gap-3 grid-cols-1 md:grid-cols-2">
@@ -188,7 +188,7 @@ function KeyboardPill({ s }: { s: Status }) {
     } else {
       label = "● Auto (cursor on local)";
       detail = "Strict cursor mode: keys land on whichever machine the cursor is on. Click to switch back to Smart.";
-      tone = "border-white/[0.08] bg-ds-surface text-slate-300";
+      tone = "border-ds-border bg-ds-surface text-ds-text";
     }
   } else {
     // smart (default)
@@ -224,9 +224,9 @@ function KeyboardPill({ s }: { s: Status }) {
 function LatencyCard({ latency }: { latency: Latency | null }) {
   if (!latency || latency.samples === 0) {
     return (
-      <div className="mt-6 rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-sm font-semibold text-slate-200 mb-1">Network latency</p>
-        <p className="text-xs text-slate-400">waiting for the first round-trip…</p>
+      <div className="mt-6 rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-sm font-semibold text-ds-text mb-1">Network latency</p>
+        <p className="text-xs text-ds-text-muted">waiting for the first round-trip…</p>
       </div>
     );
   }
@@ -237,10 +237,10 @@ function LatencyCard({ latency }: { latency: Latency | null }) {
     p95 >= 100 ? "text-red-400" : p95 >= 50 ? "text-amber-400" : "text-emerald-400";
 
   return (
-    <div className="mt-6 rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+    <div className="mt-6 rounded-xl border border-ds-border bg-ds-surface p-5">
       <div className="flex items-baseline justify-between mb-4">
-        <p className="text-sm font-semibold text-slate-200">Network latency</p>
-        <p className="text-[11px] text-slate-400">
+        <p className="text-sm font-semibold text-ds-text">Network latency</p>
+        <p className="text-[11px] text-ds-text-muted">
           {latency.samples} sample{latency.samples === 1 ? "" : "s"} · ping every 500 ms
         </p>
       </div>
@@ -271,8 +271,8 @@ function LatencyStat({
 }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-widest text-slate-400 mb-0.5">{label}</p>
-      <p className={"text-sm font-mono font-medium " + (accent ?? (muted ? "text-slate-400" : "text-slate-200"))}>
+      <p className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-0.5">{label}</p>
+      <p className={"text-sm font-mono font-medium " + (accent ?? (muted ? "text-ds-text-muted" : "text-ds-text"))}>
         {value}
       </p>
     </div>
@@ -312,7 +312,7 @@ function Histogram({
       </div>
       <div className="flex gap-1.5 mt-1">
         {histogram.map((_, i) => (
-          <span key={i} className="flex-1 text-center text-[9px] font-mono text-slate-400">
+          <span key={i} className="flex-1 text-center text-[9px] font-mono text-ds-text-muted">
             {labelFor(i, edges)}
           </span>
         ))}
@@ -340,8 +340,8 @@ function Stat({
 }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{label}</dt>
-      <dd className={mono ? "font-mono text-sm text-slate-200" : "text-sm font-medium text-slate-200"}>
+      <dt className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-1">{label}</dt>
+      <dd className={mono ? "font-mono text-sm text-ds-text" : "text-sm font-medium text-ds-text"}>
         {value}
       </dd>
     </div>

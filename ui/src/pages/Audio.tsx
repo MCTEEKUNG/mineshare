@@ -55,7 +55,7 @@ export default function AudioPage() {
 
   if (!status) {
     return (
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-ds-text-muted">
         {err ? `failed: ${err}` : "…"}
       </p>
     );
@@ -63,7 +63,7 @@ export default function AudioPage() {
 
   return (
     <section>
-      <p className="text-sm text-slate-400 mb-6 max-w-prose leading-relaxed">
+      <p className="text-sm text-ds-text-muted mb-6 max-w-prose leading-relaxed">
         {t("audio_intro")}
       </p>
 
@@ -106,10 +106,10 @@ function StreamCard({
 }) {
   const { t } = useT();
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+    <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
       <div className="mb-4">
-        <p className="text-base font-semibold text-slate-100">{title}</p>
-        <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>
+        <p className="text-base font-semibold text-ds-text">{title}</p>
+        <p className="text-xs text-ds-text-muted mt-0.5">{subtitle}</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -144,11 +144,11 @@ function ToggleRow({
   return (
     <button
       onClick={() => onChange(!on)}
-      className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-3 hover:bg-white/[0.06] transition-colors text-left"
+      className="flex items-center justify-between rounded-lg border border-ds-border bg-ds-hover px-3 py-3 hover:bg-ds-hover transition-colors text-left"
     >
       <div>
-        <p className="text-sm font-medium text-slate-200">{label}</p>
-        <p className="text-[11px] text-slate-400 mt-0.5">{hint}</p>
+        <p className="text-sm font-medium text-ds-text">{label}</p>
+        <p className="text-[11px] text-ds-text-muted mt-0.5">{hint}</p>
       </div>
       <Switch on={on} />
     </button>
@@ -160,7 +160,7 @@ function Switch({ on }: { on: boolean }) {
     <span
       className={
         "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
-        (on ? "bg-emerald-500" : "bg-white/[0.12]")
+        (on ? "bg-emerald-500" : "bg-ds-hover")
       }
     >
       <span
@@ -186,7 +186,7 @@ function VirtualMicCard({
         <p>
           PipeWire null-sink <code className="font-mono text-emerald-400">mineshare_mic</code>{" "}
           loaded. Discord / Zoom / OBS see the matching monitor as{" "}
-          <strong className="text-slate-200">"Monitor of MineShare-Mic"</strong> in their input picker.
+          <strong className="text-ds-text">"Monitor of MineShare-Mic"</strong> in their input picker.
         </p>
       </Card>
     );
@@ -225,9 +225,9 @@ function VirtualMicCard({
   return (
     <Card status="warn" title="Virtual microphone — unavailable">
       <p>
-        <code className="font-mono text-slate-300">pactl load-module module-null-sink</code>{" "}
+        <code className="font-mono text-ds-text">pactl load-module module-null-sink</code>{" "}
         failed at startup. Make sure{" "}
-        <code className="font-mono text-slate-300">pulseaudio-utils</code> is installed and
+        <code className="font-mono text-ds-text">pulseaudio-utils</code> is installed and
         that you're running a PipeWire session, then restart MineShare.
       </p>
     </Card>
@@ -251,7 +251,7 @@ function Card({
   return (
     <div className={"rounded-xl border p-5 " + accent}>
       <p className={"text-sm font-semibold mb-1.5 " + titleColor}>{title}</p>
-      <div className="text-xs text-slate-400 leading-relaxed">
+      <div className="text-xs text-ds-text-muted leading-relaxed">
         {children}
       </div>
     </div>

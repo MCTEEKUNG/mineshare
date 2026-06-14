@@ -7,3 +7,31 @@
   font-feature-settings: "ss01" on, "ss02" on;
   -webkit-font-smoothing: antialiased;
 }
+
+:root, [data-theme="dark"] {
+  --ds-bg: #0F172A;
+  --ds-surface: #1B2336;
+  --ds-elevated: #1E293B;
+  --ds-sidebar: #0D1525;
+  --ds-accent: #22C55E;
+  --ds-text: #F1F5F9;        /* was text-slate-100 */
+  --ds-text-muted: #94A3B8;  /* slate-400 */
+  --ds-border: rgba(255,255,255,0.08);
+  --ds-hover: rgba(255,255,255,0.06);
+}
+[data-theme="light"] {
+  --ds-bg: #F4F5F7;
+  --ds-surface: #FFFFFF;
+  --ds-elevated: #FFFFFF;
+  --ds-sidebar: #EAECEF;
+  --ds-accent: #16A34A;
+  --ds-text: #1F2937;
+  --ds-text-muted: #6B7280;
+  --ds-border: rgba(0,0,0,0.10);
+  --ds-hover: rgba(0,0,0,0.05);
+}
+
+:where(button, [role="button"], a, input, select):focus-visible {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
+}

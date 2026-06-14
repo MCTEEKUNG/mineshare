@@ -38,6 +38,7 @@ const en: Strings = {
   nav_settings: "Settings",
 
   // Section headers (composed pages)
+  section_appearance: "Appearance",
   section_audio: "Audio",
   section_devices: "Devices",
   section_hotkeys: "Hotkeys",
@@ -134,6 +135,7 @@ const th: Strings = {
   nav_audio_devices: "เสียงและอุปกรณ์",
   nav_settings: "ตั้งค่า",
 
+  section_appearance: "ลักษณะ",
   section_audio: "เสียง",
   section_devices: "อุปกรณ์",
   section_hotkeys: "คีย์ลัด",
@@ -210,6 +212,13 @@ const th: Strings = {
 
 const dicts: Record<Locale, Strings> = { en, th };
 
+// Dev-only parity guard: warn if `en` and `th` drift out of sync.
+if (import.meta.env.DEV) {
+  const a = Object.keys(en), b = Object.keys(th);
+  const missing = [...a.filter((k) => !b.includes(k)), ...b.filter((k) => !a.includes(k))];
+  if (missing.length) console.warn("i18n key mismatch:", missing);
+}
+
 interface I18nCtx {
   locale: Locale;
   setLocale: (l: Locale) => void;
@@ -273,14 +282,14 @@ export function useT() {
 export function LanguageToggle() {
   const { locale, setLocale } = useT();
   return (
-    <div className="inline-flex items-center text-[11px] font-medium border border-white/[0.10] rounded-md overflow-hidden">
+    <div className="inline-flex items-center text-[11px] font-medium border border-ds-border rounded-md overflow-hidden">
       <button
         onClick={() => setLocale("en")}
         className={
           "px-2 py-1 transition-colors " +
           (locale === "en"
-            ? "bg-white/[0.12] text-white"
-            : "text-slate-500 hover:text-slate-200")
+            ? "bg-ds-hover text-ds-text"
+            : "text-ds-text-muted hover:text-ds-text")
         }
       >
         EN
@@ -290,8 +299,8 @@ export function LanguageToggle() {
         className={
           "px-2 py-1 transition-colors " +
           (locale === "th"
-            ? "bg-white/[0.12] text-white"
-            : "text-slate-500 hover:text-slate-200")
+            ? "bg-ds-hover text-ds-text"
+            : "text-ds-text-muted hover:text-ds-text")
         }
       >
         TH

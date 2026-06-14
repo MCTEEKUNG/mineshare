@@ -40,8 +40,8 @@ export default function AdvancedPage() {
     <section className="grid gap-6">
       <InputPrefsCard />
 
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-base font-semibold text-slate-100 mb-4">Traffic</p>
+      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-base font-semibold text-ds-text mb-4">Traffic</p>
         {s ? (
           <dl className="grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-3 text-sm">
             <Row k="Sent packets" v={s.sent_pkts.toLocaleString()} />
@@ -52,13 +52,13 @@ export default function AdvancedPage() {
             <Row k="Decrypt errors" v={s.decrypt_errs.toLocaleString()} alert={s.decrypt_errs > 0} />
           </dl>
         ) : (
-          <p className="text-sm text-slate-400">connecting…</p>
+          <p className="text-sm text-ds-text-muted">connecting…</p>
         )}
       </div>
 
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-base font-semibold text-slate-100 mb-4">Local files</p>
-        <ul className="text-xs space-y-3 text-slate-400">
+      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-base font-semibold text-ds-text mb-4">Local files</p>
+        <ul className="text-xs space-y-3 text-ds-text-muted">
           <FileEntry
             label="Daemon log"
             winPath="%APPDATA%\MineShare\logs\daemon.YYYY-MM-DD"
@@ -77,9 +77,9 @@ export default function AdvancedPage() {
         </ul>
       </div>
 
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-base font-semibold text-slate-100 mb-4">Platform notes</p>
-        <ul className="text-xs space-y-2 text-slate-400 list-disc pl-5 leading-relaxed">
+      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-base font-semibold text-ds-text mb-4">Platform notes</p>
+        <ul className="text-xs space-y-2 text-ds-text-muted list-disc pl-5 leading-relaxed">
           <li>
             Closing the window hides MineShare to the system tray; the
             daemon and bridge keep running. Use the tray icon's "Quit
@@ -133,9 +133,9 @@ function InputPrefsCard() {
 
   if (!settings) {
     return (
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-base font-semibold text-slate-100 mb-3">Input preferences</p>
-        <p className="text-xs text-slate-400">
+      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-base font-semibold text-ds-text mb-3">Input preferences</p>
+        <p className="text-xs text-ds-text-muted">
           {err ? `failed to load: ${err}` : "loading…"}
         </p>
       </div>
@@ -143,17 +143,17 @@ function InputPrefsCard() {
   }
 
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-      <p className="text-base font-semibold text-slate-100 mb-1">Input preferences</p>
-      <p className="text-xs text-slate-400 mb-5 max-w-prose leading-relaxed">
+    <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+      <p className="text-base font-semibold text-ds-text mb-1">Input preferences</p>
+      <p className="text-xs text-ds-text-muted mb-5 max-w-prose leading-relaxed">
         Per-machine knobs for mouse + scroll forwarding to the peer.
         Persists between launches; takes effect immediately.
       </p>
 
       <div className="mb-5">
         <div className="flex items-baseline justify-between mb-1.5">
-          <label className="text-sm font-medium text-slate-200">Mouse sensitivity</label>
-          <span className="text-xs font-mono text-slate-400">
+          <label className="text-sm font-medium text-ds-text">Mouse sensitivity</label>
+          <span className="text-xs font-mono text-ds-text-muted">
             {settings.mouse_sensitivity.toFixed(2)}×
           </span>
         </div>
@@ -168,12 +168,12 @@ function InputPrefsCard() {
           }
           className="w-full accent-emerald-500"
         />
-        <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-0.5">
+        <div className="flex justify-between text-[10px] text-ds-text-muted font-mono mt-0.5">
           <span>0.25×</span>
           <span>1.00×</span>
           <span>3.00×</span>
         </div>
-        <p className="text-[11px] text-slate-400 mt-2 max-w-prose leading-relaxed">
+        <p className="text-[11px] text-ds-text-muted mt-2 max-w-prose leading-relaxed">
           Multiplier applied to outgoing mouse deltas. Dial down if
           driving a low-DPI peer from a high-DPI laptop feels too
           fast; dial up for the opposite.
@@ -221,16 +221,16 @@ function Toggle({
   return (
     <button
       onClick={() => onChange(!on)}
-      className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-3 hover:bg-white/[0.06] transition-colors text-left"
+      className="flex items-center justify-between rounded-lg border border-ds-border bg-ds-hover px-3 py-3 hover:bg-ds-hover transition-colors text-left"
     >
       <div className="min-w-0 mr-3">
-        <p className="text-sm font-medium text-slate-200">{label}</p>
-        <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">{hint}</p>
+        <p className="text-sm font-medium text-ds-text">{label}</p>
+        <p className="text-[11px] text-ds-text-muted mt-0.5 leading-relaxed">{hint}</p>
       </div>
       <span
         className={
           "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
-          (on ? "bg-emerald-500" : "bg-white/[0.12]")
+          (on ? "bg-emerald-500" : "bg-ds-hover")
         }
       >
         <span
@@ -247,8 +247,8 @@ function Toggle({
 function Row({ k, v, alert }: { k: string; v: string; alert?: boolean }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-widest text-slate-400 mb-1">{k}</dt>
-      <dd className={"text-sm font-medium " + (alert ? "text-red-400" : "text-slate-200")}>
+      <dt className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-1">{k}</dt>
+      <dd className={"text-sm font-medium " + (alert ? "text-red-400" : "text-ds-text")}>
         {v}
       </dd>
     </div>
@@ -266,14 +266,14 @@ function FileEntry({
 }) {
   return (
     <li>
-      <p className="font-medium text-slate-300 mb-0.5">{label}</p>
+      <p className="font-medium text-ds-text mb-0.5">{label}</p>
       <p>
-        <span className="text-slate-400">win: </span>
-        <code className="font-mono text-slate-400">{winPath}</code>
+        <span className="text-ds-text-muted">win: </span>
+        <code className="font-mono text-ds-text-muted">{winPath}</code>
       </p>
       <p>
-        <span className="text-slate-400">linux: </span>
-        <code className="font-mono text-slate-400">{linuxPath}</code>
+        <span className="text-ds-text-muted">linux: </span>
+        <code className="font-mono text-ds-text-muted">{linuxPath}</code>
       </p>
     </li>
   );

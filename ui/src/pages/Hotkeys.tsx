@@ -8,12 +8,12 @@
 export default function HotkeysPage() {
   return (
     <section>
-      <p className="text-sm text-slate-400 mb-6 max-w-prose leading-relaxed">
+      <p className="text-sm text-ds-text-muted mb-6 max-w-prose leading-relaxed">
         Built-in hotkeys are hardcoded into the input layer for now —
         the editor that lets you rebind them lands with M5 Slice 5.
       </p>
 
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface overflow-hidden divide-y divide-white/[0.05]">
+      <div className="rounded-xl border border-ds-border bg-ds-surface overflow-hidden divide-y divide-ds-border">
         <Row
           combo={["Ctrl", "Alt", "R"]}
           name="Toggle Remote"
@@ -46,14 +46,14 @@ function Row({
   return (
     <div className="flex items-center justify-between gap-6 px-5 py-4">
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-slate-200">{name}</p>
-        <p className="text-xs text-slate-400 max-w-md mt-0.5 leading-relaxed">{desc}</p>
+        <p className="text-sm font-medium text-ds-text">{name}</p>
+        <p className="text-xs text-ds-text-muted max-w-md mt-0.5 leading-relaxed">{desc}</p>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
         {combo.map((k, i) => (
           <kbd
             key={i}
-            className="inline-flex items-center justify-center min-w-[28px] h-7 px-2 rounded-lg border border-white/[0.12] bg-white/[0.06] text-[11px] font-mono text-slate-300"
+            className="inline-flex items-center justify-center min-w-[28px] h-7 px-2 rounded-lg border border-ds-border bg-ds-hover text-[11px] font-mono text-ds-text"
           >
             {k}
           </kbd>

@@ -48,7 +48,7 @@ export default function LayoutPage() {
 
   if (!layout) {
     return (
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-ds-text-muted">
         {err ? `${err}` : t("layout_loading")}
       </p>
     );
@@ -56,7 +56,7 @@ export default function LayoutPage() {
 
   return (
     <section>
-      <p className="text-sm text-slate-400 mb-6 max-w-prose leading-relaxed">
+      <p className="text-sm text-ds-text-muted mb-6 max-w-prose leading-relaxed">
         {t("layout_intro")}
       </p>
 
@@ -69,11 +69,11 @@ export default function LayoutPage() {
 
       <div className="mt-6 flex items-center justify-between text-sm">
         <p>
-          <span className="text-slate-400">{t("layout_summary_prefix")} </span>
-          <span className="font-semibold text-slate-200">{layout.peer_side}</span>
-          <span className="text-slate-400"> {t("layout_summary_suffix")}</span>
+          <span className="text-ds-text-muted">{t("layout_summary_prefix")} </span>
+          <span className="font-semibold text-ds-text">{layout.peer_side}</span>
+          <span className="text-ds-text-muted"> {t("layout_summary_suffix")}</span>
         </p>
-        {pending ? <span className="text-xs text-slate-400">{t("layout_saving")}</span> : null}
+        {pending ? <span className="text-xs text-ds-text-muted">{t("layout_saving")}</span> : null}
       </div>
       {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
     </section>
@@ -188,7 +188,7 @@ function DragCanvas({
   return (
     <div
       ref={canvasRef}
-      className="relative mx-auto rounded-xl border border-white/[0.08] bg-ds-surface select-none"
+      className="relative mx-auto rounded-xl border border-ds-border bg-ds-surface select-none"
       style={{ width: CANVAS_W, height: CANVAS_H }}
     >
       <EdgeHint visible={hover === "left"} side="left" box={localBox} />
@@ -266,17 +266,17 @@ function Tile({
         (accent
           ? "border-emerald-500/50 bg-emerald-500/10"
           : muted
-            ? "border-dashed border-white/[0.10] bg-white/[0.02] text-slate-500"
-            : "border-white/[0.15] bg-ds-elevated")
+            ? "border-dashed border-ds-border bg-ds-hover text-ds-text-muted"
+            : "border-ds-border bg-ds-elevated")
       }
       style={
         relative ? { width: w, height: h } : { left: x, top: y, width: w, height: h }
       }
     >
-      <p className={"text-sm font-medium " + (accent ? "text-emerald-300" : muted ? "text-slate-500" : "text-slate-200")}>
+      <p className={"text-sm font-medium " + (accent ? "text-emerald-300" : muted ? "text-ds-text-muted" : "text-ds-text")}>
         {label}
       </p>
-      <p className={"text-[11px] " + (accent ? "text-emerald-500" : "text-slate-400")}>
+      <p className={"text-[11px] " + (accent ? "text-emerald-500" : "text-ds-text-muted")}>
         {sub}
       </p>
     </div>

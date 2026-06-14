@@ -3,21 +3,26 @@ import { invoke } from "@tauri-apps/api/core";
 import HotkeysPage from "./Hotkeys";
 import AdvancedPage from "./Advanced";
 import { useT } from "../i18n";
+import { ThemeSwitcher } from "../theme";
 
 export default function SettingsPage() {
   const { t } = useT();
   return (
     <div className="flex flex-col gap-10">
       <section>
-        <h3 className="text-sm font-semibold text-slate-300 mb-3">{t("section_performance")}</h3>
+        <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_appearance")}</h3>
+        <ThemeSwitcher />
+      </section>
+      <section>
+        <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_performance")}</h3>
         <PerformanceSection />
       </section>
       <section>
-        <h3 className="text-sm font-semibold text-slate-300 mb-3">{t("section_hotkeys")}</h3>
+        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_hotkeys")}</h3>
         <HotkeysPage />
       </section>
       <section>
-        <h3 className="text-sm font-semibold text-slate-300 mb-3">{t("section_advanced")}</h3>
+        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_advanced")}</h3>
         <AdvancedPage />
       </section>
     </div>
@@ -85,9 +90,9 @@ function PerformanceSection() {
 
   if (!settings) {
     return (
-      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
-        <p className="text-base font-semibold text-slate-100 mb-3">Performance</p>
-        <p className="text-xs text-slate-400">
+      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
+        <p className="text-base font-semibold text-ds-text mb-3">Performance</p>
+        <p className="text-xs text-ds-text-muted">
           {err ? `failed to load: ${err}` : "loading…"}
         </p>
       </div>
@@ -95,10 +100,10 @@ function PerformanceSection() {
   }
 
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+    <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
       <div className="flex items-baseline justify-between mb-2">
-        <label className="text-sm font-medium text-slate-200">Mouse rate</label>
-        <span className="font-mono text-sm text-slate-400">{settings.mouse_rate_hz} Hz</span>
+        <label className="text-sm font-medium text-ds-text">Mouse rate</label>
+        <span className="font-mono text-sm text-ds-text-muted">{settings.mouse_rate_hz} Hz</span>
       </div>
       <input
         type="range" min={60} max={1000} step={5}
@@ -110,11 +115,11 @@ function PerformanceSection() {
       <datalist id="mouse-rate-ticks">
         <option value="125" /><option value="250" /><option value="500" /><option value="1000" />
       </datalist>
-      <p className="text-xs text-slate-400 mt-2">
+      <p className="text-xs text-ds-text-muted mt-2">
         Live: forwarding ~{liveFwd} Hz · injecting ~{liveInj} Hz
         {stats ? ` · set ${stats.set_hz} Hz` : ""}
       </p>
-      <p className="text-[11px] text-slate-400 mt-1">
+      <p className="text-[11px] text-ds-text-muted mt-1">
         Higher rates feel smoother but use more network/CPU. If the live rate stays below your setting,
         your hardware or the peer's inject path is the limit. (Some anti-cheats ignore injected motion in games.)
       </p>

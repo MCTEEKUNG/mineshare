@@ -54,7 +54,7 @@ export default function DevicesPage() {
 
   if (!devs) {
     return (
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-ds-text-muted">
         {err ? `failed: ${err}` : "loading devices…"}
       </p>
     );
@@ -63,7 +63,7 @@ export default function DevicesPage() {
   return (
     <section className="grid gap-6">
       <DeviceList
-        icon={<IconSpeaker className="size-5 text-slate-400" />}
+        icon={<IconSpeaker className="size-5 text-ds-text-muted" />}
         title="Audio output"
         subtitle="Where peer sysout (and peer mic on Win, when VB-CABLE is installed) renders."
         devices={devs.outputs}
@@ -73,7 +73,7 @@ export default function DevicesPage() {
         onRefresh={() => refresh(true)}
       />
       <DeviceList
-        icon={<IconMic className="size-5 text-slate-400" />}
+        icon={<IconMic className="size-5 text-ds-text-muted" />}
         title="Audio input"
         subtitle="Where the bridge captures your mic. Pick a non-default device for headset / USB mic / OBS virtual cam, etc."
         devices={devs.inputs}
@@ -108,20 +108,20 @@ function DeviceList({
 }) {
   const followingDefault = selected === null;
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-ds-surface overflow-hidden">
-      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-white/[0.06]">
+    <div className="rounded-xl border border-ds-border bg-ds-surface overflow-hidden">
+      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-ds-border">
         <div className="flex items-center gap-3 min-w-0">
           <span className="shrink-0">{icon}</span>
           <div className="min-w-0">
-            <p className="text-base font-semibold text-slate-100 leading-tight">{title}</p>
-            <p className="text-xs text-slate-400 mt-0.5 max-w-md truncate">{subtitle}</p>
+            <p className="text-base font-semibold text-ds-text leading-tight">{title}</p>
+            <p className="text-xs text-ds-text-muted mt-0.5 max-w-md truncate">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {busy ? <span className="text-[11px] text-slate-400">switching…</span> : null}
+          {busy ? <span className="text-[11px] text-ds-text-muted">switching…</span> : null}
           <button
             onClick={onRefresh}
-            className="text-[11px] text-slate-400 hover:text-slate-200 px-2 py-1 rounded-lg hover:bg-white/[0.06] transition-colors"
+            className="text-[11px] text-ds-text-muted hover:text-ds-text px-2 py-1 rounded-lg hover:bg-ds-hover transition-colors"
             title="Re-scan devices"
           >
             ↻ refresh
@@ -129,7 +129,7 @@ function DeviceList({
         </div>
       </div>
 
-      <ul className="divide-y divide-white/[0.04]">
+      <ul className="divide-y divide-ds-border">
         <DeviceRow
           name="Follow system default"
           hint="Whatever the OS picks; the bridge re-targets if it changes."
@@ -146,7 +146,7 @@ function DeviceList({
           />
         ))}
         {devices.length === 0 ? (
-          <li className="px-5 py-8 text-center text-sm text-slate-400">
+          <li className="px-5 py-8 text-center text-sm text-ds-text-muted">
             none reported by cpal
           </li>
         ) : null}
@@ -175,24 +175,24 @@ function DeviceRow({
           "w-full flex items-center justify-between gap-4 px-5 py-3 transition-colors text-left " +
           (active
             ? "bg-emerald-500/[0.08]"
-            : "hover:bg-white/[0.04]")
+            : "hover:bg-ds-hover")
         }
       >
         <div className="min-w-0 flex-1">
           <p className={
             "text-sm truncate " +
-            (active ? "font-semibold text-emerald-300" : "font-medium text-slate-300")
+            (active ? "font-semibold text-emerald-300" : "font-medium text-ds-text")
           }>
             {name}
           </p>
-          {hint ? <p className="text-[11px] text-slate-400 mt-0.5">{hint}</p> : null}
+          {hint ? <p className="text-[11px] text-ds-text-muted mt-0.5">{hint}</p> : null}
         </div>
         <span
           className={
             "shrink-0 inline-flex items-center justify-center size-5 rounded-full transition-colors " +
             (active
               ? "bg-emerald-500 text-white"
-              : "border border-white/[0.12]")
+              : "border border-ds-border")
           }
           aria-hidden
         >
