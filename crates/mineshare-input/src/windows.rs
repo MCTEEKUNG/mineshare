@@ -430,13 +430,11 @@ enum TakeControlAction {
     Anchor(i32, i32),
 }
 
-/// Skip the edge warp (anchor the cursor in place) when a cursor-locked game
-/// owns the cursor, OR whenever the peer is driving us. The warp only ever
-/// served the peer's exit hysteresis; it actively flings a mouse-look camera,
-/// and `peer_in_remote` fires reliably even when an anti-cheat (Roblox
-/// Hyperion) blocks the foreground-game detection.
-fn should_anchor_cursor(game_foreground: bool, peer_in_remote: bool) -> bool {
-    game_foreground || peer_in_remote
+/// Skip the warp only when a cursor-locked game owns the cursor. The
+/// game-drive path no longer relies on this (it never warps), so do NOT
+/// anchor for every peer-driven session — desktop crossing needs the warp.
+fn should_anchor_cursor(game_foreground: bool, _peer_in_remote: bool) -> bool {
+    game_foreground
 }
 
 /// Pure decision: where the local cursor should go when the peer takes
@@ -688,7 +686,8 @@ fn game_detect_thread() {
         });
         super::set_anticheat_warning(anticheat_match.clone());
 
-        let should_lock = cursor_hidden || cursor_clipped || anticheat_match.is_some();
+        let should_lock = (cursor_hidden || cursor_clipped || anticheat_match.is_some())
+            && super::game_drive() == super::GameDrive::Off;
         // Publish for `on_peer_take_control`: when a cursor-locked game owns
         // the cursor we must NOT warp it to the edge (camera fling).
         GAME_FOREGROUND.store(should_lock, Ordering::Relaxed);
@@ -971,6 +970,7 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 // during fullscreen play don't yank focus to the
                 // peer. Ctrl+Alt+R still works as a manual override.
                 let crossed_edge = !super::is_input_locked()
+                    && super::game_drive() == super::GameDrive::Off
                     && last_x != i32::MIN
                     && match super::peer_side() {
                         super::PeerSide::Right => last_x < right && x >= right,
@@ -1449,13 +1449,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anchor_cursor_when_driven_or_game() {
-        // Skip the edge warp whenever a cursor-locked game owns the cursor,
-        // OR whenever the peer is driving us (reliable signal even when an
-        // anti-cheat blocks game detection). Only a plain desktop crossing
-        // (neither) still warps.
+    fn anchor_cursor_only_when_game_foreground() {
+        // Skip the edge warp only when a cursor-locked game owns the cursor.
+        // The game-drive path no longer relies on this, so a peer-driven
+        // session that is NOT a foreground game still warps (desktop crossing
+        // needs the warp for its exit hysteresis).
         assert!(should_anchor_cursor(true, false)); // game foreground
-        assert!(should_anchor_cursor(false, true)); // peer driving us
+        assert!(!should_anchor_cursor(false, true)); // peer driving, not game → warp
         assert!(should_anchor_cursor(true, true));
         assert!(!should_anchor_cursor(false, false)); // desktop crossing → warp
     }

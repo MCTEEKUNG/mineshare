@@ -777,11 +777,12 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             ),
         };
         if let Some(over) = overshoot {
-            // Game-mode lock: pretend the press never happened.
-            // We still update CURSOR_X/Y above so the estimate
-            // self-syncs at the clamp; we just don't trip the
-            // FSM into Remote.
-            if super::is_input_locked() {
+            // Game-mode lock OR Game Drive: pretend the press never
+            // happened. We still update CURSOR_X/Y above so the estimate
+            // self-syncs at the clamp; we just don't trip the FSM into
+            // Remote. While Game Driving, accidental edge motion must
+            // never cross — the peer is being driven continuously.
+            if super::is_input_locked() || super::game_drive() != super::GameDrive::Off {
                 LEFT_PRESSURE.store(0, Ordering::Relaxed);
                 return;
             }
