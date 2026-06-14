@@ -142,6 +142,12 @@ pub enum RemoteEvent {
     /// while the peer holds Remote). Translates to
     /// `ControlMsg::ForceRelease`.
     RequestPeerExit,
+    /// User toggled Game Drive ON locally → ask the peer to start receiving.
+    /// Translates to `ControlMsg::GameDrive { active: true }`.
+    GameDriveStart,
+    /// User toggled Game Drive OFF → ask the peer to stop receiving.
+    /// Translates to `ControlMsg::GameDrive { active: false }`.
+    GameDriveStop,
 }
 
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
@@ -1120,6 +1126,14 @@ mod tests {
         assert!(is_game_receiving());
 
         set_game_drive(GameDrive::Off); // reset for other tests
+    }
+
+    #[test]
+    fn game_drive_remote_events_exist() {
+        // Compile-time proof the toggle signal variants exist and are distinct.
+        let a = RemoteEvent::GameDriveStart;
+        let b = RemoteEvent::GameDriveStop;
+        assert_ne!(format!("{a:?}"), format!("{b:?}"));
     }
 
     #[test]
