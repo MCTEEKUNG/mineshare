@@ -51,6 +51,8 @@ pub struct StatusSnapshot {
     /// auto-handover are paused; only the Ctrl+Alt+R hotkey can
     /// move between machines.
     pub input_locked: bool,
+    /// "off" | "driving" | "receiving" — Game Drive state for the GUI.
+    pub game_drive: &'static str,
     /// Set when the foreground process matches the anti-cheat-
     /// protected game DB (BattlEye / EAC / Vanguard / RICOCHET /
     /// Hyperion). The GUI surfaces this as a red banner so the
@@ -96,6 +98,11 @@ pub fn snapshot() -> StatusSnapshot {
         local_in_remote: mineshare_input::local_in_remote(),
         peer_in_remote: mineshare_input::peer_in_remote(),
         input_locked: mineshare_input::is_input_locked(),
+        game_drive: match mineshare_input::game_drive() {
+            mineshare_input::GameDrive::Driving => "driving",
+            mineshare_input::GameDrive::Receiving => "receiving",
+            mineshare_input::GameDrive::Off => "off",
+        },
         anticheat_warning: mineshare_input::anticheat_warning(),
         keys_forwarded: mineshare_input::keys_forwarded(),
         keys_injected: mineshare_input::keys_injected(),
