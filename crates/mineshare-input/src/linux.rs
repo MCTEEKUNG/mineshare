@@ -93,6 +93,22 @@ const MAX_DELTA_PX: i32 = 30;
 const ENTER_PRESSURE_HORIZ_PX: i32 = 200;
 const ENTER_PRESSURE_VERT_PX: i32 = 110;
 
+/// After handing control back to LOCAL, suppress a fresh edge-press
+/// re-entry for this long. Right after an exit the cursor estimate
+/// sits near the entry edge, so the follow-through of the very flick
+/// that triggered the exit would re-accumulate pressure and re-cross
+/// within ~200 ms — the user sees the cursor "bounce" between machines
+/// and can never settle on LOCAL to type. This window absorbs that
+/// follow-through without blocking a deliberate re-cross.
+const ENTER_COOLDOWN_MS: u64 = 350;
+
+/// How far inside the boundary edge the cursor estimate is parked on
+/// exit_remote. The old value (40 px) sat almost on the entry edge, so
+/// even a small continued motion re-tripped the edge press. A larger
+/// margin means re-crossing takes an intentional push, not a twitch —
+/// while the estimate still self-syncs at the real screen edge.
+const RESTORE_MARGIN_PX: i32 = 120;
+
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -150,6 +166,8 @@ static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Timestamp (ms) of the last exit_remote — gates ENTER_COOLDOWN_MS.
+static LAST_EXIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
 
@@ -240,15 +258,17 @@ fn exit_remote() {
     // configured layout.
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
+    let m = RESTORE_MARGIN_PX;
     let (rx, ry) = match super::peer_side() {
-        super::PeerSide::Left => (40, CURSOR_Y.load(Ordering::Relaxed)),
-        super::PeerSide::Right => ((w - 41).max(0), CURSOR_Y.load(Ordering::Relaxed)),
-        super::PeerSide::Top => (CURSOR_X.load(Ordering::Relaxed), 40),
-        super::PeerSide::Bottom => (CURSOR_X.load(Ordering::Relaxed), (h - 41).max(0)),
+        super::PeerSide::Left => (m, CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Right => ((w - 1 - m).max(0), CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Top => (CURSOR_X.load(Ordering::Relaxed), m),
+        super::PeerSide::Bottom => (CURSOR_X.load(Ordering::Relaxed), (h - 1 - m).max(0)),
     };
     CURSOR_X.store(rx, Ordering::Relaxed);
     CURSOR_Y.store(ry, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
+    LAST_EXIT_MS.store(super::now_ms(), Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     info!(restore = ?(rx, ry), "cursor → local (linux)");
     super::fire_remote_event(super::RemoteEvent::Exited);
@@ -889,14 +909,24 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             };
             let pressure = LEFT_PRESSURE.fetch_add(over, Ordering::Relaxed) + over;
             if pressure >= threshold {
-                info!(
-                    pressure,
-                    threshold,
-                    side = ?super::peer_side(),
-                    "edge press — entering remote (linux)"
-                );
-                LEFT_PRESSURE.store(0, Ordering::Relaxed);
-                enter_remote();
+                let since_exit =
+                    super::now_ms().saturating_sub(LAST_EXIT_MS.load(Ordering::Relaxed));
+                if since_exit < ENTER_COOLDOWN_MS {
+                    // Within the post-exit cooldown — this is the
+                    // follow-through of the flick that just handed
+                    // control back, not a fresh intent to cross. Drop
+                    // the pressure and stay LOCAL.
+                    LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                } else {
+                    info!(
+                        pressure,
+                        threshold,
+                        side = ?super::peer_side(),
+                        "edge press — entering remote (linux)"
+                    );
+                    LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                    enter_remote();
+                }
             }
         } else if cancel {
             LEFT_PRESSURE.store(0, Ordering::Relaxed);
