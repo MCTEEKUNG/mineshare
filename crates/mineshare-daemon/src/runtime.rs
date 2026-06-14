@@ -1381,6 +1381,7 @@ async fn run_peer_session(
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::set_peer_in_remote(false);
+    mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
     mineshare_input::clear_remote_event_sender();
     crate::layout::clear_propagate_sender();
     crate::status::clear_peer_connected();
