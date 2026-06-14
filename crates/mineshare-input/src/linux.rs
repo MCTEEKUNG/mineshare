@@ -33,6 +33,7 @@
 //!     the encrypted control channel.
 
 use std::collections::HashSet;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
@@ -44,7 +45,21 @@ use evdev::{
     AttributeSet, Device, EventSummary, EventType, KeyCode as EvKey, PropType, RelativeAxisCode,
     SynchronizationCode,
 };
+use nix::poll::{PollFd, PollFlags, poll};
 use tracing::{debug, info, warn};
+
+/// Poll wake-up cadence (ms) for each evdev pump thread. A blocked
+/// `fetch_events()` only re-evaluates the grab decision when an event
+/// arrives — so an *idle* device thread would stay ungrabbed across a
+/// `CURSOR_MODE` flip (the flip is driven by the *mouse* thread). That
+/// races the user's first keystroke after a cursor cross: the DOWN is
+/// read while still ungrabbed (leaks to the local OS) and the late
+/// grab then swallows the matching UP, leaving the local OS with a
+/// stuck, auto-repeating key. Polling on a short timeout re-applies the
+/// grab within a few ms — far below human reaction time — in both the
+/// enter- and exit-REMOTE directions. Real events still wake the poll
+/// immediately, so input latency is unaffected.
+const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
@@ -502,6 +517,19 @@ fn pump_device(
     let mut accum_dy: i32 = 0;
     let mut grabbed = false;
 
+    // Read non-blocking so the loop can wake on a timer (see
+    // GRAB_POLL_MS) and re-apply the grab decision even while idle.
+    // If this fails we fall back to blocking reads — the grab is then
+    // late on idle threads (the original bug) but input still flows.
+    let nonblocking = match device.set_nonblocking(true) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e,
+                "evdev set_nonblocking failed; grab may lag on idle device");
+            false
+        }
+    };
+
     loop {
         // Two grab regimes:
         //   * MODE_REMOTE (we drive the peer): grab everything —
@@ -532,7 +560,32 @@ fn pump_device(
             }
         }
 
+        // Wait for readable data with a short timeout so the grab
+        // decision above is re-evaluated on the GRAB_POLL_MS cadence
+        // even when this device is idle. A real event wakes the poll
+        // immediately (no added latency); a timeout just loops back to
+        // re-apply the grab. Scoped so the immutable `as_fd` borrow is
+        // released before the mutable `fetch_events` below.
+        if nonblocking {
+            let fd = device.as_fd();
+            let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
+            match poll(&mut fds, GRAB_POLL_MS) {
+                Ok(0) => continue, // timeout — re-evaluate grab
+                Ok(_) => {}        // readable — drain below
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "evdev poll failed");
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            }
+        }
+
         let events = match device.fetch_events() {
+            // Non-blocking races can yield WouldBlock even right after a
+            // readable poll (events consumed by a coalesced read) — just
+            // loop; don't log or back off.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Ok(it) => it,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "evdev fetch_events failed");

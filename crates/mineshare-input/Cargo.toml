@@ -16,7 +16,7 @@ parking_lot = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.30", features = ["fs", "poll"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enigo = "0.6"
