@@ -46,9 +46,9 @@ use crate::{
 /// absorb scheduling jitter on the audio callback, small enough that
 /// any drop is recent (low latency on overrun).
 const CAPTURE_RING_CAP: usize = 96_000 / 50 * 2 * 5;
-/// Opus bitrate target — 96 kbps stereo is transparent for music and
+/// Opus bitrate target — 128 kbps stereo is transparent for music and
 /// cheap on the wire.
-const OPUS_BITRATE_BPS: i32 = 96_000;
+const OPUS_BITRATE_BPS: i32 = 128_000;
 
 pub struct WasapiLoopback {
     started: bool,
@@ -166,7 +166,7 @@ fn drive_encode_loop(
     in_rate: u32,
     in_channels: u16,
 ) -> Result<()> {
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
     // Number of input *frames* (one frame = one sample per channel)
     // we need to fill one 20 ms output frame after resampling. Round
     // up so we never under-feed the resampler.
