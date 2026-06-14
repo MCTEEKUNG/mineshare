@@ -410,24 +410,74 @@ pub fn force_exit_remote() {
 /// real cursor position — without this the peer's exit threshold
 /// fires after a tiny motion in the wrong direction even though the
 /// cursor is mid-screen.
-pub fn on_peer_take_control() {
-    let (left, top, right, bottom) = bounds();
+/// Set every poll by `game_detect_thread`: true when a fullscreen /
+/// cursor-confine / anti-cheat title currently owns the cursor.
+static GAME_FOREGROUND: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn game_foreground() -> bool {
+    GAME_FOREGROUND.load(Ordering::Relaxed)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TakeControlAction {
+    /// Warp the cursor to this screen point (normal desktop edge crossing,
+    /// so the peer's `virt_x` model matches the real cursor position).
+    Warp(i32, i32),
+    /// A cursor-locked game owns the cursor — leave it where it is and only
+    /// anchor `LAST_X/Y` here. Warping would start a `SetCursorPos`
+    /// tug-of-war with the game's per-frame recenter, flinging a mouse-look
+    /// camera (Roblox LockCenter). Injection stays pure-relative.
+    Anchor(i32, i32),
+}
+
+/// Pure decision: where the local cursor should go when the peer takes
+/// control. Split out so the warp-vs-anchor choice is unit-testable
+/// without OS calls.
+fn take_control_action(
+    game_foreground: bool,
+    side: super::PeerSide,
+    bounds: (i32, i32, i32, i32),
+    cur: (i32, i32),
+) -> TakeControlAction {
+    if game_foreground {
+        return TakeControlAction::Anchor(cur.0, cur.1);
+    }
+    let (left, top, right, bottom) = bounds;
     let mid_x = (left + right) / 2;
     let mid_y = (top + bottom) / 2;
-    let (x, y) = match super::peer_side() {
+    let (x, y) = match side {
         super::PeerSide::Right => (right, mid_y),
         super::PeerSide::Left => (left, mid_y),
         super::PeerSide::Top => (mid_x, top),
         super::PeerSide::Bottom => (mid_x, bottom),
     };
+    TakeControlAction::Warp(x, y)
+}
+
+pub fn on_peer_take_control() {
+    let mut cur = POINT::default();
     unsafe {
-        let _ = SetCursorPos(x, y);
+        let _ = GetCursorPos(&mut cur);
     }
-    // Update the hook's "last seen" so HW-motion auto-release doesn't
-    // mis-fire on the first injected motion arriving from the peer.
-    LAST_X.store(x, Ordering::Relaxed);
-    LAST_Y.store(y, Ordering::Relaxed);
-    info!(boundary = ?(x, y), side = ?super::peer_side(), "warped cursor to peer-facing edge");
+    match take_control_action(game_foreground(), super::peer_side(), bounds(), (cur.x, cur.y)) {
+        TakeControlAction::Warp(x, y) => {
+            unsafe {
+                let _ = SetCursorPos(x, y);
+            }
+            // Update the hook's "last seen" so HW-motion auto-release doesn't
+            // mis-fire on the first injected motion arriving from the peer.
+            LAST_X.store(x, Ordering::Relaxed);
+            LAST_Y.store(y, Ordering::Relaxed);
+            info!(boundary = ?(x, y), side = ?super::peer_side(), "warped cursor to peer-facing edge");
+        }
+        TakeControlAction::Anchor(x, y) => {
+            // Cursor-locked / anti-cheat game in foreground: skip the edge
+            // warp so we don't fight the game's recenter (camera fling).
+            LAST_X.store(x, Ordering::Relaxed);
+            LAST_Y.store(y, Ordering::Relaxed);
+            info!(at = ?(x, y), "peer take-control: cursor-locked game foreground — skipping edge warp");
+        }
+    }
 }
 
 pub struct HookCapture {
@@ -629,6 +679,9 @@ fn game_detect_thread() {
         super::set_anticheat_warning(anticheat_match.clone());
 
         let should_lock = cursor_hidden || cursor_clipped || anticheat_match.is_some();
+        // Publish for `on_peer_take_control`: when a cursor-locked game owns
+        // the cursor we must NOT warp it to the edge (camera fling).
+        GAME_FOREGROUND.store(should_lock, Ordering::Relaxed);
         let was_engaged = AUTO_ENGAGED.load(Ordering::Acquire);
         if should_lock != was_engaged {
             AUTO_ENGAGED.store(should_lock, Ordering::Release);
@@ -1384,6 +1437,24 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn take_control_skips_warp_when_game_foreground() {
+        let bounds = (0, 0, 2880, 1800);
+        // Normal desktop crossing from the right → warp to the right edge,
+        // mid-height, so the peer's virt_x model matches reality.
+        assert_eq!(
+            take_control_action(false, crate::PeerSide::Right, bounds, (700, 700)),
+            TakeControlAction::Warp(2880, 900),
+        );
+        // A cursor-locked / anti-cheat game owns the cursor (Roblox LockCenter):
+        // warping to the edge starts a tug-of-war with the game's per-frame
+        // recenter that flings the camera. Leave the cursor where it is.
+        assert_eq!(
+            take_control_action(true, crate::PeerSide::Right, bounds, (700, 700)),
+            TakeControlAction::Anchor(700, 700),
+        );
+    }
 
     #[test]
     fn snap_never_when_non_negative() {
