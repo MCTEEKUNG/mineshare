@@ -33,6 +33,7 @@
 //!     the encrypted control channel.
 
 use std::collections::HashSet;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
@@ -44,7 +45,21 @@ use evdev::{
     AttributeSet, Device, EventSummary, EventType, KeyCode as EvKey, PropType, RelativeAxisCode,
     SynchronizationCode,
 };
+use nix::poll::{PollFd, PollFlags, poll};
 use tracing::{debug, info, warn};
+
+/// Poll wake-up cadence (ms) for each evdev pump thread. A blocked
+/// `fetch_events()` only re-evaluates the grab decision when an event
+/// arrives — so an *idle* device thread would stay ungrabbed across a
+/// `CURSOR_MODE` flip (the flip is driven by the *mouse* thread). That
+/// races the user's first keystroke after a cursor cross: the DOWN is
+/// read while still ungrabbed (leaks to the local OS) and the late
+/// grab then swallows the matching UP, leaving the local OS with a
+/// stuck, auto-repeating key. Polling on a short timeout re-applies the
+/// grab within a few ms — far below human reaction time — in both the
+/// enter- and exit-REMOTE directions. Real events still wake the poll
+/// immediately, so input latency is unaffected.
+const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
@@ -77,6 +92,22 @@ const MAX_DELTA_PX: i32 = 30;
 /// top/bottom edges. Scale the trigger by the actual extent.
 const ENTER_PRESSURE_HORIZ_PX: i32 = 200;
 const ENTER_PRESSURE_VERT_PX: i32 = 110;
+
+/// After handing control back to LOCAL, suppress a fresh edge-press
+/// re-entry for this long. Right after an exit the cursor estimate
+/// sits near the entry edge, so the follow-through of the very flick
+/// that triggered the exit would re-accumulate pressure and re-cross
+/// within ~200 ms — the user sees the cursor "bounce" between machines
+/// and can never settle on LOCAL to type. This window absorbs that
+/// follow-through without blocking a deliberate re-cross.
+const ENTER_COOLDOWN_MS: u64 = 350;
+
+/// How far inside the boundary edge the cursor estimate is parked on
+/// exit_remote. The old value (40 px) sat almost on the entry edge, so
+/// even a small continued motion re-tripped the edge press. A larger
+/// margin means re-crossing takes an intentional push, not a twitch —
+/// while the estimate still self-syncs at the real screen edge.
+const RESTORE_MARGIN_PX: i32 = 120;
 
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
@@ -122,20 +153,21 @@ static LEFT_PRESSURE: AtomicI32 = AtomicI32::new(0);
 // user perceives as **stutter** even on a 0 ms RTT link (the
 // jitter the user reported).
 //
-// We aggregate dx/dy here for `FLUSH_INTERVAL_MS` then forward a
-// single combined delta. Aligning the wire rate with the receiver's
-// display rate cuts UDP traffic ~8×, ~8× the SendInput calls, and
-// removes the visible stutter. 8 ms ≈ 125 Hz which matches Windows'
-// default cursor update rate.
+// We aggregate dx/dy here for the runtime flush window
+// (`super::target_flush_us()`, default 2 ms = 500 Hz) then forward a
+// single combined delta. The window is now driven by the user's
+// mouse-rate setting (60..=1000 Hz) instead of a fixed 8 ms / 125 Hz
+// constant — lifting the old floor that bottlenecked Linux→peer motion.
 //
 // Static atomics rather than per-thread state because multiple
 // pump threads (one per device) all feed a single peer cursor —
 // summing across devices is the correct combined motion.
 // ---------------------------------------------------------------------------
-const FLUSH_INTERVAL_MS: u64 = 8;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Timestamp (ms) of the last exit_remote — gates ENTER_COOLDOWN_MS.
+static LAST_EXIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
 
@@ -226,15 +258,17 @@ fn exit_remote() {
     // configured layout.
     let w = SCREEN_W.load(Ordering::Relaxed);
     let h = SCREEN_H.load(Ordering::Relaxed);
+    let m = RESTORE_MARGIN_PX;
     let (rx, ry) = match super::peer_side() {
-        super::PeerSide::Left => (40, CURSOR_Y.load(Ordering::Relaxed)),
-        super::PeerSide::Right => ((w - 41).max(0), CURSOR_Y.load(Ordering::Relaxed)),
-        super::PeerSide::Top => (CURSOR_X.load(Ordering::Relaxed), 40),
-        super::PeerSide::Bottom => (CURSOR_X.load(Ordering::Relaxed), (h - 41).max(0)),
+        super::PeerSide::Left => (m, CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Right => ((w - 1 - m).max(0), CURSOR_Y.load(Ordering::Relaxed)),
+        super::PeerSide::Top => (CURSOR_X.load(Ordering::Relaxed), m),
+        super::PeerSide::Bottom => (CURSOR_X.load(Ordering::Relaxed), (h - 1 - m).max(0)),
     };
     CURSOR_X.store(rx, Ordering::Relaxed);
     CURSOR_Y.store(ry, Ordering::Relaxed);
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
+    LAST_EXIT_MS.store(super::now_ms(), Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     info!(restore = ?(rx, ry), "cursor → local (linux)");
     super::fire_remote_event(super::RemoteEvent::Exited);
@@ -297,12 +331,12 @@ fn flush_pending<F: Fn(InputEvent) + ?Sized>(sink: &F) {
 }
 
 /// Spawn the periodic flush thread once. Wakes every
-/// `FLUSH_INTERVAL_MS` to deliver any pending motion that the pump
-/// thread couldn't dispatch (e.g. user moved 2 px then paused —
-/// without this the residual would sit in `PENDING_*` until the
+/// `super::target_flush_us()` microseconds to deliver any pending motion
+/// that the pump thread couldn't dispatch (e.g. user moved 2 px then
+/// paused — without this the residual would sit in `PENDING_*` until the
 /// next motion event, producing a perceptible "phantom step" when
-/// the user resumes). Cheap: ~125 wakeups/sec, only does atomic
-/// loads when nothing is pending.
+/// the user resumes). Cheap: a few hundred wakeups/sec at most, only
+/// does atomic loads when nothing is pending.
 fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>) {
     if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -311,13 +345,16 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(FLUSH_INTERVAL_MS));
-                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+                let flush_us = super::target_flush_us();
+                thread::sleep(Duration::from_micros(flush_us));
+                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                    && !super::is_game_driving()
+                {
                     continue;
                 }
                 let n = super::now_ms();
                 let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                if n.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+                if n.saturating_sub(last) * 1000 >= flush_us {
                     flush_pending(&*sink);
                 }
             }
@@ -500,6 +537,29 @@ fn pump_device(
     let mut accum_dy: i32 = 0;
     let mut grabbed = false;
 
+    // Read non-blocking so the loop can wake on a timer (see
+    // GRAB_POLL_MS) and re-apply the grab decision even while idle.
+    //
+    // Scoped to NON-pointer devices (keyboards) only: the stuck-key bug
+    // is specific to *idle* device threads, and a keyboard is idle
+    // exactly when the mouse crosses the edge. The mouse pump is never
+    // idle during its own cross — it's actively iterating on motion —
+    // so it already applies its grab in time. Leaving the pointer pump
+    // on plain blocking reads keeps the motion/SYN_REPORT accumulation
+    // that feeds the cursor-cross FSM byte-for-byte unchanged.
+    let nonblocking = if is_pointer {
+        false
+    } else {
+        match device.set_nonblocking(true) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e,
+                    "evdev set_nonblocking failed; grab may lag on idle keyboard");
+                false
+            }
+        }
+    };
+
     loop {
         // Two grab regimes:
         //   * MODE_REMOTE (we drive the peer): grab everything —
@@ -530,7 +590,32 @@ fn pump_device(
             }
         }
 
+        // Wait for readable data with a short timeout so the grab
+        // decision above is re-evaluated on the GRAB_POLL_MS cadence
+        // even when this device is idle. A real event wakes the poll
+        // immediately (no added latency); a timeout just loops back to
+        // re-apply the grab. Scoped so the immutable `as_fd` borrow is
+        // released before the mutable `fetch_events` below.
+        if nonblocking {
+            let fd = device.as_fd();
+            let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
+            match poll(&mut fds, GRAB_POLL_MS) {
+                Ok(0) => continue, // timeout — re-evaluate grab
+                Ok(_) => {}        // readable — drain below
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "evdev poll failed");
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            }
+        }
+
         let events = match device.fetch_events() {
+            // Non-blocking races can yield WouldBlock even right after a
+            // readable poll (events consumed by a coalesced read) — just
+            // loop; don't log or back off.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Ok(it) => it,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "evdev fetch_events failed");
@@ -555,7 +640,9 @@ fn pump_device(
                         super::bump_local_mouse_activity();
                     }
                     RelativeAxisCode::REL_WHEEL => {
-                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+                            || super::is_game_driving()
+                        {
                             // Stage 10: optional Y-axis flip.
                             let dy = if super::invert_scroll_y() {
                                 -(value as f32)
@@ -566,7 +653,9 @@ fn pump_device(
                         }
                     }
                     RelativeAxisCode::REL_HWHEEL => {
-                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+                            || super::is_game_driving()
+                        {
                             let dx = if super::invert_scroll_x() {
                                 -(value as f32)
                             } else {
@@ -677,7 +766,11 @@ fn pump_device(
                         // with a stuck-down button after a cursor
                         // cross-back happens between press and
                         // release.
-                        if super::route_mouse_button(btn, value != 0, cursor_in_remote) {
+                        if super::route_mouse_button(
+                            btn,
+                            value != 0,
+                            cursor_in_remote || super::is_game_driving(),
+                        ) {
                             sink(InputEvent::MouseButton {
                                 btn,
                                 down: value != 0,
@@ -710,6 +803,29 @@ fn pump_device(
 /// triggers `enter_remote`, or forwards the delta to the peer and tracks
 /// `VIRT_X` for the right-edge exit.
 fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
+    // Game Drive: forward raw relative motion continuously to the peer
+    // without entering the cursor-crossing state machine. No edge FSM,
+    // no virt_x / exit bookkeeping (those stay REMOTE-only). Mirrors the
+    // Windows raw-input path, which forwards via the same accumulator.
+    if super::is_game_driving() {
+        let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+        let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+        let scaled_dx = super::scale_delta(dx, &mut rx);
+        let scaled_dy = super::scale_delta(dy, &mut ry);
+        SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+        SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+        let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+        let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+        PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
+        PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        let flush_us = super::target_flush_us();
+        let now_ms = super::now_ms();
+        let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) * 1000 >= flush_us {
+            flush_pending(sink);
+        }
+        return;
+    }
     let mode = CURSOR_MODE.load(Ordering::Acquire);
     if mode == MODE_LOCAL {
         // When the peer is currently driving (peer_in_remote) we *do*
@@ -777,11 +893,12 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             ),
         };
         if let Some(over) = overshoot {
-            // Game-mode lock: pretend the press never happened.
-            // We still update CURSOR_X/Y above so the estimate
-            // self-syncs at the clamp; we just don't trip the
-            // FSM into Remote.
-            if super::is_input_locked() {
+            // Game-mode lock OR Game Drive: pretend the press never
+            // happened. We still update CURSOR_X/Y above so the estimate
+            // self-syncs at the clamp; we just don't trip the FSM into
+            // Remote. While Game Driving, accidental edge motion must
+            // never cross — the peer is being driven continuously.
+            if super::is_input_locked() || super::game_drive() != super::GameDrive::Off {
                 LEFT_PRESSURE.store(0, Ordering::Relaxed);
                 return;
             }
@@ -792,14 +909,24 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             };
             let pressure = LEFT_PRESSURE.fetch_add(over, Ordering::Relaxed) + over;
             if pressure >= threshold {
-                info!(
-                    pressure,
-                    threshold,
-                    side = ?super::peer_side(),
-                    "edge press — entering remote (linux)"
-                );
-                LEFT_PRESSURE.store(0, Ordering::Relaxed);
-                enter_remote();
+                let since_exit =
+                    super::now_ms().saturating_sub(LAST_EXIT_MS.load(Ordering::Relaxed));
+                if since_exit < ENTER_COOLDOWN_MS {
+                    // Within the post-exit cooldown — this is the
+                    // follow-through of the flick that just handed
+                    // control back, not a fresh intent to cross. Drop
+                    // the pressure and stay LOCAL.
+                    LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                } else {
+                    info!(
+                        pressure,
+                        threshold,
+                        side = ?super::peer_side(),
+                        "edge press — entering remote (linux)"
+                    );
+                    LEFT_PRESSURE.store(0, Ordering::Relaxed);
+                    enter_remote();
+                }
             }
         } else if cancel {
             LEFT_PRESSURE.store(0, Ordering::Relaxed);
@@ -813,7 +940,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // retreats toward -EXIT_BUFFER_PX as the user pulls back.
         // (This bookkeeping has to run on EVERY SYN_REPORT so the
         // exit-edge detection stays accurate, even though we only
-        // *forward* an aggregate every FLUSH_INTERVAL_MS below.)
+        // *forward* an aggregate every flush window below.)
         let depth_dx = match super::peer_side() {
             super::PeerSide::Left => -dx,
             super::PeerSide::Right => dx,
@@ -859,10 +986,12 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // the watchdog tick. Keeps the worst-case latency bounded
         // by the time between SYN_REPORTs (~1 ms) when the user is
         // actively moving — only when motion *stops* does the
-        // watchdog's 8 ms tick determine the final-fragment delay.
+        // watchdog's runtime-interval tick determine the
+        // final-fragment delay.
+        let flush_us = super::target_flush_us();
         let now_ms = super::now_ms();
         let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+        if now_ms.saturating_sub(last) * 1000 >= flush_us {
             flush_pending(sink);
         }
     }
@@ -1004,6 +1133,7 @@ impl InputInject for UinputInject {
         }
         if !events.is_empty() {
             self.emit_mouse(&events)?;
+            super::bump_inj_events();
         }
         Ok(())
     }

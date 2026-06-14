@@ -25,7 +25,7 @@ use ringbuf::traits::{Consumer, Producer, Split};
 use tracing::{debug, info, warn};
 
 use crate::codec::OpusDecoder;
-use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE};
+use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind};
 
 /// Ring-buffer capacity in interleaved samples. ~10 frames @ 20 ms =
 /// 200 ms. Generous enough to absorb network jitter, tight enough not
@@ -81,6 +81,9 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
         }
     };
     let mut scratch = vec![0f32; FRAME_SAMPLES_INTERLEAVED];
+    // Last per-stream seq we accepted — drives gap detection (PLC/FEC)
+    // and duplicate/late-frame dropping. `None` until the first frame.
+    let mut last_seq: Option<u32> = None;
 
     // Lazy stream: starts as `None`, builds on the first iteration
     // (or after a version bump). Retry cadence is bounded so a
@@ -147,14 +150,52 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
         // periods, peer paused playback, etc.).
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
-                let n = match decoder.decode(&frame.opus, &mut scratch) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        warn!(error = %e, "opus decode failed — dropping frame");
+                // Drop duplicate / reordered-late frames: a seq at or
+                // below the last accepted one carries no new audio.
+                if let Some(l) = last_seq {
+                    if frame.seq <= l {
                         continue;
                     }
-                };
+                }
                 if let Some(ctx) = stream_ctx.as_mut() {
+                    // Conceal any gap between the last accepted seq and
+                    // this one. Cap the fill so a large gap (long stall,
+                    // seq reset) doesn't blast a burst of synthetic
+                    // frames into the ring.
+                    let lost = crate::codec::frames_lost(last_seq, frame.seq).min(5);
+                    if frame.stream == StreamKind::Mic && lost == 1 {
+                        // Single-frame voice gap: try to *recover* the
+                        // missing frame from the in-band FEC carried by
+                        // this (the next) packet. Fall back to PLC if the
+                        // packet has no usable LBRR data.
+                        match decoder.decode_fec(&frame.opus, &mut scratch) {
+                            Ok(n) => {
+                                ctx.producer.push_slice(&scratch[..n]);
+                            }
+                            Err(_) => {
+                                if let Ok(n) = decoder.decode_plc(&mut scratch) {
+                                    ctx.producer.push_slice(&scratch[..n]);
+                                }
+                            }
+                        }
+                    } else {
+                        // Multi-frame gap, or a non-voice stream where
+                        // LBRR yields little — synthesize each missing
+                        // frame with Opus PLC instead of hard silence.
+                        for _ in 0..lost {
+                            if let Ok(n) = decoder.decode_plc(&mut scratch) {
+                                ctx.producer.push_slice(&scratch[..n]);
+                            }
+                        }
+                    }
+
+                    let n = match decoder.decode(&frame.opus, &mut scratch) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            warn!(error = %e, "opus decode failed — dropping frame");
+                            continue;
+                        }
+                    };
                     let pushed = ctx.producer.push_slice(&scratch[..n]);
                     frames_since_watchdog += 1;
                     if pushed != n {
@@ -163,6 +204,7 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                             "cpal playback ring full — dropping samples"
                         );
                     }
+                    last_seq = Some(frame.seq);
 
                     // Device-loss watchdog: if frames have been arriving
                     // for a full interval but the callback tick hasn't

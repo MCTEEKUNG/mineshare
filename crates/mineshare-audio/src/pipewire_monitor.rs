@@ -31,7 +31,7 @@ use crate::{
     AudioCapture, AudioFrame, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
 };
 
-const OPUS_BITRATE_BPS: i32 = 96_000;
+const OPUS_BITRATE_BPS: i32 = 128_000;
 
 pub struct PipewireMonitor {
     started: bool,
@@ -133,7 +133,7 @@ fn drive_encode_loop<R: Read>(
     mut reader: R,
     sink: UnboundedSender<AudioFrame>,
 ) -> Result<()> {
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
     // 20 ms frame = 1920 interleaved f32 samples = 7680 bytes.
     let bytes_per_frame = FRAME_SAMPLES_INTERLEAVED * std::mem::size_of::<f32>();
     let mut byte_buf = vec![0u8; bytes_per_frame];

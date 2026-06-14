@@ -74,6 +74,19 @@ fn set_keyboard_target(target: mineshare_input::KeyboardTarget) {
     mineshare_input::set_keyboard_target(target);
 }
 
+/// GUI button equivalent of the Ctrl+Alt+G hotkey: toggles Game
+/// Drive on this machine (drive the peer's cursor-locked game with
+/// pure-relative mouse + keyboard, no cursor-crossing).
+#[tauri::command]
+fn toggle_game_drive() {
+    mineshare_input::toggle_game_drive();
+}
+
+#[tauri::command]
+fn get_mouse_rate_stats() -> mineshare_input::MouseRateStats {
+    mineshare_input::mouse_rate_stats()
+}
+
 #[tauri::command]
 fn get_latency() -> LatencySnapshot {
     mineshare_daemon::latency::snapshot()
@@ -246,6 +259,8 @@ pub fn run() {
             set_input_lock,
             cycle_keyboard_target,
             set_keyboard_target,
+            toggle_game_drive,
+            get_mouse_rate_stats,
             get_latency,
             send_file,
             get_transfers,

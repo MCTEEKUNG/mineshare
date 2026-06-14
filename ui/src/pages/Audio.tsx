@@ -25,12 +25,6 @@ type Direction = "send" | "play";
  * AtomicBool the runtime's pump tasks check on every frame —
  * the change takes effect on the next 20 ms frame, no daemon
  * restart needed.
- *
- * Below the toggles, a status card summarises whether the local
- * machine has a virtual mic device the peer's mic frames can
- * actually be routed *into* — PipeWire null-sink on Linux,
- * VB-CABLE on Windows. If unavailable on Win, link straight to
- * the VB-CABLE installer.
  */
 export default function AudioPage() {
   const [status, setStatus] = useState<AudioStatus | null>(null);
@@ -40,10 +34,7 @@ export default function AudioPage() {
   useEffect(() => {
     const tick = () =>
       invoke<AudioStatus>("get_audio_status")
-        .then((s) => {
-          setStatus(s);
-          setErr(null);
-        })
+        .then((s) => { setStatus(s); setErr(null); })
         .catch((e) => setErr(String(e)));
     tick();
     const id = setInterval(tick, 1500);
@@ -54,7 +45,6 @@ export default function AudioPage() {
     setErr(null);
     try {
       await invoke("set_audio_toggle", { stream, direction, enabled });
-      // Optimistically reflect locally; the next poll re-syncs.
       setStatus((s) =>
         s ? { ...s, [`${direction}_${stream}`]: enabled } as AudioStatus : s,
       );
@@ -65,7 +55,7 @@ export default function AudioPage() {
 
   if (!status) {
     return (
-      <p className="text-sm text-neutral-400">
+      <p className="text-sm text-ds-text-muted">
         {err ? `failed: ${err}` : "…"}
       </p>
     );
@@ -73,7 +63,7 @@ export default function AudioPage() {
 
   return (
     <section>
-      <p className="text-sm text-neutral-500 mb-6 max-w-prose">
+      <p className="text-sm text-ds-text-muted mb-6 max-w-prose leading-relaxed">
         {t("audio_intro")}
       </p>
 
@@ -96,7 +86,7 @@ export default function AudioPage() {
 
       <VirtualMicCard backend={status.virtual_mic} os={status.os} />
 
-      {err ? <p className="text-xs text-red-600 mt-3">{err}</p> : null}
+      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
     </section>
   );
 }
@@ -116,10 +106,10 @@ function StreamCard({
 }) {
   const { t } = useT();
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
+    <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
       <div className="mb-4">
-        <p className="text-base font-semibold">{title}</p>
-        <p className="text-xs text-neutral-500 mt-0.5">{subtitle}</p>
+        <p className="text-base font-semibold text-ds-text">{title}</p>
+        <p className="text-xs text-ds-text-muted mt-0.5">{subtitle}</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -154,11 +144,11 @@ function ToggleRow({
   return (
     <button
       onClick={() => onChange(!on)}
-      className="flex items-center justify-between rounded-md border border-neutral-200 dark:border-neutral-800 px-3 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors text-left"
+      className="flex items-center justify-between rounded-lg border border-ds-border bg-ds-hover px-3 py-3 hover:bg-ds-hover transition-colors text-left"
     >
       <div>
-        <p className="text-sm font-medium">{label}</p>
-        <p className="text-[11px] text-neutral-500">{hint}</p>
+        <p className="text-sm font-medium text-ds-text">{label}</p>
+        <p className="text-[11px] text-ds-text-muted mt-0.5">{hint}</p>
       </div>
       <Switch on={on} />
     </button>
@@ -169,8 +159,8 @@ function Switch({ on }: { on: boolean }) {
   return (
     <span
       className={
-        "relative inline-block h-5 w-9 rounded-full transition-colors " +
-        (on ? "bg-emerald-500" : "bg-neutral-300 dark:bg-neutral-700")
+        "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
+        (on ? "bg-emerald-500" : "bg-ds-hover")
       }
     >
       <span
@@ -194,9 +184,9 @@ function VirtualMicCard({
     return (
       <Card status="ok" title="Virtual microphone">
         <p>
-          PipeWire null-sink <code className="font-mono">mineshare_mic</code>{" "}
+          PipeWire null-sink <code className="font-mono text-emerald-400">mineshare_mic</code>{" "}
           loaded. Discord / Zoom / OBS see the matching monitor as{" "}
-          <strong>"Monitor of MineShare-Mic"</strong> in their input picker.
+          <strong className="text-ds-text">"Monitor of MineShare-Mic"</strong> in their input picker.
         </p>
       </Card>
     );
@@ -206,15 +196,13 @@ function VirtualMicCard({
       <Card status="ok" title="Virtual microphone">
         <p>
           VB-CABLE detected. Peer mic frames render into{" "}
-          <code className="font-mono">CABLE Input</code>; pick{" "}
-          <code className="font-mono">CABLE Output</code> as your mic in any
-          app.
+          <code className="font-mono text-emerald-400">CABLE Input</code>; pick{" "}
+          <code className="font-mono text-emerald-400">CABLE Output</code> as your mic in any app.
         </p>
       </Card>
     );
   }
 
-  // unavailable
   if (os === "windows") {
     return (
       <Card status="warn" title="Virtual microphone — VB-CABLE not detected">
@@ -225,7 +213,7 @@ function VirtualMicCard({
             href="https://vb-audio.com/Cable/"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-emerald-600 underline underline-offset-2"
+            className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300 transition-colors"
           >
             Install from vb-audio.com/Cable
           </a>{" "}
@@ -237,9 +225,9 @@ function VirtualMicCard({
   return (
     <Card status="warn" title="Virtual microphone — unavailable">
       <p>
-        <code className="font-mono">pactl load-module module-null-sink</code>{" "}
+        <code className="font-mono text-ds-text">pactl load-module module-null-sink</code>{" "}
         failed at startup. Make sure{" "}
-        <code className="font-mono">pulseaudio-utils</code> is installed and
+        <code className="font-mono text-ds-text">pulseaudio-utils</code> is installed and
         that you're running a PipeWire session, then restart MineShare.
       </p>
     </Card>
@@ -257,12 +245,13 @@ function Card({
 }) {
   const accent =
     status === "ok"
-      ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/30"
-      : "border-amber-300 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/30";
+      ? "border-emerald-500/25 bg-emerald-500/[0.07]"
+      : "border-amber-500/25 bg-amber-500/[0.07]";
+  const titleColor = status === "ok" ? "text-emerald-300" : "text-amber-300";
   return (
-    <div className={"rounded-lg border p-5 " + accent}>
-      <p className="text-sm font-semibold mb-1">{title}</p>
-      <div className="text-xs text-neutral-700 dark:text-neutral-300 leading-relaxed">
+    <div className={"rounded-xl border p-5 " + accent}>
+      <p className={"text-sm font-semibold mb-1.5 " + titleColor}>{title}</p>
+      <div className="text-xs text-ds-text-muted leading-relaxed">
         {children}
       </div>
     </div>

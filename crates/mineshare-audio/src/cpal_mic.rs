@@ -80,7 +80,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
     // exits cleanly when the version bumps, then we re-enter and
     // start over with the new device. A small audible glitch on
     // device switch is fine — manual operation only.
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, true)?;
     let mut seq: u32 = 0;
     loop {
         let last_version = crate::input_device_version();

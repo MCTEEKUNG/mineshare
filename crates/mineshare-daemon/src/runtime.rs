@@ -123,21 +123,20 @@ pub enum ControlMsg {
     /// between peers.
     Ping { ts_ms: u64 },
     Pong { ts_ms: u64 },
-    /// Mouse-activity + click-focus beacon used by the Smart
-    /// keyboard target. Each side periodically advertises:
-    ///   * `mouse_active` — was the local HW mouse in use in the
-    ///     last ~700 ms? Drives the motion-based fallback.
-    ///   * `last_click_ago_ms` — ms since the local user clicked,
-    ///     capped at 60 s, or `None` if no click has been seen
-    ///     this session. Drives the focus-based primary signal.
+    /// Activity beacon driving the Smart keyboard target. Each side
+    /// periodically advertises `last_input_ago_ms` — ms since its
+    /// most recent activity (a deliberate mouse drag OR a click),
+    /// capped at 60 s, or `None` if it has been idle all session.
     ///
-    /// The receiver back-dates its `PEER_CLICK_AT` by the
-    /// reported age so stale beacons don't reset focus state to
-    /// "now".
+    /// The receiver back-dates its single `PEER_ACTIVITY_AT` by the
+    /// reported age, so the most-recent-activity race compares both
+    /// sides on the receiver's own clock with no clock sync.
+    ///
+    /// Wire format is positional (bincode), so changing these fields
+    /// is a breaking protocol change. Both daemons must upgrade in
+    /// lockstep.
     ActivityBeacon {
-        mouse_active: bool,
-        #[serde(default)]
-        last_click_ago_ms: Option<u32>,
+        last_input_ago_ms: Option<u32>,
     },
     /// Stage 12 file transfer — declares an incoming file. The
     /// receiver allocates a `.partial` temp file under
@@ -163,6 +162,9 @@ pub enum ControlMsg {
     FileEnd { id: u64, sha256: [u8; 32] },
     /// Either side aborted the transfer.
     FileCancel { id: u64 },
+    /// Toggle the peer into / out of Game Drive "Receiving" — it should
+    /// inject our pure-relative input and suppress its own cursor-crossing.
+    GameDrive { active: bool },
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -891,6 +893,12 @@ async fn run_peer_session(
                     Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
                     Some(mineshare_input::RemoteEvent::RequestPeerExit) => ControlMsg::ForceRelease,
+                    Some(mineshare_input::RemoteEvent::GameDriveStart) => {
+                        ControlMsg::GameDrive { active: true }
+                    }
+                    Some(mineshare_input::RemoteEvent::GameDriveStop) => {
+                        ControlMsg::GameDrive { active: false }
+                    }
                     None => break,
                 },
                 clip = clip_rx.recv() => match clip {
@@ -954,40 +962,39 @@ async fn run_peer_session(
     let beacon_tx = rtt_tx.clone();
     let beacon_handle = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
-        let mut last_sent_active: Option<bool> = None;
-        let mut last_sent_click_age: Option<u32> = None;
+        let mut last_sent_category: Option<u8> = None;
         loop {
             tick.tick().await;
-            let active = mineshare_input::local_mouse_active_within(700);
-            let click_age = mineshare_input::local_click_age_ms();
-            // Send on EITHER signal changing or every 4 ticks
-            // (~2 s) as a refresh. Click-age changes constantly
-            // (it ticks up by 500 ms each interval), so we only
-            // treat it as "changed" if the freshness category
-            // flipped — a freshly-young click goes from None/old
-            // to <1 s, which is meaningful; a click that was 5 s
-            // old becoming 5.5 s old is not.
-            let click_category = click_age.map(|a| if a < 5_000 { 0 } else { 1 });
-            let prev_category = last_sent_click_age.map(|a| if a < 5_000 { 0 } else { 1 });
-            let active_changed = last_sent_active != Some(active);
-            let click_changed = click_category != prev_category;
+            let age = mineshare_input::local_input_age_ms();
+            // The peer races our activity age against its own, so a
+            // stale PEER_ACTIVITY_AT skews the decision. While we're
+            // freshly active (< 3 s) send EVERY tick so the peer's
+            // view stays current. Otherwise only send when the
+            // freshness category flips, plus a ~2 s heartbeat — no
+            // point spamming the control channel while idle.
+            let actively_engaged = age.is_some_and(|a| a < 3_000);
+            let category = match age {
+                Some(a) if a < 1_000 => 0u8,
+                Some(a) if a < 5_000 => 1,
+                Some(_) => 2,
+                None => 3,
+            };
+            let category_changed = last_sent_category != Some(category);
             let refresh = {
                 static COUNTER: std::sync::atomic::AtomicU32 =
                     std::sync::atomic::AtomicU32::new(0);
                 COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 3
             };
-            if active_changed || click_changed || refresh {
+            if actively_engaged || category_changed || refresh {
                 if beacon_tx
                     .send(ControlMsg::ActivityBeacon {
-                        mouse_active: active,
-                        last_click_ago_ms: click_age,
+                        last_input_ago_ms: age,
                     })
                     .is_err()
                 {
                     break;
                 }
-                last_sent_active = Some(active);
-                last_sent_click_age = click_age;
+                last_sent_category = Some(category);
             }
         }
     });
@@ -1019,6 +1026,20 @@ async fn run_peer_session(
                 Ok(ControlMsg::ForceRelease) => {
                     info!("peer asked us to release Remote");
                     mineshare_input::force_local_exit_remote();
+                }
+                Ok(ControlMsg::GameDrive { active }) => {
+                    if active {
+                        mineshare_input::set_game_drive(mineshare_input::GameDrive::Receiving);
+                        info!("game-drive: peer started driving — receiving");
+                    } else {
+                        mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
+                        // Drop any keys/buttons the peer left held so WASD
+                        // doesn't stick when the game session ends.
+                        if let Err(e) = inject_for_reader.release_all_held() {
+                            warn!(error = %e, "release_all_held failed on game-drive stop");
+                        }
+                        info!("game-drive: peer stopped driving");
+                    }
                 }
                 Ok(ControlMsg::ClipboardText(text)) => {
                     if let Err(e) = crate::clipboard::apply_from_peer(&text) {
@@ -1079,23 +1100,14 @@ async fn run_peer_session(
                     info!(id, "peer cancelled file transfer");
                     crate::files::mark_cancelled(id);
                 }
-                Ok(ControlMsg::ActivityBeacon {
-                    mouse_active,
-                    last_click_ago_ms,
-                }) => {
-                    // Mouse motion stamp: only bumps on active=true
-                    // beacons (negative beacons leave the timestamp
-                    // alone; peer_mouse_active_within naturally
-                    // ages out).
-                    if mouse_active {
-                        mineshare_input::note_peer_mouse_active();
-                    }
-                    // Click-focus stamp: back-date the recorded
-                    // click time by the reported age so the
-                    // 30 s focus window stays accurate. None
-                    // means peer hasn't clicked this session.
-                    if let Some(age) = last_click_ago_ms {
-                        mineshare_input::note_peer_click(age);
+                Ok(ControlMsg::ActivityBeacon { last_input_ago_ms }) => {
+                    // Back-date the peer's most-recent-activity stamp
+                    // by the reported age so the recency race stays
+                    // accurate across network jitter. `None` means
+                    // the peer has been idle all session — leave the
+                    // stamp untouched so it naturally ages out.
+                    if let Some(age) = last_input_ago_ms {
+                        mineshare_input::note_peer_activity(age);
                     }
                 }
                 Err(e) => {
@@ -1301,6 +1313,45 @@ async fn run_peer_session(
             }
             // HIGH-PRIORITY: input events skip the audio queue.
             recv = input_sub.recv() => match recv {
+                // Coalesce a backlog of MouseMove deltas into a single
+                // summed packet. The channel hands us the OLDEST event;
+                // we then drain every further *immediately-queued*
+                // MouseMove and add it in. This matters because
+                // MouseMove is a RELATIVE delta with no absolute
+                // reference: when `udp.send_to` backpressures (slow /
+                // Wi-Fi link) the broadcast buffer fills and tokio drops
+                // the oldest events — silently throwing away cursor
+                // distance and causing drift / "my flick fell short".
+                // Summing is strictly more correct than dropping (no
+                // lost distance) and cheaper (one UDP/IP header + AEAD
+                // tag instead of N). Granularity only coarsens while
+                // already backlogged. Button / key / scroll events are
+                // NEVER coalesced and keep their order: the first
+                // non-move we pull is sent right after the merged move.
+                Ok(InputEvent::MouseMove { mut dx, mut dy }) => {
+                    let mut trailer: Option<InputEvent> = None;
+                    loop {
+                        match input_sub.try_recv() {
+                            Ok(InputEvent::MouseMove { dx: ndx, dy: ndy }) => {
+                                dx = dx.saturating_add(ndx);
+                                dy = dy.saturating_add(ndy);
+                            }
+                            Ok(other) => { trailer = Some(other); break; }
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            // Closed / Lagged are surfaced on the next
+                            // `recv()` arm above — just stop coalescing.
+                            Err(broadcast::error::TryRecvError::Closed) => break,
+                            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                warn!(skipped = n, "input subscriber lagged during coalesce — events dropped");
+                                break;
+                            }
+                        }
+                    }
+                    send_wire!(WireFrame::Input(InputEvent::MouseMove { dx, dy }), "input");
+                    if let Some(other) = trailer {
+                        send_wire!(WireFrame::Input(other), "input");
+                    }
+                }
                 Ok(ev) => { send_wire!(WireFrame::Input(ev), "input"); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "input subscriber lagged — events dropped");
@@ -1332,6 +1383,7 @@ async fn run_peer_session(
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::set_peer_in_remote(false);
+    mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
     mineshare_input::clear_remote_event_sender();
     crate::layout::clear_propagate_sender();
     crate::status::clear_peer_connected();

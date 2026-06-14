@@ -45,6 +45,15 @@ pub struct Settings {
     /// don't have focus.
     #[serde(default)]
     pub auto_focus_on_take_control: bool,
+    /// Target mouse forward/inject rate in Hz. Drives the runtime
+    /// flush interval in `mineshare-input` (both capture-forward on
+    /// Windows and inject-coalesce on Linux). Clamped 60..=1000.
+    #[serde(default = "default_mouse_rate_hz")]
+    pub mouse_rate_hz: u32,
+}
+
+fn default_mouse_rate_hz() -> u32 {
+    500
 }
 
 impl Default for Settings {
@@ -54,6 +63,7 @@ impl Default for Settings {
             invert_scroll_y: false,
             invert_scroll_x: false,
             auto_focus_on_take_control: false,
+            mouse_rate_hz: 500,
         }
     }
 }
@@ -65,6 +75,7 @@ impl Settings {
     pub fn clamped(self) -> Self {
         Self {
             mouse_sensitivity: self.mouse_sensitivity.clamp(0.25, 4.0),
+            mouse_rate_hz: self.mouse_rate_hz.clamp(60, 1000),
             ..self
         }
     }
@@ -123,4 +134,19 @@ fn push_to_input_layer(s: &Settings) {
     mineshare_input::set_mouse_sensitivity(s.mouse_sensitivity);
     mineshare_input::set_invert_scroll(s.invert_scroll_x, s.invert_scroll_y);
     mineshare_input::set_auto_focus_on_take_control(s.auto_focus_on_take_control);
+    mineshare_input::set_mouse_rate_hz(s.mouse_rate_hz);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_rate_clamps_into_range() {
+        let lo = Settings { mouse_rate_hz: 5, ..Settings::default() }.clamped();
+        let hi = Settings { mouse_rate_hz: 9000, ..Settings::default() }.clamped();
+        assert_eq!(lo.mouse_rate_hz, 60);
+        assert_eq!(hi.mouse_rate_hz, 1000);
+        assert_eq!(Settings::default().mouse_rate_hz, 500);
+    }
 }

@@ -52,11 +52,32 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_FORMAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+/// RAII guard that releases the raised system timer resolution
+/// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
+/// forward watchdog thread so the finer scheduler tick is only in
+/// effect while the bridge is actively forwarding motion.
+struct HighResTimerGuard;
+
+impl Drop for HighResTimerGuard {
+    fn drop(&mut self) {
+        unsafe { timeEndPeriod(1) };
+    }
+}
+
 const MODE_LOCAL: u8 = 0;
 const MODE_REMOTE: u8 = 1;
+
+/// True when the capture path should forward + pin motion to the peer:
+/// either the cursor has crossed into Remote mode, or Game Drive is
+/// actively driving the peer (which forwards continuously without ever
+/// entering the cursor-crossing state machine).
+fn forwarding_active() -> bool {
+    CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::is_game_driving()
+}
 
 static EVENT_SINK: OnceLock<
     Mutex<Option<std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>>>,
@@ -119,6 +140,9 @@ const SCAN_HOTKEY_LOCK: u32 = 0x26; // L
 /// cursor — useful for "leave mouse here, type over there"
 /// workflows.
 const SCAN_HOTKEY_KB: u32 = 0x25; // K
+/// Hotkey: Ctrl+Alt+G toggles Game Drive — drive the peer's game with
+/// pure-relative mouse + keyboard (no cursor-crossing, warp, or game-lock).
+const SCAN_G: u32 = 0x22; // G (set-1 make code)
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -155,18 +179,34 @@ const RAW_INPUT_STALE_MS: u64 = 300;
 // fine for desktop cursor work but downsampled a 1000 Hz gaming mouse into
 // choppy lumps that feel "wrong" / uncontrollable inside GAMES on the
 // receiver — the game reads motion (via Raw Input) as a stream of coarse
-// 125 Hz jumps instead of smooth high-rate deltas. 2 ms (~500 Hz) preserves
-// enough motion resolution to feel like a real mouse in-game while still
-// halving event volume vs a raw 1000 Hz stream, and stays well within the
-// inject loop's per-event budget (one SendInput ≈ tens of µs ≪ 2 ms spacing).
-// Forwarding only happens while CURSOR_MODE == REMOTE, so this rate applies
-// only when actively driving the peer — never during idle local desktop use.
-const FLUSH_INTERVAL_MS: u64 = 2;
+// 125 Hz jumps instead of smooth high-rate deltas. The window is now a
+// runtime value (`super::target_flush_us()`, default 2 ms = 500 Hz) driven
+// by the user's mouse-rate setting, so it is tunable 60..=1000 Hz from the
+// GUI instead of being a compile-time constant. Forwarding only happens
+// while CURSOR_MODE == REMOTE, so this rate applies only when actively
+// driving the peer — never during idle local desktop use.
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static FLUSH_FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+
+/// Idle window after which a negative `VIRT_X` drift is snapped back to 0
+/// by the watchdog safety net.
+const REMOTE_IDLE_SNAP_MS: u64 = 1_000;
+
+/// Returns true when accumulated negative `VIRT_X` drift should be snapped
+/// back to 0: it has gone negative AND the mouse has been idle (no flush)
+/// for at least `REMOTE_IDLE_SNAP_MS`. `last_flush` of 0 means "never
+/// flushed" and must NOT trigger a snap.
+///
+/// Behavioral edge: a user who drags partway back toward the exit threshold
+/// and then PAUSES (>= REMOTE_IDLE_SNAP_MS) has their negative progress
+/// reset — intended; a pause is treated as "exit not committed", while a
+/// continuous backward drag still crosses the threshold and exits correctly.
+fn should_snap_virt_x(virt_x: i32, last_flush: u64, now: u64) -> bool {
+    virt_x < 0 && last_flush != 0 && now.saturating_sub(last_flush) >= REMOTE_IDLE_SNAP_MS
+}
 
 /// Atomically drain `PENDING_DX/DY` and forward the combined delta.
 /// Skips no-op events when both axes are zero.
@@ -178,14 +218,16 @@ fn flush_pending_motion() {
     }
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
     sink_send(InputEvent::MouseMove { dx, dy });
+    super::bump_fwd_events();
     let n = FLUSH_FWD_COUNT.fetch_add(1, Ordering::Relaxed);
     if n % 100 == 0 {
         info!(dx, dy, n, "win coalesced motion forward (8ms-window)");
     }
 }
 
-/// Spawn the periodic flush thread once.  Wakes every `FLUSH_INTERVAL_MS`
-/// and drains pending motion if `CURSOR_MODE == REMOTE`.  Mirrors the
+/// Spawn the periodic flush thread once.  Wakes every
+/// `super::target_flush_us()` microseconds and drains pending motion if
+/// `CURSOR_MODE == REMOTE`.  Mirrors the
 /// Linux watchdog — needed so a "moved 2 px then paused" residual
 /// doesn't sit in the accumulator until the next motion event.
 fn start_motion_flush_watchdog() {
@@ -194,15 +236,42 @@ fn start_motion_flush_watchdog() {
     }
     if let Err(e) = thread::Builder::new()
         .name("win-motion-flush".into())
-        .spawn(|| loop {
-            thread::sleep(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
-            if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE {
+        .spawn(|| {
+            // Raise the system timer resolution to 1 ms for the lifetime
+            // of this watchdog thread. The default Windows scheduler tick
+            // is ~15.6 ms, which makes sub-2 ms sleeps (needed for
+            // >500 Hz rates) round up badly. timeBeginPeriod(1) gives us
+            // ~1 ms sleep granularity. Minor system-wide power cost, only
+            // paid while the bridge's forward watchdog is running. The
+            // matching timeEndPeriod(1) is issued if the loop ever exits
+            // (it normally runs for the process lifetime).
+            unsafe { timeBeginPeriod(1) };
+            let _timer_guard = HighResTimerGuard;
+            loop {
+            let flush_us = super::target_flush_us();
+            thread::sleep(std::time::Duration::from_micros(flush_us));
+            if !forwarding_active() {
                 continue;
             }
             let now = super::now_ms();
             let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-            if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+            // compare in micros where possible; ms granularity is fine for
+            // the residual-drain guard.
+            if now.saturating_sub(last) * 1000 >= flush_us {
                 flush_pending_motion();
+            }
+            // Safety net: if VIRT_X has drifted negative while the mouse
+            // has been idle (no motion in the last second), snap it back
+            // to 0.  Leftward sensor jitter is unbounded on the negative
+            // side while rightward jitter is bounded by `PEER_W`, so
+            // without this tiny vibrations (desk fan, chair wobble) can
+            // silently accumulate to -EXIT_BUFFER_PX and pop the cursor
+            // back to the local screen.  We only reset below zero, so a
+            // deliberate exit gesture (actively dragging backward past
+            // the threshold) still works correctly.
+            if should_snap_virt_x(VIRT_X.load(Ordering::Relaxed), last, now) {
+                VIRT_X.store(0, Ordering::Relaxed);
+            }
             }
         })
     {
@@ -352,24 +421,82 @@ pub fn force_exit_remote() {
 /// real cursor position — without this the peer's exit threshold
 /// fires after a tiny motion in the wrong direction even though the
 /// cursor is mid-screen.
-pub fn on_peer_take_control() {
-    let (left, top, right, bottom) = bounds();
+/// Set every poll by `game_detect_thread`: true when a fullscreen /
+/// cursor-confine / anti-cheat title currently owns the cursor.
+static GAME_FOREGROUND: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn game_foreground() -> bool {
+    GAME_FOREGROUND.load(Ordering::Relaxed)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TakeControlAction {
+    /// Warp the cursor to this screen point (normal desktop edge crossing,
+    /// so the peer's `virt_x` model matches the real cursor position).
+    Warp(i32, i32),
+    /// A cursor-locked game owns the cursor — leave it where it is and only
+    /// anchor `LAST_X/Y` here. Warping would start a `SetCursorPos`
+    /// tug-of-war with the game's per-frame recenter, flinging a mouse-look
+    /// camera (Roblox LockCenter). Injection stays pure-relative.
+    Anchor(i32, i32),
+}
+
+/// Skip the warp only when a cursor-locked game owns the cursor. The
+/// game-drive path no longer relies on this (it never warps), so do NOT
+/// anchor for every peer-driven session — desktop crossing needs the warp.
+fn should_anchor_cursor(game_foreground: bool, _peer_in_remote: bool) -> bool {
+    game_foreground
+}
+
+/// Pure decision: where the local cursor should go when the peer takes
+/// control. Split out so the warp-vs-anchor choice is unit-testable
+/// without OS calls.
+fn take_control_action(
+    anchor_in_place: bool,
+    side: super::PeerSide,
+    bounds: (i32, i32, i32, i32),
+    cur: (i32, i32),
+) -> TakeControlAction {
+    if anchor_in_place {
+        return TakeControlAction::Anchor(cur.0, cur.1);
+    }
+    let (left, top, right, bottom) = bounds;
     let mid_x = (left + right) / 2;
     let mid_y = (top + bottom) / 2;
-    let (x, y) = match super::peer_side() {
+    let (x, y) = match side {
         super::PeerSide::Right => (right, mid_y),
         super::PeerSide::Left => (left, mid_y),
         super::PeerSide::Top => (mid_x, top),
         super::PeerSide::Bottom => (mid_x, bottom),
     };
+    TakeControlAction::Warp(x, y)
+}
+
+pub fn on_peer_take_control() {
+    let mut cur = POINT::default();
     unsafe {
-        let _ = SetCursorPos(x, y);
+        let _ = GetCursorPos(&mut cur);
     }
-    // Update the hook's "last seen" so HW-motion auto-release doesn't
-    // mis-fire on the first injected motion arriving from the peer.
-    LAST_X.store(x, Ordering::Relaxed);
-    LAST_Y.store(y, Ordering::Relaxed);
-    info!(boundary = ?(x, y), side = ?super::peer_side(), "warped cursor to peer-facing edge");
+    let anchor = should_anchor_cursor(game_foreground(), super::peer_in_remote());
+    match take_control_action(anchor, super::peer_side(), bounds(), (cur.x, cur.y)) {
+        TakeControlAction::Warp(x, y) => {
+            unsafe {
+                let _ = SetCursorPos(x, y);
+            }
+            // Update the hook's "last seen" so HW-motion auto-release doesn't
+            // mis-fire on the first injected motion arriving from the peer.
+            LAST_X.store(x, Ordering::Relaxed);
+            LAST_Y.store(y, Ordering::Relaxed);
+            info!(boundary = ?(x, y), side = ?super::peer_side(), "warped cursor to peer-facing edge");
+        }
+        TakeControlAction::Anchor(x, y) => {
+            // Cursor-locked / anti-cheat game in foreground: skip the edge
+            // warp so we don't fight the game's recenter (camera fling).
+            LAST_X.store(x, Ordering::Relaxed);
+            LAST_Y.store(y, Ordering::Relaxed);
+            info!(at = ?(x, y), "peer take-control: cursor-locked game foreground — skipping edge warp");
+        }
+    }
 }
 
 pub struct HookCapture {
@@ -570,7 +697,11 @@ fn game_detect_thread() {
         });
         super::set_anticheat_warning(anticheat_match.clone());
 
-        let should_lock = cursor_hidden || cursor_clipped || anticheat_match.is_some();
+        let should_lock = (cursor_hidden || cursor_clipped || anticheat_match.is_some())
+            && super::game_drive() == super::GameDrive::Off;
+        // Publish for `on_peer_take_control`: when a cursor-locked game owns
+        // the cursor we must NOT warp it to the edge (camera fling).
+        GAME_FOREGROUND.store(should_lock, Ordering::Relaxed);
         let was_engaged = AUTO_ENGAGED.load(Ordering::Acquire);
         if should_lock != was_engaged {
             AUTO_ENGAGED.store(should_lock, Ordering::Release);
@@ -699,7 +830,7 @@ fn create_raw_input_window() -> Option<HWND> {
 /// regardless of whether the peer is Windows or Linux.
 unsafe fn handle_raw_input(h: HRAWINPUT) {
     if !USING_RAW_INPUT.load(Ordering::Relaxed) { return; }
-    if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE { return; }
+    if !forwarding_active() { return; }
 
     // Two-pass: first get required buffer size, then read data.
     let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
@@ -756,11 +887,13 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
     // the peer's inject loop stays responsive even with a 1000 Hz mouse.
     PENDING_DX.fetch_add(sdx, Ordering::AcqRel);
     PENDING_DY.fetch_add(sdy, Ordering::AcqRel);
-    // Opportunistic flush: if the 8 ms window has already lapsed since
-    // the last dispatch, send now instead of waiting for the watchdog.
+    // Opportunistic flush: if the runtime flush window has already
+    // lapsed since the last dispatch, send now instead of waiting for
+    // the watchdog.
+    let flush_us = super::target_flush_us();
     let now = super::now_ms();
     let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= FLUSH_INTERVAL_MS {
+    if now.saturating_sub(last) * 1000 >= flush_us {
         flush_pending_motion();
     }
 }
@@ -776,6 +909,19 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
     }
     let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     if info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 {
+        // When the peer is driving us (peer_in_remote=true), track where
+        // its injected moves have put our cursor.  Without this update,
+        // LAST_X/LAST_Y stay frozen at the boundary-entry point set by
+        // `on_peer_take_control`, so the first real local HW event
+        // (e.g. a laptop touchpad brush while the peer is driving)
+        // computes delta vs the stale boundary rather than vs the actual
+        // current cursor position — a tiny touchpad nudge appears as
+        // hundreds of pixels and fires a spurious `RequestPeerExit` that
+        // bounces the peer's cursor back to its own screen.
+        if wparam.0 as u32 == WM_MOUSEMOVE && super::peer_in_remote() {
+            LAST_X.store(info.pt.x, Ordering::Relaxed);
+            LAST_Y.store(info.pt.y, Ordering::Relaxed);
+        }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -835,6 +981,7 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 // during fullscreen play don't yank focus to the
                 // peer. Ctrl+Alt+R still works as a manual override.
                 let crossed_edge = !super::is_input_locked()
+                    && super::game_drive() == super::GameDrive::Off
                     && last_x != i32::MIN
                     && match super::peer_side() {
                         super::PeerSide::Right => last_x < right && x >= right,
@@ -914,10 +1061,11 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                             }
                             PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
                             PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
-                            // Opportunistic flush if the 8ms window has lapsed.
+                            // Opportunistic flush if the runtime window has lapsed.
+                            let flush_us = super::target_flush_us();
                             let now = super::now_ms();
                             let last_flush = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                            if now.saturating_sub(last_flush) >= FLUSH_INTERVAL_MS {
+                            if now.saturating_sub(last_flush) * 1000 >= flush_us {
                                 flush_pending_motion();
                             }
                         }
@@ -960,13 +1108,13 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 // the meantime. Without this the peer ends up with
                 // a button stuck-down (drag-select runs wild, links
                 // never release, etc.).
-                if super::route_mouse_button(btn, down, mode == MODE_REMOTE) {
+                if super::route_mouse_button(btn, down, forwarding_active()) {
                     sink_send(InputEvent::MouseButton { btn, down });
                     return LRESULT(1);
                 }
             }
         }
-        WM_MOUSEWHEEL if mode == MODE_REMOTE => {
+        WM_MOUSEWHEEL if forwarding_active() => {
             let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
             // Stage 10: optional Y-axis inversion. Win has no
             // horizontal-wheel hook here so only Y matters.
@@ -975,9 +1123,14 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         }
         _ => {}
     }
-    // In remote mode every mouse event has been forwarded; consume it so
-    // the OS doesn't double-process it locally.
-    if mode == MODE_REMOTE {
+    // In remote mode — and while Game Driving — every mouse event has been
+    // forwarded to the peer; consume it so the OS doesn't process it locally.
+    // For Game Drive this is what pins the controller's cursor: consuming the
+    // move event freezes the local cursor in place (raw input still forwards
+    // the hardware delta), so it never drifts to a screen edge where motion
+    // would clamp and stall the driven camera, and local clicks/scroll don't
+    // leak onto this machine's desktop.
+    if forwarding_active() {
         return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -1018,7 +1171,11 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             } else if super::peer_in_remote() {
                 info!("hotkey Ctrl+Alt+R — requesting peer to release");
                 super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
-            } else {
+            } else if super::game_drive() == super::GameDrive::Off {
+                // While Game Driving we must NOT enter the cursor-crossing
+                // REMOTE state — its motion branch runs the anchor warp that
+                // re-introduces the in-game camera fling. Ctrl+Alt+R is inert
+                // (but still consumed) during a Game Drive session.
                 info!("hotkey Ctrl+Alt+R — entering remote");
                 let mut pt = POINT::default();
                 let (_, top, _, bottom) = bounds();
@@ -1057,6 +1214,18 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         {
             super::cycle_keyboard_target();
             info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+            return LRESULT(1);
+        }
+
+        // Hotkey: Ctrl+Alt+G toggles Game Drive (drive the peer's game with
+        // pure-relative mouse + keyboard, no cursor-crossing).
+        if down
+            && scan == SCAN_G
+            && MOD_CTRL.load(Ordering::Relaxed)
+            && MOD_ALT.load(Ordering::Relaxed)
+        {
+            info!("hotkey Ctrl+Alt+G — toggling Game Drive");
+            super::toggle_game_drive();
             return LRESULT(1);
         }
 
@@ -1101,7 +1270,7 @@ enum HeldKey {
 
 // --- Inject-cadence instrumentation ---------------------------------------
 // Confirms the receive→inject path actually keeps up with the sender's
-// forward rate (see FLUSH_INTERVAL_MS). Once per window of injected motion
+// forward rate (see `super::target_flush_us`). Once per window of injected motion
 // events it logs the effective rate and the worst inter-inject gap. A healthy
 // 500 Hz stream reads approx_hz≈500 with max_gap_ms≈2–4; a stalled inject
 // loop shows low Hz or large gaps, which would mean the bottleneck is
@@ -1306,3 +1475,67 @@ fn scancode_to_vk(scan: u16) -> u16 {
 fn _force_vk_use(_v: VIRTUAL_KEY) {}
 
 const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anchor_cursor_only_when_game_foreground() {
+        // Skip the edge warp only when a cursor-locked game owns the cursor.
+        // The game-drive path no longer relies on this, so a peer-driven
+        // session that is NOT a foreground game still warps (desktop crossing
+        // needs the warp for its exit hysteresis).
+        assert!(should_anchor_cursor(true, false)); // game foreground
+        assert!(!should_anchor_cursor(false, true)); // peer driving, not game → warp
+        assert!(should_anchor_cursor(true, true));
+        assert!(!should_anchor_cursor(false, false)); // desktop crossing → warp
+    }
+
+    #[test]
+    fn take_control_skips_warp_when_game_foreground() {
+        let bounds = (0, 0, 2880, 1800);
+        // Normal desktop crossing from the right → warp to the right edge,
+        // mid-height, so the peer's virt_x model matches reality.
+        assert_eq!(
+            take_control_action(false, crate::PeerSide::Right, bounds, (700, 700)),
+            TakeControlAction::Warp(2880, 900),
+        );
+        // A cursor-locked / anti-cheat game owns the cursor (Roblox LockCenter):
+        // warping to the edge starts a tug-of-war with the game's per-frame
+        // recenter that flings the camera. Leave the cursor where it is.
+        assert_eq!(
+            take_control_action(true, crate::PeerSide::Right, bounds, (700, 700)),
+            TakeControlAction::Anchor(700, 700),
+        );
+    }
+
+    #[test]
+    fn snap_never_when_non_negative() {
+        // virt_x >= 0 never snaps, even after a long idle period.
+        assert!(!should_snap_virt_x(0, 1, 10_000));
+        assert!(!should_snap_virt_x(5, 1, 10_000));
+    }
+
+    #[test]
+    fn snap_never_when_never_flushed() {
+        // last_flush == 0 means "never flushed" and must not trigger.
+        assert!(!should_snap_virt_x(-1, 0, 10_000));
+    }
+
+    #[test]
+    fn snap_not_when_recently_flushed() {
+        // Negative drift but flushed < REMOTE_IDLE_SNAP_MS ago → no snap.
+        let now = 5_000;
+        let last_flush = now - (REMOTE_IDLE_SNAP_MS - 1);
+        assert!(!should_snap_virt_x(-50, last_flush, now));
+    }
+
+    #[test]
+    fn snap_when_negative_and_idle_long() {
+        // Negative drift and idle >= REMOTE_IDLE_SNAP_MS → snap.
+        let now = 5_000;
+        let last_flush = now - REMOTE_IDLE_SNAP_MS;
+        assert!(should_snap_virt_x(-50, last_flush, now));
+    }
+}

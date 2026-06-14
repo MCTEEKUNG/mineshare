@@ -33,6 +33,17 @@ const en: Strings = {
   nav_files: "Files",
   nav_hotkeys: "Hotkeys",
   nav_advanced: "Advanced",
+  nav_home: "Home",
+  nav_audio_devices: "Audio & Devices",
+  nav_settings: "Settings",
+
+  // Section headers (composed pages)
+  section_appearance: "Appearance",
+  section_audio: "Audio",
+  section_devices: "Devices",
+  section_hotkeys: "Hotkeys",
+  section_advanced: "Advanced",
+  section_performance: "Performance",
 
   // Connection pill
   conn_offline: "daemon offline:",
@@ -59,6 +70,16 @@ const en: Strings = {
   game_mode_shortcut: "Toggle with",
   game_mode_lock: "Lock",
   game_mode_unlock: "Unlock",
+
+  // Game Drive card
+  gd_title: "Game Drive — off",
+  gd_driving: "Driving peer's game",
+  gd_receiving: "Peer is driving (game)",
+  gd_desc:
+    "Drive a game running on the peer with this machine's mouse + keyboard (pure relative, no cursor crossing). Toggle with",
+  gd_anticheat_note: "Injected input — an anti-cheat may flag it.",
+  gd_start: "Start",
+  gd_stop: "Stop",
 
   // Anti-cheat banner
   ac_title: "⚠ Anti-cheat-protected game detected:",
@@ -120,6 +141,16 @@ const th: Strings = {
   nav_files: "ไฟล์",
   nav_hotkeys: "คีย์ลัด",
   nav_advanced: "ขั้นสูง",
+  nav_home: "หน้าหลัก",
+  nav_audio_devices: "เสียงและอุปกรณ์",
+  nav_settings: "ตั้งค่า",
+
+  section_appearance: "ลักษณะ",
+  section_audio: "เสียง",
+  section_devices: "อุปกรณ์",
+  section_hotkeys: "คีย์ลัด",
+  section_advanced: "ขั้นสูง",
+  section_performance: "ประสิทธิภาพ",
 
   conn_offline: "daemon ไม่ทำงาน:",
   conn_connecting: "กำลังเชื่อมต่อ…",
@@ -143,6 +174,15 @@ const th: Strings = {
   game_mode_shortcut: "สลับด้วย",
   game_mode_lock: "ล็อก",
   game_mode_unlock: "ปลดล็อก",
+
+  gd_title: "Game Drive — ปิดอยู่",
+  gd_driving: "กำลังขับเกมบน peer",
+  gd_receiving: "peer กำลังขับ (เกม)",
+  gd_desc:
+    "ขับเกมที่รันอยู่บน peer ด้วยเมาส์ + คีย์บอร์ดของเครื่องนี้ (relative ล้วน ไม่มี cursor crossing) สลับด้วย",
+  gd_anticheat_note: "เป็น injected input — anti-cheat อาจตรวจจับได้",
+  gd_start: "เริ่ม",
+  gd_stop: "หยุด",
 
   ac_title: "⚠ ตรวจพบเกมที่มีระบบ anti-cheat:",
   ac_desc:
@@ -190,6 +230,13 @@ const th: Strings = {
 };
 
 const dicts: Record<Locale, Strings> = { en, th };
+
+// Dev-only parity guard: warn if `en` and `th` drift out of sync.
+if (import.meta.env.DEV) {
+  const a = Object.keys(en), b = Object.keys(th);
+  const missing = [...a.filter((k) => !b.includes(k)), ...b.filter((k) => !a.includes(k))];
+  if (missing.length) console.warn("i18n key mismatch:", missing);
+}
 
 interface I18nCtx {
   locale: Locale;
@@ -254,14 +301,14 @@ export function useT() {
 export function LanguageToggle() {
   const { locale, setLocale } = useT();
   return (
-    <div className="inline-flex items-center gap-0 text-[11px] font-medium border border-neutral-200 dark:border-neutral-800 rounded-md overflow-hidden">
+    <div className="inline-flex items-center text-[11px] font-medium border border-ds-border rounded-md overflow-hidden">
       <button
         onClick={() => setLocale("en")}
         className={
           "px-2 py-1 transition-colors " +
           (locale === "en"
-            ? "bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900"
-            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100")
+            ? "bg-ds-hover text-ds-text"
+            : "text-ds-text-muted hover:text-ds-text")
         }
       >
         EN
@@ -271,8 +318,8 @@ export function LanguageToggle() {
         className={
           "px-2 py-1 transition-colors " +
           (locale === "th"
-            ? "bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900"
-            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100")
+            ? "bg-ds-hover text-ds-text"
+            : "text-ds-text-muted hover:text-ds-text")
         }
       >
         TH
