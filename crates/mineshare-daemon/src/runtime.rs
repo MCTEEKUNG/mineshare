@@ -162,6 +162,9 @@ pub enum ControlMsg {
     FileEnd { id: u64, sha256: [u8; 32] },
     /// Either side aborted the transfer.
     FileCancel { id: u64 },
+    /// Toggle the peer into / out of Game Drive "Receiving" — it should
+    /// inject our pure-relative input and suppress its own cursor-crossing.
+    GameDrive { active: bool },
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -890,6 +893,12 @@ async fn run_peer_session(
                     Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
                     Some(mineshare_input::RemoteEvent::RequestPeerExit) => ControlMsg::ForceRelease,
+                    Some(mineshare_input::RemoteEvent::GameDriveStart) => {
+                        ControlMsg::GameDrive { active: true }
+                    }
+                    Some(mineshare_input::RemoteEvent::GameDriveStop) => {
+                        ControlMsg::GameDrive { active: false }
+                    }
                     None => break,
                 },
                 clip = clip_rx.recv() => match clip {
@@ -1017,6 +1026,18 @@ async fn run_peer_session(
                 Ok(ControlMsg::ForceRelease) => {
                     info!("peer asked us to release Remote");
                     mineshare_input::force_local_exit_remote();
+                }
+                Ok(ControlMsg::GameDrive { active }) => {
+                    if active {
+                        mineshare_input::set_game_drive(mineshare_input::GameDrive::Receiving);
+                        tracing::info!("game-drive: peer started driving — receiving");
+                    } else {
+                        mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
+                        // Drop any keys/buttons the peer left held so WASD
+                        // doesn't stick when the game session ends.
+                        let _ = inject_for_reader.release_all_held();
+                        tracing::info!("game-drive: peer stopped driving");
+                    }
                 }
                 Ok(ControlMsg::ClipboardText(text)) => {
                     if let Err(e) = crate::clipboard::apply_from_peer(&text) {
