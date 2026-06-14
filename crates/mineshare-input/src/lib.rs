@@ -999,7 +999,10 @@ pub(crate) fn fire_remote_event(ev: RemoteEvent) {
 /// stop. No-op semantics if there is no peer are handled by the daemon
 /// (the RemoteEvent simply isn't delivered).
 pub fn toggle_game_drive() {
-    if is_game_driving() {
+    // Either role (Driving or Receiving) turns OFF on toggle so the person at
+    // EITHER machine — including the one running the anti-cheat game — can
+    // abort the session. Firing Stop makes the peer exit too.
+    if is_game_driving() || is_game_receiving() {
         set_game_drive(GameDrive::Off);
         fire_remote_event(RemoteEvent::GameDriveStop);
     } else {
@@ -1149,6 +1152,18 @@ mod tests {
         assert!(is_game_receiving());
 
         set_game_drive(GameDrive::Off); // reset for other tests
+    }
+
+    #[test]
+    fn toggle_game_drive_receiver_can_stop() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        // The machine running the game is `Receiving`. Toggling Game Drive
+        // there (Stop button / Ctrl+Alt+G) must turn it OFF — not flip it to
+        // Driving (role-swap), so the person at the anti-cheat game can abort.
+        set_game_drive(GameDrive::Receiving);
+        toggle_game_drive();
+        assert_eq!(game_drive(), GameDrive::Off);
     }
 
     #[test]

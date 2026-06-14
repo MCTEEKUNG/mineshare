@@ -1166,7 +1166,11 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             } else if super::peer_in_remote() {
                 info!("hotkey Ctrl+Alt+R — requesting peer to release");
                 super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
-            } else {
+            } else if super::game_drive() == super::GameDrive::Off {
+                // While Game Driving we must NOT enter the cursor-crossing
+                // REMOTE state — its motion branch runs the anchor warp that
+                // re-introduces the in-game camera fling. Ctrl+Alt+R is inert
+                // (but still consumed) during a Game Drive session.
                 info!("hotkey Ctrl+Alt+R — entering remote");
                 let mut pt = POINT::default();
                 let (_, top, _, bottom) = bounds();
