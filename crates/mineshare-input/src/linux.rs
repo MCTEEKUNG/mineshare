@@ -557,7 +557,9 @@ fn pump_device(
                         super::bump_local_mouse_activity();
                     }
                     RelativeAxisCode::REL_WHEEL => {
-                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+                            || super::is_game_driving()
+                        {
                             // Stage 10: optional Y-axis flip.
                             let dy = if super::invert_scroll_y() {
                                 -(value as f32)
@@ -568,7 +570,9 @@ fn pump_device(
                         }
                     }
                     RelativeAxisCode::REL_HWHEEL => {
-                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
+                        if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+                            || super::is_game_driving()
+                        {
                             let dx = if super::invert_scroll_x() {
                                 -(value as f32)
                             } else {
@@ -679,7 +683,11 @@ fn pump_device(
                         // with a stuck-down button after a cursor
                         // cross-back happens between press and
                         // release.
-                        if super::route_mouse_button(btn, value != 0, cursor_in_remote) {
+                        if super::route_mouse_button(
+                            btn,
+                            value != 0,
+                            cursor_in_remote || super::is_game_driving(),
+                        ) {
                             sink(InputEvent::MouseButton {
                                 btn,
                                 down: value != 0,

@@ -1105,13 +1105,13 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 // the meantime. Without this the peer ends up with
                 // a button stuck-down (drag-select runs wild, links
                 // never release, etc.).
-                if super::route_mouse_button(btn, down, mode == MODE_REMOTE) {
+                if super::route_mouse_button(btn, down, forwarding_active()) {
                     sink_send(InputEvent::MouseButton { btn, down });
                     return LRESULT(1);
                 }
             }
         }
-        WM_MOUSEWHEEL if mode == MODE_REMOTE => {
+        WM_MOUSEWHEEL if forwarding_active() => {
             let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
             // Stage 10: optional Y-axis inversion. Win has no
             // horizontal-wheel hook here so only Y matters.
