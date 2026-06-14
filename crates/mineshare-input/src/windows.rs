@@ -430,16 +430,25 @@ enum TakeControlAction {
     Anchor(i32, i32),
 }
 
+/// Skip the edge warp (anchor the cursor in place) when a cursor-locked game
+/// owns the cursor, OR whenever the peer is driving us. The warp only ever
+/// served the peer's exit hysteresis; it actively flings a mouse-look camera,
+/// and `peer_in_remote` fires reliably even when an anti-cheat (Roblox
+/// Hyperion) blocks the foreground-game detection.
+fn should_anchor_cursor(game_foreground: bool, peer_in_remote: bool) -> bool {
+    game_foreground || peer_in_remote
+}
+
 /// Pure decision: where the local cursor should go when the peer takes
 /// control. Split out so the warp-vs-anchor choice is unit-testable
 /// without OS calls.
 fn take_control_action(
-    game_foreground: bool,
+    anchor_in_place: bool,
     side: super::PeerSide,
     bounds: (i32, i32, i32, i32),
     cur: (i32, i32),
 ) -> TakeControlAction {
-    if game_foreground {
+    if anchor_in_place {
         return TakeControlAction::Anchor(cur.0, cur.1);
     }
     let (left, top, right, bottom) = bounds;
@@ -459,7 +468,8 @@ pub fn on_peer_take_control() {
     unsafe {
         let _ = GetCursorPos(&mut cur);
     }
-    match take_control_action(game_foreground(), super::peer_side(), bounds(), (cur.x, cur.y)) {
+    let anchor = should_anchor_cursor(game_foreground(), super::peer_in_remote());
+    match take_control_action(anchor, super::peer_side(), bounds(), (cur.x, cur.y)) {
         TakeControlAction::Warp(x, y) => {
             unsafe {
                 let _ = SetCursorPos(x, y);
@@ -1437,6 +1447,18 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_cursor_when_driven_or_game() {
+        // Skip the edge warp whenever a cursor-locked game owns the cursor,
+        // OR whenever the peer is driving us (reliable signal even when an
+        // anti-cheat blocks game detection). Only a plain desktop crossing
+        // (neither) still warps.
+        assert!(should_anchor_cursor(true, false)); // game foreground
+        assert!(should_anchor_cursor(false, true)); // peer driving us
+        assert!(should_anchor_cursor(true, true));
+        assert!(!should_anchor_cursor(false, false)); // desktop crossing → warp
+    }
 
     #[test]
     fn take_control_skips_warp_when_game_foreground() {
