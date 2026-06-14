@@ -254,14 +254,14 @@ export function useT() {
 export function LanguageToggle() {
   const { locale, setLocale } = useT();
   return (
-    <div className="inline-flex items-center gap-0 text-[11px] font-medium border border-neutral-200 dark:border-neutral-800 rounded-md overflow-hidden">
+    <div className="inline-flex items-center text-[11px] font-medium border border-white/[0.10] rounded-md overflow-hidden">
       <button
         onClick={() => setLocale("en")}
         className={
           "px-2 py-1 transition-colors " +
           (locale === "en"
-            ? "bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900"
-            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100")
+            ? "bg-white/[0.12] text-white"
+            : "text-slate-500 hover:text-slate-200")
         }
       >
         EN
@@ -271,8 +271,8 @@ export function LanguageToggle() {
         className={
           "px-2 py-1 transition-colors " +
           (locale === "th"
-            ? "bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900"
-            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100")
+            ? "bg-white/[0.12] text-white"
+            : "text-slate-500 hover:text-slate-200")
         }
       >
         TH

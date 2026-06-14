@@ -415,6 +415,9 @@ pub fn reset_smart_decision() {
     // Drop stale peer-activity timing so a new session doesn't race
     // against the previous peer's last-seen activity.
     PEER_ACTIVITY_AT.store(0, Ordering::Relaxed);
+    // Note: local stamps (LOCAL_MOUSE_AT/LOCAL_CLICK_AT) are intentionally
+    // NOT cleared, so a fresh session defaults to routing local (peer reads
+    // as "never", local may still read as recent).
     clear_held_forwarded();
     clear_held_buttons();
 }
@@ -612,13 +615,13 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
 // ---------------------------------------------------------------------------
 // Mouse-activity tracking for Smart keyboard routing.
 //
-// Each side records the wall-clock millisecond timestamp of its
-// most recent local hardware mouse motion (`LOCAL_MOUSE_AT`),
-// and what the peer reported via the daemon's periodic
-// ActivityBeacon ControlMsg (`PEER_MOUSE_AT` — wall-clock as
-// observed *here* when the beacon arrived). Smart's heuristic
-// reads both via `local_mouse_active_within` /
-// `peer_mouse_active_within`.
+// Local activity is recorded as wall-clock millisecond timestamps:
+// the most recent deliberate hardware mouse drag (`LOCAL_MOUSE_AT`)
+// and the most recent local mouse-button down (`LOCAL_CLICK_AT`).
+// Peer activity lives in a single `PEER_ACTIVITY_AT`, back-dated onto
+// our own clock from the *age* the daemon's periodic ActivityBeacon
+// ControlMsg reports (no clock-sync needed). Smart's heuristic reads
+// recency on both sides via `local_activity_age` / `peer_activity_age`.
 // ---------------------------------------------------------------------------
 
 /// Wall-clock ms of the most recent *deliberate* local mouse drag
@@ -659,6 +662,12 @@ pub(crate) fn now_ms() -> u64 {
 /// Only a *sustained* run (≥ `DEBOUNCE_MS`) advances the routing
 /// activity clock `LOCAL_MOUSE_AT`; a brief nudge is dropped. Cheap:
 /// a couple of atomic ops + one SystemTime read.
+///
+/// Edge: a deliberate drag whose motion events are spaced wider than
+/// `IDLE_RESET_MS` (250 ms) restarts the run on every event, so it never
+/// accumulates past `DEBOUNCE_MS` and never advances the routing clock.
+/// Acceptable in practice — real HW motion fires far faster than 4
+/// events/sec, and clicks always count regardless.
 pub(crate) fn bump_local_mouse_activity() {
     let now = now_ms();
     let last = LAST_MOTION_AT.swap(now, Ordering::Relaxed);
@@ -1111,6 +1120,19 @@ mod tests {
         assert!(
             LOCAL_MOUSE_AT.load(Relaxed) > 0,
             "a sustained drag must advance the routing activity clock"
+        );
+    }
+
+    #[test]
+    fn reset_zeroes_peer_activity() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        PEER_ACTIVITY_AT.store(now_ms(), Relaxed);
+        reset_smart_decision();
+        assert_eq!(
+            PEER_ACTIVITY_AT.load(Relaxed),
+            0,
+            "reset_smart_decision must clear stale peer-activity timing"
         );
     }
 }

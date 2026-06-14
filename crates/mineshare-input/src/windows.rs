@@ -168,6 +168,23 @@ static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static FLUSH_FWD_COUNT: AtomicI32 = AtomicI32::new(0);
 
+/// Idle window after which a negative `VIRT_X` drift is snapped back to 0
+/// by the watchdog safety net.
+const REMOTE_IDLE_SNAP_MS: u64 = 1_000;
+
+/// Returns true when accumulated negative `VIRT_X` drift should be snapped
+/// back to 0: it has gone negative AND the mouse has been idle (no flush)
+/// for at least `REMOTE_IDLE_SNAP_MS`. `last_flush` of 0 means "never
+/// flushed" and must NOT trigger a snap.
+///
+/// Behavioral edge: a user who drags partway back toward the exit threshold
+/// and then PAUSES (>= REMOTE_IDLE_SNAP_MS) has their negative progress
+/// reset — intended; a pause is treated as "exit not committed", while a
+/// continuous backward drag still crosses the threshold and exits correctly.
+fn should_snap_virt_x(virt_x: i32, last_flush: u64, now: u64) -> bool {
+    virt_x < 0 && last_flush != 0 && now.saturating_sub(last_flush) >= REMOTE_IDLE_SNAP_MS
+}
+
 /// Atomically drain `PENDING_DX/DY` and forward the combined delta.
 /// Skips no-op events when both axes are zero.
 fn flush_pending_motion() {
@@ -213,11 +230,7 @@ fn start_motion_flush_watchdog() {
             // back to the local screen.  We only reset below zero, so a
             // deliberate exit gesture (actively dragging backward past
             // the threshold) still works correctly.
-            const REMOTE_IDLE_SNAP_MS: u64 = 1_000;
-            if VIRT_X.load(Ordering::Relaxed) < 0
-                && last != 0
-                && now.saturating_sub(last) >= REMOTE_IDLE_SNAP_MS
-            {
+            if should_snap_virt_x(VIRT_X.load(Ordering::Relaxed), last, now) {
                 VIRT_X.store(0, Ordering::Relaxed);
             }
         })
@@ -1335,3 +1348,37 @@ fn scancode_to_vk(scan: u16) -> u16 {
 fn _force_vk_use(_v: VIRTUAL_KEY) {}
 
 const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_never_when_non_negative() {
+        // virt_x >= 0 never snaps, even after a long idle period.
+        assert!(!should_snap_virt_x(0, 1, 10_000));
+        assert!(!should_snap_virt_x(5, 1, 10_000));
+    }
+
+    #[test]
+    fn snap_never_when_never_flushed() {
+        // last_flush == 0 means "never flushed" and must not trigger.
+        assert!(!should_snap_virt_x(-1, 0, 10_000));
+    }
+
+    #[test]
+    fn snap_not_when_recently_flushed() {
+        // Negative drift but flushed < REMOTE_IDLE_SNAP_MS ago → no snap.
+        let now = 5_000;
+        let last_flush = now - (REMOTE_IDLE_SNAP_MS - 1);
+        assert!(!should_snap_virt_x(-50, last_flush, now));
+    }
+
+    #[test]
+    fn snap_when_negative_and_idle_long() {
+        // Negative drift and idle >= REMOTE_IDLE_SNAP_MS → snap.
+        let now = 5_000;
+        let last_flush = now - REMOTE_IDLE_SNAP_MS;
+        assert!(should_snap_virt_x(-50, last_flush, now));
+    }
+}

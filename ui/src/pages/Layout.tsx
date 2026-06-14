@@ -48,7 +48,7 @@ export default function LayoutPage() {
 
   if (!layout) {
     return (
-      <p className="text-sm text-neutral-400">
+      <p className="text-sm text-slate-400">
         {err ? `${err}` : t("layout_loading")}
       </p>
     );
@@ -56,7 +56,7 @@ export default function LayoutPage() {
 
   return (
     <section>
-      <p className="text-sm text-neutral-500 mb-6 max-w-prose">
+      <p className="text-sm text-slate-400 mb-6 max-w-prose leading-relaxed">
         {t("layout_intro")}
       </p>
 
@@ -69,23 +69,19 @@ export default function LayoutPage() {
 
       <div className="mt-6 flex items-center justify-between text-sm">
         <p>
-          <span className="text-neutral-500">{t("layout_summary_prefix")} </span>
-          <span className="font-semibold">{layout.peer_side}</span>
-          <span className="text-neutral-500"> {t("layout_summary_suffix")}</span>
+          <span className="text-slate-400">{t("layout_summary_prefix")} </span>
+          <span className="font-semibold text-slate-200">{layout.peer_side}</span>
+          <span className="text-slate-400"> {t("layout_summary_suffix")}</span>
         </p>
-        {pending ? <span className="text-xs text-neutral-400">{t("layout_saving")}</span> : null}
+        {pending ? <span className="text-xs text-slate-400">{t("layout_saving")}</span> : null}
       </div>
-      {err ? <p className="text-xs text-red-600 mt-3">{err}</p> : null}
+      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
     </section>
   );
 }
 
 /* ------------------------------------------------------------------ */
 
-// Canvas large enough to hold the local tile centred + the peer
-// tile flush against any of the four edges with breathing room.
-// Required width  = LOCAL_W + 2*GAP + 2*PEER_W + margins
-// Required height = LOCAL_H + 2*GAP + 2*PEER_H + margins
 const LOCAL_W = 200;
 const LOCAL_H = 125;
 const PEER_W = 170;
@@ -119,7 +115,6 @@ function DragCanvas({
     h: LOCAL_H,
   };
 
-  // Resting peer-tile position derived from the configured side.
   function restingPeerCenter(s: PeerSide): { cx: number; cy: number } {
     switch (s) {
       case "left":
@@ -138,8 +133,6 @@ function DragCanvas({
   const dragRef = useRef<{ startMx: number; startMy: number; startCx: number; startCy: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
-  // Snap position when the persisted side changes (e.g. peer-side
-  // saved by the other tab → coming back here).
   useEffect(() => {
     if (!dragRef.current) setCenter(restingPeerCenter(side));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -188,8 +181,6 @@ function DragCanvas({
       onChoose(projected);
       setCenter(restingPeerCenter(projected));
     } else {
-      // Snap back if drag didn't clear the threshold or chose
-      // the already-active side.
       setCenter(restingPeerCenter(side));
     }
   }
@@ -197,10 +188,9 @@ function DragCanvas({
   return (
     <div
       ref={canvasRef}
-      className="relative mx-auto rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 select-none"
+      className="relative mx-auto rounded-xl border border-white/[0.08] bg-ds-surface select-none"
       style={{ width: CANVAS_W, height: CANVAS_H }}
     >
-      {/* Drop-zone hints — emphasise the side the user is hovering. */}
       <EdgeHint visible={hover === "left"} side="left" box={localBox} />
       <EdgeHint visible={hover === "right"} side="right" box={localBox} />
       <EdgeHint visible={hover === "top"} side="top" box={localBox} />
@@ -223,7 +213,7 @@ function DragCanvas({
         onPointerCancel={onPointerUp}
         className={
           "absolute touch-none " +
-          (disabled ? "cursor-not-allowed opacity-60" : "cursor-grab active:cursor-grabbing")
+          (disabled ? "cursor-not-allowed opacity-50" : "cursor-grab active:cursor-grabbing")
         }
         style={{
           left: center.cx - PEER_W / 2,
@@ -272,19 +262,21 @@ function Tile({
     <div
       className={
         (relative ? "relative " : "absolute ") +
-        "rounded-md border-2 flex flex-col items-center justify-center pointer-events-none select-none transition-colors " +
+        "rounded-lg border-2 flex flex-col items-center justify-center pointer-events-none select-none transition-colors " +
         (accent
-          ? "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40"
+          ? "border-emerald-500/50 bg-emerald-500/10"
           : muted
-            ? "border-dashed border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900/40 text-neutral-400"
-            : "border-neutral-400 bg-white dark:bg-neutral-900")
+            ? "border-dashed border-white/[0.10] bg-white/[0.02] text-slate-500"
+            : "border-white/[0.15] bg-ds-elevated")
       }
       style={
         relative ? { width: w, height: h } : { left: x, top: y, width: w, height: h }
       }
     >
-      <p className="text-sm font-medium">{label}</p>
-      <p className={"text-[11px] " + (accent ? "text-emerald-700" : "text-neutral-500")}>
+      <p className={"text-sm font-medium " + (accent ? "text-emerald-300" : muted ? "text-slate-500" : "text-slate-200")}>
+        {label}
+      </p>
+      <p className={"text-[11px] " + (accent ? "text-emerald-500" : "text-slate-400")}>
         {sub}
       </p>
     </div>
@@ -319,7 +311,7 @@ function EdgeHint({
   }
   return (
     <div
-      className="absolute rounded-full bg-emerald-400/80 pointer-events-none transition-opacity"
+      className="absolute rounded-full bg-emerald-400/70 pointer-events-none transition-opacity"
       style={style}
     />
   );

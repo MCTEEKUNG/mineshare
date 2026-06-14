@@ -131,8 +131,11 @@ pub enum ControlMsg {
     /// The receiver back-dates its single `PEER_ACTIVITY_AT` by the
     /// reported age, so the most-recent-activity race compares both
     /// sides on the receiver's own clock with no clock sync.
+    ///
+    /// Wire format is positional (bincode), so changing these fields
+    /// is a breaking protocol change. Both daemons must upgrade in
+    /// lockstep.
     ActivityBeacon {
-        #[serde(default)]
         last_input_ago_ms: Option<u32>,
     },
     /// Stage 12 file transfer — declares an incoming file. The

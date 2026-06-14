@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss";
 
 export default {
+  darkMode: "class",
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
@@ -14,10 +15,12 @@ export default {
         ],
       },
       colors: {
-        // Loose Windows 11 Settings palette
-        accent: {
-          DEFAULT: "#0078d4",
-          hover: "#106ebe",
+        ds: {
+          bg: "#0F172A",
+          surface: "#1B2336",
+          elevated: "#1E293B",
+          sidebar: "#0D1525",
+          accent: "#22C55E",
         },
       },
     },

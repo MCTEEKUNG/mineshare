@@ -40,33 +40,25 @@ export default function AdvancedPage() {
     <section className="grid gap-6">
       <InputPrefsCard />
 
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
-        <p className="text-base font-semibold mb-3">Traffic</p>
+      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+        <p className="text-base font-semibold text-slate-100 mb-4">Traffic</p>
         {s ? (
           <dl className="grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-3 text-sm">
             <Row k="Sent packets" v={s.sent_pkts.toLocaleString()} />
             <Row k="Received packets" v={s.recv_pkts.toLocaleString()} />
             <Row k="Audio frames recv" v={s.audio_recv.toLocaleString()} />
             <Row k="Injected events" v={s.injected.toLocaleString()} />
-            <Row
-              k="Inject errors"
-              v={s.inject_errs.toLocaleString()}
-              alert={s.inject_errs > 0}
-            />
-            <Row
-              k="Decrypt errors"
-              v={s.decrypt_errs.toLocaleString()}
-              alert={s.decrypt_errs > 0}
-            />
+            <Row k="Inject errors" v={s.inject_errs.toLocaleString()} alert={s.inject_errs > 0} />
+            <Row k="Decrypt errors" v={s.decrypt_errs.toLocaleString()} alert={s.decrypt_errs > 0} />
           </dl>
         ) : (
-          <p className="text-sm text-neutral-400">connecting…</p>
+          <p className="text-sm text-slate-400">connecting…</p>
         )}
       </div>
 
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
-        <p className="text-base font-semibold mb-3">Local files</p>
-        <ul className="text-xs space-y-2 text-neutral-700 dark:text-neutral-300">
+      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+        <p className="text-base font-semibold text-slate-100 mb-4">Local files</p>
+        <ul className="text-xs space-y-3 text-slate-400">
           <FileEntry
             label="Daemon log"
             winPath="%APPDATA%\MineShare\logs\daemon.YYYY-MM-DD"
@@ -85,9 +77,9 @@ export default function AdvancedPage() {
         </ul>
       </div>
 
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
-        <p className="text-base font-semibold mb-3">Platform notes</p>
-        <ul className="text-xs space-y-1.5 text-neutral-700 dark:text-neutral-300 list-disc pl-5">
+      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+        <p className="text-base font-semibold text-slate-100 mb-4">Platform notes</p>
+        <ul className="text-xs space-y-2 text-slate-400 list-disc pl-5 leading-relaxed">
           <li>
             Closing the window hides MineShare to the system tray; the
             daemon and bridge keep running. Use the tray icon's "Quit
@@ -111,20 +103,12 @@ export default function AdvancedPage() {
 }
 
 /**
- * Stage 10 input-preference card. Lives at the top of the Advanced
- * tab so it's discoverable without adding another nav entry.
+ * Stage 10 input-preference card.
  *
- * Mouse sensitivity is applied **capture-side** — the slider on
+ * Mouse sensitivity is applied capture-side — the slider on
  * each machine controls how its outgoing mouse deltas are scaled
- * before being forwarded to the peer. This lets a high-DPI laptop
- * driving a 1080p PC be slowed down without messing with the OS
- * mouse pref on either box. Sub-pixel residue is retained in the
- * input crate so 0.5x doesn't drop alternating 1-pixel motions.
- *
- * Scroll inversion ditto: each machine flips the sign of its
- * outgoing wheel events independently. Cross-OS "natural scroll"
- * mismatch is the most common cross-OS gripe, and this is the
- * cheapest fix.
+ * before being forwarded to the peer. Sub-pixel residue is retained
+ * in the input crate so 0.5x doesn't drop alternating 1-pixel motions.
  */
 function InputPrefsCard() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -138,8 +122,6 @@ function InputPrefsCard() {
 
   async function update(next: Settings) {
     setErr(null);
-    // Optimistic — slider should feel instant. The daemon clamps
-    // and echoes back the canonical value; we re-sync on response.
     setSettings(next);
     try {
       const applied = await invoke<Settings>("set_settings", { settings: next });
@@ -151,9 +133,9 @@ function InputPrefsCard() {
 
   if (!settings) {
     return (
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
-        <p className="text-base font-semibold mb-3">Input preferences</p>
-        <p className="text-xs text-neutral-400">
+      <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+        <p className="text-base font-semibold text-slate-100 mb-3">Input preferences</p>
+        <p className="text-xs text-slate-400">
           {err ? `failed to load: ${err}` : "loading…"}
         </p>
       </div>
@@ -161,17 +143,17 @@ function InputPrefsCard() {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-5">
-      <p className="text-base font-semibold mb-1">Input preferences</p>
-      <p className="text-xs text-neutral-500 mb-5 max-w-prose">
+    <div className="rounded-xl border border-white/[0.08] bg-ds-surface p-5">
+      <p className="text-base font-semibold text-slate-100 mb-1">Input preferences</p>
+      <p className="text-xs text-slate-400 mb-5 max-w-prose leading-relaxed">
         Per-machine knobs for mouse + scroll forwarding to the peer.
         Persists between launches; takes effect immediately.
       </p>
 
       <div className="mb-5">
-        <div className="flex items-baseline justify-between mb-1">
-          <label className="text-sm font-medium">Mouse sensitivity</label>
-          <span className="text-xs font-mono text-neutral-500">
+        <div className="flex items-baseline justify-between mb-1.5">
+          <label className="text-sm font-medium text-slate-200">Mouse sensitivity</label>
+          <span className="text-xs font-mono text-slate-400">
             {settings.mouse_sensitivity.toFixed(2)}×
           </span>
         </div>
@@ -182,19 +164,16 @@ function InputPrefsCard() {
           step={0.05}
           value={settings.mouse_sensitivity}
           onChange={(e) =>
-            update({
-              ...settings,
-              mouse_sensitivity: parseFloat(e.target.value),
-            })
+            update({ ...settings, mouse_sensitivity: parseFloat(e.target.value) })
           }
           className="w-full accent-emerald-500"
         />
-        <div className="flex justify-between text-[10px] text-neutral-400 font-mono mt-0.5">
+        <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-0.5">
           <span>0.25×</span>
           <span>1.00×</span>
           <span>3.00×</span>
         </div>
-        <p className="text-[11px] text-neutral-500 mt-2 max-w-prose">
+        <p className="text-[11px] text-slate-400 mt-2 max-w-prose leading-relaxed">
           Multiplier applied to outgoing mouse deltas. Dial down if
           driving a low-DPI peer from a high-DPI laptop feels too
           fast; dial up for the opposite.
@@ -223,7 +202,7 @@ function InputPrefsCard() {
         onChange={(v) => update({ ...settings, auto_focus_on_take_control: v })}
       />
 
-      {err ? <p className="text-xs text-red-600 mt-3">{err}</p> : null}
+      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
     </div>
   );
 }
@@ -242,16 +221,16 @@ function Toggle({
   return (
     <button
       onClick={() => onChange(!on)}
-      className="flex items-center justify-between rounded-md border border-neutral-200 dark:border-neutral-800 px-3 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors text-left"
+      className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-3 hover:bg-white/[0.06] transition-colors text-left"
     >
-      <div>
-        <p className="text-sm font-medium">{label}</p>
-        <p className="text-[11px] text-neutral-500">{hint}</p>
+      <div className="min-w-0 mr-3">
+        <p className="text-sm font-medium text-slate-200">{label}</p>
+        <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">{hint}</p>
       </div>
       <span
         className={
-          "relative inline-block h-5 w-9 rounded-full transition-colors " +
-          (on ? "bg-emerald-500" : "bg-neutral-300 dark:bg-neutral-700")
+          "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
+          (on ? "bg-emerald-500" : "bg-white/[0.12]")
         }
       >
         <span
@@ -268,15 +247,8 @@ function Toggle({
 function Row({ k, v, alert }: { k: string; v: string; alert?: boolean }) {
   return (
     <div>
-      <dt className="text-[11px] uppercase tracking-wide text-neutral-500 mb-1">
-        {k}
-      </dt>
-      <dd
-        className={
-          "text-sm font-medium " +
-          (alert ? "text-red-600 dark:text-red-400" : "")
-        }
-      >
+      <dt className="text-[10px] uppercase tracking-widest text-slate-400 mb-1">{k}</dt>
+      <dd className={"text-sm font-medium " + (alert ? "text-red-400" : "text-slate-200")}>
         {v}
       </dd>
     </div>
@@ -294,14 +266,14 @@ function FileEntry({
 }) {
   return (
     <li>
-      <p className="font-medium text-neutral-900 dark:text-neutral-100">{label}</p>
+      <p className="font-medium text-slate-300 mb-0.5">{label}</p>
       <p>
-        <span className="text-neutral-500">win: </span>
-        <code className="font-mono">{winPath}</code>
+        <span className="text-slate-400">win: </span>
+        <code className="font-mono text-slate-400">{winPath}</code>
       </p>
       <p>
-        <span className="text-neutral-500">linux: </span>
-        <code className="font-mono">{linuxPath}</code>
+        <span className="text-slate-400">linux: </span>
+        <code className="font-mono text-slate-400">{linuxPath}</code>
       </p>
     </li>
   );

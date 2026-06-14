@@ -13,22 +13,6 @@ type Direction = "output" | "input";
 /**
  * Devices tab — pick the cpal output / input device the bridge
  * uses for the peer's sysout playback and the local mic capture.
- *
- * Stage 8.4 made these runtime-switchable; this revision (post
- * Stage 10 polish request) cleans up the visual hierarchy:
- *
- *   - One row per physical device, no mono font (cpal names are
- *     readable English, no need for Courier).
- *   - Speaker / microphone emoji on the section header so the
- *     two lists are unambiguously different at a glance.
- *   - A single "active" check icon replaces the badge stack —
- *     OS default is a small inline "(default)" suffix in the
- *     name itself, not a competing badge.
- *   - A "Follow system default" row sits at the top of each list
- *     and makes it obvious how to revert when the user has
- *     overridden the choice.
- *   - Manual "Refresh" button so newly hot-plugged devices can
- *     be picked up without waiting for the next poll tick.
  */
 export default function DevicesPage() {
   const [devs, setDevs] = useState<DevicesSnapshot | null>(null);
@@ -37,15 +21,7 @@ export default function DevicesPage() {
 
   async function refresh(force = false) {
     try {
-      // The Rust side caches device enumeration for 5 s — pinging
-      // it every couple seconds was contributing to "Not Responding"
-      // pauses on slower Win laptops because each cpal enumeration
-      // takes 100–500 ms of COM time. We now poll lazily (10 s) and
-      // let the user trigger an explicit invalidation via the
-      // refresh button when they hot-plug a device.
-      if (force) {
-        await invoke("refresh_audio_devices");
-      }
+      if (force) await invoke("refresh_audio_devices");
       const s = await invoke<DevicesSnapshot>("list_audio_devices");
       setDevs(s);
       setErr(null);
@@ -64,17 +40,10 @@ export default function DevicesPage() {
     setPending(dir);
     setErr(null);
     try {
-      const cmd =
-        dir === "output" ? "set_audio_output_device" : "set_audio_input_device";
+      const cmd = dir === "output" ? "set_audio_output_device" : "set_audio_input_device";
       await invoke(cmd, { name });
-      // Optimistic update — confirmed by the next poll.
       setDevs((s) =>
-        s
-          ? {
-              ...s,
-              [dir === "output" ? "selected_output" : "selected_input"]: name,
-            }
-          : s,
+        s ? { ...s, [dir === "output" ? "selected_output" : "selected_input"]: name } : s,
       );
     } catch (e) {
       setErr(String(e));
@@ -85,7 +54,7 @@ export default function DevicesPage() {
 
   if (!devs) {
     return (
-      <p className="text-sm text-neutral-400">
+      <p className="text-sm text-slate-400">
         {err ? `failed: ${err}` : "loading devices…"}
       </p>
     );
@@ -94,7 +63,7 @@ export default function DevicesPage() {
   return (
     <section className="grid gap-6">
       <DeviceList
-        icon="🔊"
+        icon={<IconSpeaker className="size-5 text-slate-400" />}
         title="Audio output"
         subtitle="Where peer sysout (and peer mic on Win, when VB-CABLE is installed) renders."
         devices={devs.outputs}
@@ -104,7 +73,7 @@ export default function DevicesPage() {
         onRefresh={() => refresh(true)}
       />
       <DeviceList
-        icon="🎙️"
+        icon={<IconMic className="size-5 text-slate-400" />}
         title="Audio input"
         subtitle="Where the bridge captures your mic. Pick a non-default device for headset / USB mic / OBS virtual cam, etc."
         devices={devs.inputs}
@@ -113,7 +82,7 @@ export default function DevicesPage() {
         onPick={(n) => pick("input", n)}
         onRefresh={() => refresh(true)}
       />
-      {err ? <p className="text-xs text-red-600">{err}</p> : null}
+      {err ? <p className="text-xs text-red-400">{err}</p> : null}
     </section>
   );
 }
@@ -128,7 +97,7 @@ function DeviceList({
   onPick,
   onRefresh,
 }: {
-  icon: string;
+  icon: React.ReactNode;
   title: string;
   subtitle: string;
   devices: DeviceInfo[];
@@ -139,25 +108,20 @@ function DeviceList({
 }) {
   const followingDefault = selected === null;
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden">
-      {/* Header: icon + title + status pill on the right --------- */}
-      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-neutral-200 dark:border-neutral-800">
+    <div className="rounded-xl border border-white/[0.08] bg-ds-surface overflow-hidden">
+      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-white/[0.06]">
         <div className="flex items-center gap-3 min-w-0">
-          <span className="text-2xl leading-none">{icon}</span>
+          <span className="shrink-0">{icon}</span>
           <div className="min-w-0">
-            <p className="text-base font-semibold leading-tight">{title}</p>
-            <p className="text-xs text-neutral-500 mt-0.5 max-w-md truncate">
-              {subtitle}
-            </p>
+            <p className="text-base font-semibold text-slate-100 leading-tight">{title}</p>
+            <p className="text-xs text-slate-400 mt-0.5 max-w-md truncate">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {busy ? (
-            <span className="text-[11px] text-neutral-400">switching…</span>
-          ) : null}
+          {busy ? <span className="text-[11px] text-slate-400">switching…</span> : null}
           <button
             onClick={onRefresh}
-            className="text-[11px] text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 px-2 py-1 rounded-md hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors"
+            className="text-[11px] text-slate-400 hover:text-slate-200 px-2 py-1 rounded-lg hover:bg-white/[0.06] transition-colors"
             title="Re-scan devices"
           >
             ↻ refresh
@@ -165,8 +129,7 @@ function DeviceList({
         </div>
       </div>
 
-      {/* Body: list of devices ----------------------------------- */}
-      <ul className="divide-y divide-neutral-100 dark:divide-neutral-900">
+      <ul className="divide-y divide-white/[0.04]">
         <DeviceRow
           name="Follow system default"
           hint="Whatever the OS picks; the bridge re-targets if it changes."
@@ -183,7 +146,7 @@ function DeviceList({
           />
         ))}
         {devices.length === 0 ? (
-          <li className="px-5 py-8 text-center text-sm text-neutral-400">
+          <li className="px-5 py-8 text-center text-sm text-slate-400">
             none reported by cpal
           </li>
         ) : null}
@@ -211,31 +174,25 @@ function DeviceRow({
         className={
           "w-full flex items-center justify-between gap-4 px-5 py-3 transition-colors text-left " +
           (active
-            ? "bg-emerald-50/70 dark:bg-emerald-950/30"
-            : "hover:bg-neutral-50 dark:hover:bg-neutral-900/60")
+            ? "bg-emerald-500/[0.08]"
+            : "hover:bg-white/[0.04]")
         }
       >
         <div className="min-w-0 flex-1">
-          <p
-            className={
-              "text-sm truncate " +
-              (active
-                ? "font-semibold text-emerald-700 dark:text-emerald-300"
-                : "font-medium text-neutral-800 dark:text-neutral-200")
-            }
-          >
+          <p className={
+            "text-sm truncate " +
+            (active ? "font-semibold text-emerald-300" : "font-medium text-slate-300")
+          }>
             {name}
           </p>
-          {hint ? (
-            <p className="text-[11px] text-neutral-500 mt-0.5">{hint}</p>
-          ) : null}
+          {hint ? <p className="text-[11px] text-slate-400 mt-0.5">{hint}</p> : null}
         </div>
         <span
           className={
             "shrink-0 inline-flex items-center justify-center size-5 rounded-full transition-colors " +
             (active
               ? "bg-emerald-500 text-white"
-              : "border border-neutral-300 dark:border-neutral-700")
+              : "border border-white/[0.12]")
           }
           aria-hidden
         >
@@ -248,16 +205,28 @@ function DeviceRow({
 
 function CheckIcon() {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="3"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="size-3"
-    >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="size-3">
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function IconSpeaker({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+    </svg>
+  );
+}
+
+function IconMic({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
     </svg>
   );
 }
