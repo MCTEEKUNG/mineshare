@@ -140,6 +140,9 @@ const SCAN_HOTKEY_LOCK: u32 = 0x26; // L
 /// cursor — useful for "leave mouse here, type over there"
 /// workflows.
 const SCAN_HOTKEY_KB: u32 = 0x25; // K
+/// Hotkey: Ctrl+Alt+G toggles Game Drive — drive the peer's game with
+/// pure-relative mouse + keyboard (no cursor-crossing, warp, or game-lock).
+const SCAN_G: u32 = 0x22; // G (set-1 make code)
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
@@ -1202,6 +1205,18 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         {
             super::cycle_keyboard_target();
             info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+            return LRESULT(1);
+        }
+
+        // Hotkey: Ctrl+Alt+G toggles Game Drive (drive the peer's game with
+        // pure-relative mouse + keyboard, no cursor-crossing).
+        if down
+            && scan == SCAN_G
+            && MOD_CTRL.load(Ordering::Relaxed)
+            && MOD_ALT.load(Ordering::Relaxed)
+        {
+            info!("hotkey Ctrl+Alt+G — toggling Game Drive");
+            super::toggle_game_drive();
             return LRESULT(1);
         }
 
