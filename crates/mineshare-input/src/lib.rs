@@ -994,6 +994,24 @@ pub(crate) fn fire_remote_event(ev: RemoteEvent) {
     }
 }
 
+/// Toggle Game Drive from this machine. When turning ON we become `Driving`
+/// and signal the peer to `Receiving`; when turning OFF we reset and signal
+/// stop. No-op semantics if there is no peer are handled by the daemon
+/// (the RemoteEvent simply isn't delivered).
+pub fn toggle_game_drive() {
+    if is_game_driving() {
+        set_game_drive(GameDrive::Off);
+        fire_remote_event(RemoteEvent::GameDriveStop);
+    } else {
+        // Start from a clean LOCAL state: if the cursor had crossed into
+        // REMOTE, the REMOTE motion branch would run virt_x + the anchor
+        // warp and re-introduce the in-game camera fling. Force LOCAL first.
+        force_local_exit_remote();
+        set_game_drive(GameDrive::Driving);
+        fire_remote_event(RemoteEvent::GameDriveStart);
+    }
+}
+
 /// Forces the local capture to leave Remote mode (used when the peer
 /// asks us to release control via `ControlMsg::ForceRelease`).
 pub fn force_local_exit_remote() {
@@ -1131,6 +1149,17 @@ mod tests {
         assert!(is_game_receiving());
 
         set_game_drive(GameDrive::Off); // reset for other tests
+    }
+
+    #[test]
+    fn toggle_game_drive_flips_state() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        set_game_drive(GameDrive::Off);
+        toggle_game_drive();
+        assert!(is_game_driving(), "toggle from Off enters Driving");
+        toggle_game_drive();
+        assert_eq!(game_drive(), GameDrive::Off, "toggle from Driving returns Off");
     }
 
     #[test]
