@@ -519,14 +519,24 @@ fn pump_device(
 
     // Read non-blocking so the loop can wake on a timer (see
     // GRAB_POLL_MS) and re-apply the grab decision even while idle.
-    // If this fails we fall back to blocking reads — the grab is then
-    // late on idle threads (the original bug) but input still flows.
-    let nonblocking = match device.set_nonblocking(true) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(path = %path.display(), error = %e,
-                "evdev set_nonblocking failed; grab may lag on idle device");
-            false
+    //
+    // Scoped to NON-pointer devices (keyboards) only: the stuck-key bug
+    // is specific to *idle* device threads, and a keyboard is idle
+    // exactly when the mouse crosses the edge. The mouse pump is never
+    // idle during its own cross — it's actively iterating on motion —
+    // so it already applies its grab in time. Leaving the pointer pump
+    // on plain blocking reads keeps the motion/SYN_REPORT accumulation
+    // that feeds the cursor-cross FSM byte-for-byte unchanged.
+    let nonblocking = if is_pointer {
+        false
+    } else {
+        match device.set_nonblocking(true) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e,
+                    "evdev set_nonblocking failed; grab may lag on idle keyboard");
+                false
+            }
         }
     };
 
