@@ -15,9 +15,12 @@ use anyhow::{Context, Result};
 use bincode::config::standard;
 use mineshare_audio::{AudioFrame, AudioPlayback};
 use mineshare_core::DeviceId;
-use mineshare_input::{InputEvent, InputInject, make_capture, make_inject};
+use mineshare_input::{
+    ForwardedInputState, InputEvent, InputInject, make_capture, make_inject,
+};
 use mineshare_net::{
     Discovery, DiscoveryEvent, EncryptedSession, Initiator, NoiseSession, PeerAdvert, Responder,
+    TransportDomain,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -48,6 +51,7 @@ const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 /// while still triggering on quiet music.
 const ECHO_GUARD_MS: u64 = 500;
 const ECHO_TRIGGER_MIN_BYTES: usize = 12;
+const DTX_COMFORT_NOISE_MAX_BYTES: usize = 3;
 static LAST_PEER_SYSOUT_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
@@ -174,8 +178,45 @@ pub enum ControlMsg {
 /// Wire format is positional; both daemons must run the same version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireFrame {
-    Input(InputEvent),
+    Input { seq: u64, event: InputEvent },
+    InputState {
+        seq: u64,
+        after_input_seq: u64,
+        state: ForwardedInputState,
+    },
     Audio(AudioFrame),
+}
+
+#[derive(Default)]
+struct InputReceiveOrdering {
+    last_event_seq: Option<u64>,
+    last_snapshot_seq: Option<u64>,
+    event_floor: u64,
+}
+
+impl InputReceiveOrdering {
+    fn accept_event(&mut self, seq: u64) -> bool {
+        if seq < self.event_floor || self.last_event_seq.is_some_and(|last| seq <= last) {
+            return false;
+        }
+        self.last_event_seq = Some(seq);
+        true
+    }
+
+    fn accept_snapshot(&mut self, seq: u64, after_input_seq: u64) -> bool {
+        if self.last_snapshot_seq.is_some_and(|last| seq <= last) {
+            return false;
+        }
+        self.last_snapshot_seq = Some(seq);
+        self.event_floor = self.event_floor.max(after_input_seq);
+
+        // A snapshot only describes events below `after_input_seq`. If a
+        // newer event already arrived, applying this older state could undo a
+        // key-up and briefly re-stick the key. A later snapshot will heal any
+        // edge that was genuinely lost.
+        self.last_event_seq
+            .is_none_or(|last| last < after_input_seq)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,7 +361,9 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 
     let bcast_for_audio_drain = wire_bcast.clone();
     tokio::spawn(async move {
-        while let Some(frame) = audio_cap_rx.recv().await {
+        let mut sysout_wire_seq = 0u32;
+        let mut mic_wire_seq = 0u32;
+        while let Some(mut frame) = audio_cap_rx.recv().await {
             // GUI-driven outbound toggle — flipped from the Audio
             // tab. Off → drop the frame before it hits the broadcast
             // (capture pipeline keeps running so re-enable is
@@ -339,6 +382,13 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                 continue;
             }
 
+            // Opus DTX still emits tiny comfort-noise payloads. Silence does
+            // not need transport keepalives (the control channel already has
+            // them), so suppress these packets and avoid ~100 idle UDP pps.
+            if frame.opus.len() <= DTX_COMFORT_NOISE_MAX_BYTES {
+                continue;
+            }
+
             // Echo-loop guard ONLY applies to sysout: when the peer
             // is talking and we play it back, our own loopback
             // re-captures it and would feed a runaway loop. Mic
@@ -351,6 +401,18 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     continue;
                 }
             }
+            frame.seq = match frame.stream {
+                mineshare_audio::StreamKind::SysOut => {
+                    let seq = sysout_wire_seq;
+                    sysout_wire_seq = sysout_wire_seq.wrapping_add(1);
+                    seq
+                }
+                mineshare_audio::StreamKind::Mic => {
+                    let seq = mic_wire_seq;
+                    mic_wire_seq = mic_wire_seq.wrapping_add(1);
+                    seq
+                }
+            };
             let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
         }
         debug!("audio capture pump terminated");
@@ -601,6 +663,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: TcpListener,
     static_priv: Vec<u8>,
@@ -647,6 +710,7 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound(
     mut stream: TcpStream,
     static_priv: &[u8],
@@ -679,6 +743,7 @@ async fn handle_inbound(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dial_and_run(
     peer: &PeerAdvert,
     static_priv: &[u8],
@@ -743,6 +808,7 @@ async fn dial_and_run(
 /// 2. Receive the peer's UDP port.
 /// 3. Spawn UDP-recv → decrypt → inject loop.
 /// 4. Spawn capture-bcast-recv → encrypt → UDP-send loop.
+#[allow(clippy::too_many_arguments)]
 async fn run_peer_session(
     mut stream: TcpStream,
     session: NoiseSession,
@@ -754,7 +820,7 @@ async fn run_peer_session(
     input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
-    let peer_static = session.remote_static.clone();
+    let peer_static = session.remote_static;
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
@@ -885,10 +951,14 @@ async fn run_peer_session(
     // writer is currently selecting on; capacity is unbounded but
     // traffic is at most ~4 msgs/s.
     let (rtt_tx, mut rtt_rx) = tokio::sync::mpsc::unbounded_channel::<ControlMsg>();
+    let (file_tx, mut file_rx) = tokio::sync::mpsc::channel::<ControlMsg>(
+        crate::files::file_queue_capacity(),
+    );
     let aead_writer = aead.clone_handle();
     let writer_handle = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
+                biased;
                 ev = rev_rx.recv() => match ev {
                     Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
@@ -901,15 +971,19 @@ async fn run_peer_session(
                     }
                     None => break,
                 },
-                clip = clip_rx.recv() => match clip {
-                    Some(text) => ControlMsg::ClipboardText(text),
+                rtt = rtt_rx.recv() => match rtt {
+                    Some(m) => m,
                     None => break,
                 },
                 side = side_rx.recv() => match side {
                     Some(s) => ControlMsg::SetPeerSide(s),
                     None => break,
                 },
-                rtt = rtt_rx.recv() => match rtt {
+                clip = clip_rx.recv() => match clip {
+                    Some(text) => ControlMsg::ClipboardText(text),
+                    None => break,
+                },
+                file = file_rx.recv() => match file {
                     Some(m) => m,
                     None => break,
                 },
@@ -931,7 +1005,7 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
-    crate::files::set_session_tx(rtt_tx.clone());
+    crate::files::set_session_tx(file_tx);
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
     // sender clone so dropping the rtt channel kills the task at
@@ -1133,18 +1207,35 @@ async fn run_peer_session(
         // tiny but Opus frames + AEAD tag + bincode framing top out
         // around 1.5 KB. 4 KB leaves comfortable headroom.
         let mut buf = vec![0u8; 4096];
+        let mut injected_state = ForwardedInputState::default();
+        let mut input_ordering = InputReceiveOrdering::default();
         loop {
             match udp_recv.recv_from(&mut buf).await {
                 Ok((n, src)) if src == peer_udp => {
                     stats_recv.recv_pkts.fetch_add(1, Ordering::Relaxed);
                     stats_recv.recv_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                    match aead_recv.open(&buf[..n]) {
+                    match aead_recv.open_for(TransportDomain::Datagram, &buf[..n]) {
                         Ok(pt) => {
                             match bincode::serde::decode_from_slice::<WireFrame, _>(
                                 &pt,
                                 standard(),
                             ) {
-                                Ok((WireFrame::Input(ev), _)) => {
+                                Ok((WireFrame::Input { seq, event: ev }, _)) => {
+                                    if let Some(last) = input_ordering.last_event_seq {
+                                        if seq > last.saturating_add(1) {
+                                            debug!(
+                                                missing = seq - last - 1,
+                                                last,
+                                                seq,
+                                                "input UDP sequence gap"
+                                            );
+                                        } else if seq <= last {
+                                            debug!(last, seq, "input UDP packet reordered");
+                                        }
+                                    }
+                                    if !input_ordering.accept_event(seq) {
+                                        continue;
+                                    }
                                     let n = stats_recv.injected.load(Ordering::Relaxed);
                                     if n % 200 == 0 {
                                         tracing::info!(?ev, n, "sample inject event");
@@ -1153,7 +1244,34 @@ async fn run_peer_session(
                                         warn!(error = %e, "inject failed");
                                         stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
                                     } else {
+                                        injected_state.apply_event(ev);
                                         stats_recv.injected.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Ok((WireFrame::InputState {
+                                    seq,
+                                    after_input_seq,
+                                    state,
+                                }, _)) => {
+                                    if !input_ordering.accept_snapshot(seq, after_input_seq) {
+                                        continue;
+                                    }
+                                    let corrections = injected_state.reconciliation_events(&state);
+                                    if !corrections.is_empty() {
+                                        debug!(
+                                            count = corrections.len(),
+                                            seq,
+                                            "reconciling peer held-input snapshot"
+                                        );
+                                    }
+                                    for correction in corrections {
+                                        if let Err(e) = inject_recv.dispatch(correction) {
+                                            warn!(error = %e, "held-input reconciliation failed");
+                                            stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            injected_state.apply_event(correction);
+                                            stats_recv.injected.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                                 Ok((WireFrame::Audio(frame), _)) => {
@@ -1282,6 +1400,12 @@ async fn run_peer_session(
     // to drag-across motion.
     let mut input_sub = input_bcast.subscribe();
     let mut sub = bcast.subscribe();
+    let mut next_input_seq = 0u64;
+    let mut next_state_seq = 0u64;
+    let mut input_state_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    input_state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_state_sent = ForwardedInputState::default();
+    let mut state_repeats_remaining = 0u8;
     tokio::pin!(reader_handle);
     let exit_reason = loop {
         // Each arm goes through this same encode → encrypt → send →
@@ -1293,7 +1417,7 @@ async fn run_peer_session(
                     Ok(b) => b,
                     Err(e) => { warn!(error = %e, "encode failed"); continue; }
                 };
-                let ct = match aead.seal(&pt) {
+                let ct = match aead.seal_for(TransportDomain::Datagram, &pt) {
                     Ok(b) => b,
                     Err(e) => { warn!(error = %e, "encrypt failed"); continue; }
                 };
@@ -1306,10 +1430,38 @@ async fn run_peer_session(
                 stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
             }};
         }
+        macro_rules! send_input {
+            ($event:expr) => {{
+                let event = $event;
+                let seq = next_input_seq;
+                next_input_seq = next_input_seq.wrapping_add(1);
+                send_wire!(WireFrame::Input { seq, event }, "input");
+            }};
+        }
         tokio::select! {
             biased;
             _ = &mut reader_handle => {
                 break "TCP control reader ended";
+            }
+            _ = input_state_tick.tick() => {
+                let state = mineshare_input::forwarded_input_state();
+                let changed = state != last_state_sent;
+                if changed {
+                    state_repeats_remaining = 4;
+                }
+                if changed || state.any_held() || state_repeats_remaining > 0 {
+                    let seq = next_state_seq;
+                    next_state_seq = next_state_seq.wrapping_add(1);
+                    send_wire!(WireFrame::InputState {
+                        seq,
+                        after_input_seq: next_input_seq,
+                        state,
+                    }, "input-state");
+                    last_state_sent = state;
+                    if !changed && state_repeats_remaining > 0 {
+                        state_repeats_remaining -= 1;
+                    }
+                }
             }
             // HIGH-PRIORITY: input events skip the audio queue.
             recv = input_sub.recv() => match recv {
@@ -1347,12 +1499,12 @@ async fn run_peer_session(
                             }
                         }
                     }
-                    send_wire!(WireFrame::Input(InputEvent::MouseMove { dx, dy }), "input");
+                    send_input!(InputEvent::MouseMove { dx, dy });
                     if let Some(other) = trailer {
-                        send_wire!(WireFrame::Input(other), "input");
+                        send_input!(other);
                     }
                 }
-                Ok(ev) => { send_wire!(WireFrame::Input(ev), "input"); }
+                Ok(ev) => { send_input!(ev); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "input subscriber lagged — events dropped");
                 }
@@ -1403,7 +1555,7 @@ where
     T: Serialize,
 {
     let pt = bincode::serde::encode_to_vec(msg, standard())?;
-    let ct = aead.seal(&pt)?;
+    let ct = aead.seal_for(TransportDomain::Control, &pt)?;
     let len = u32::try_from(ct.len()).context("frame too large")?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&ct).await?;
@@ -1418,9 +1570,14 @@ where
     let mut hdr = [0u8; 4];
     stream.read_exact(&mut hdr).await?;
     let len = u32::from_be_bytes(hdr) as usize;
+    const MAX_ENCRYPTED_CONTROL_FRAME: usize = 65_543; // Noise max ciphertext + explicit nonce.
+    anyhow::ensure!(
+        len <= MAX_ENCRYPTED_CONTROL_FRAME,
+        "encrypted control frame too large: {len}"
+    );
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    let pt = aead.open(&buf)?;
+    let pt = aead.open_for(TransportDomain::Control, &buf)?;
     let (val, _) = bincode::serde::decode_from_slice::<T, _>(&pt, standard())?;
     Ok(val)
 }
@@ -1662,5 +1819,26 @@ struct NullPlayback;
 impl AudioPlayback for NullPlayback {
     fn enqueue(&self, _frame: AudioFrame) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputReceiveOrdering;
+
+    #[test]
+    fn authoritative_snapshot_suppresses_a_late_covered_edge() {
+        let mut ordering = InputReceiveOrdering::default();
+        assert!(ordering.accept_snapshot(0, 1));
+        assert!(!ordering.accept_event(0));
+        assert!(ordering.accept_event(1));
+    }
+
+    #[test]
+    fn snapshot_cannot_undo_an_event_newer_than_its_coverage() {
+        let mut ordering = InputReceiveOrdering::default();
+        assert!(ordering.accept_event(1));
+        assert!(!ordering.accept_snapshot(0, 1));
+        assert!(ordering.accept_snapshot(1, 2));
     }
 }

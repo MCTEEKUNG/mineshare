@@ -3,7 +3,7 @@
 
 [package]
 name = "mineshare-app"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -53,3 +53,7 @@ tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "macros", "ne
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+
+[patch.crates-io]
+# Keep the standalone Tauri lock on the same upstream quick-xml advisory fix.
+wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "d07c4f91f28b42e5a485823ffd9d8d5a210b1053" }

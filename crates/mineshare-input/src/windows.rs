@@ -30,7 +30,9 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY,
+};
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
     RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
@@ -79,9 +81,8 @@ fn forwarding_active() -> bool {
     CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::is_game_driving()
 }
 
-static EVENT_SINK: OnceLock<
-    Mutex<Option<std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>>>,
-> = OnceLock::new();
+type EventSink = std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>;
+static EVENT_SINK: OnceLock<Mutex<Option<EventSink>>> = OnceLock::new();
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
@@ -569,7 +570,7 @@ impl InputCapture for HookCapture {
         // explicit Ctrl+Alt+L override always wins.
         thread::Builder::new()
             .name("win-game-detect".into())
-            .spawn(|| game_detect_thread())
+            .spawn(game_detect_thread)
             .context("spawn game-detect thread")?;
         Ok(())
     }
@@ -1288,7 +1289,7 @@ fn record_inject_cadence() {
         INJECT_MAX_GAP_MS.fetch_max(now.saturating_sub(last), Ordering::Relaxed);
     }
     let c = INJECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if c % 500 == 0 {
+    if c.is_multiple_of(500) {
         let ws = INJECT_WINDOW_START_MS.swap(now, Ordering::Relaxed);
         let max_gap = INJECT_MAX_GAP_MS.swap(0, Ordering::Relaxed);
         if ws != 0 {
@@ -1324,12 +1325,47 @@ impl EnigoInject {
     }
 }
 
+fn should_use_game_relative_injection(
+    game_foreground: bool,
+    game_drive: super::GameDrive,
+) -> bool {
+    game_foreground || matches!(game_drive, super::GameDrive::Receiving)
+}
+
+fn send_relative_mouse_input(dx: i32, dy: i32) -> Result<()> {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    anyhow::ensure!(sent == 1, "SendInput relative mouse move was rejected");
+    Ok(())
+}
+
 impl InputInject for EnigoInject {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> Result<()> {
-        self.inner
-            .lock()
-            .move_mouse(dx, dy, Coordinate::Rel)
-            .context("enigo move_mouse")?;
+        if should_use_game_relative_injection(game_foreground(), super::game_drive()) {
+            // Enigo's default Windows `Coordinate::Rel` path converts to
+            // GetCursorPos + an absolute move to bypass pointer acceleration.
+            // Pointer-lock games recenter every frame, so that conversion
+            // races the game and causes camera flings. Send true relative
+            // mickeys only for game-locked receiving; keep desktop behavior.
+            send_relative_mouse_input(dx, dy)?;
+        } else {
+            self.inner
+                .lock()
+                .move_mouse(dx, dy, Coordinate::Rel)
+                .context("enigo move_mouse")?;
+        }
         record_inject_cadence();
         Ok(())
     }
@@ -1508,6 +1544,26 @@ mod tests {
             take_control_action(true, crate::PeerSide::Right, bounds, (700, 700)),
             TakeControlAction::Anchor(700, 700),
         );
+    }
+
+    #[test]
+    fn true_relative_injection_is_scoped_to_game_receiving() {
+        assert!(should_use_game_relative_injection(
+            true,
+            super::super::GameDrive::Off
+        ));
+        assert!(should_use_game_relative_injection(
+            false,
+            super::super::GameDrive::Receiving
+        ));
+        assert!(!should_use_game_relative_injection(
+            false,
+            super::super::GameDrive::Driving
+        ));
+        assert!(!should_use_game_relative_injection(
+            false,
+            super::super::GameDrive::Off
+        ));
     }
 
     #[test]

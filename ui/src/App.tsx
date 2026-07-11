@@ -9,13 +9,13 @@ import SettingsPage from "./pages/Settings";
 import PairingModal from "./PairingModal";
 import { LanguageToggle, useT } from "./i18n";
 import {
-  IconActivity, IconGrid, IconVolume, IconFile, IconSliders,
+  IconActivity, IconVolume, IconFile, IconSliders,
   IconArrowDown, IconArrowUp, IconArrowUpRight, IconArrowDownLeft,
   IconX, IconAlertTriangle,
 } from "./icons";
 import type { Status, Latency, Transfer, ToastEntry } from "./types";
 
-type Tab = "home" | "layout" | "audio_devices" | "files" | "settings";
+type Tab = "home" | "audio_devices" | "files" | "settings";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
@@ -105,6 +105,7 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
+    try { getCurrentWebview() } catch { return; }
     getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === "enter" || event.payload.type === "over") {
@@ -229,9 +230,6 @@ export default function App() {
           <NavItem active={tab === "home"} onClick={() => setTab("home")} icon={<IconActivity className="size-4" />}>
             {t("nav_home")}
           </NavItem>
-          <NavItem active={tab === "layout"} onClick={() => setTab("layout")} icon={<IconGrid className="size-4" />}>
-            {t("nav_layout")}
-          </NavItem>
           <NavItem active={tab === "audio_devices"} onClick={() => setTab("audio_devices")} icon={<IconVolume className="size-4" />}>
             {t("nav_audio_devices")}
           </NavItem>
@@ -258,8 +256,15 @@ export default function App() {
             <ConnectionPill status={status} error={error} />
           </header>
 
-          {tab === "home" && status ? <HomePage status={status} latency={latency} /> : null}
-          {tab === "layout" ? <LayoutPage /> : null}
+          {tab === "home" ? (
+            <>
+              <p className="text-xs font-semibold uppercase tracking-widest text-ds-text-muted mb-4">{t("nav_layout")}</p>
+              <LayoutPage />
+              <div className="my-8 border-t border-ds-border" />
+              <p className="text-xs font-semibold uppercase tracking-widest text-ds-text-muted mb-4">{t("home_status_section")}</p>
+              {status ? <HomePage status={status} latency={latency} /> : null}
+            </>
+          ) : null}
           {tab === "audio_devices" ? <AudioDevicesPage /> : null}
           {tab === "files" ? <FilesPage /> : null}
           {tab === "settings" ? <SettingsPage /> : null}

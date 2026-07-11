@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use tracing::{debug, info, warn};
 
 use crate::codec::OpusDecoder;
@@ -31,6 +31,11 @@ use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMP
 /// 200 ms. Generous enough to absorb network jitter, tight enough not
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
+const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 2;
+const UNDERRUN_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
+
+static PLAYBACK_UNDERRUN_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 pub struct CpalPlayback {
     tx: mpsc::Sender<AudioFrame>,
@@ -106,6 +111,8 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
     let mut last_watchdog = Instant::now();
     let mut last_tick_snapshot: u64 = 0;
     let mut frames_since_watchdog: u64 = 0;
+    let mut last_underrun_report = Instant::now();
+    let mut last_frame_received = Instant::now();
 
     loop {
         // (Re)build the stream when we need one:
@@ -150,14 +157,25 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
         // periods, peer paused playback, etc.).
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
+                last_frame_received = Instant::now();
                 // Drop duplicate / reordered-late frames: a seq at or
                 // below the last accepted one carries no new audio.
-                if let Some(l) = last_seq {
-                    if frame.seq <= l {
-                        continue;
-                    }
+                if let Some(l) = last_seq
+                    && frame.seq <= l
+                {
+                    continue;
                 }
                 if let Some(ctx) = stream_ctx.as_mut() {
+                    if ctx.paused {
+                        if let Err(e) = ctx.stream.play() {
+                            warn!(error = %e, "cpal playback resume failed — rebuilding");
+                            stream_ctx = None;
+                            next_build_attempt = Instant::now();
+                            continue;
+                        }
+                        ctx.paused = false;
+                        debug!("cpal playback resumed after idle");
+                    }
                     // Conceal any gap between the last accepted seq and
                     // this one. Cap the fill so a large gap (long stall,
                     // seq reset) doesn't blast a burst of synthetic
@@ -248,8 +266,28 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // No new frame — fall through to top of loop for
                 // the version-check / retry-timer.
+                if let Some(ctx) = stream_ctx.as_mut()
+                    && !ctx.paused
+                    && last_frame_received.elapsed() >= IDLE_PAUSE_AFTER
+                {
+                    match ctx.stream.pause() {
+                        Ok(()) => {
+                            ctx.paused = true;
+                            debug!("cpal playback paused while idle");
+                        }
+                        Err(e) => debug!(error = %e, "cpal playback idle pause failed"),
+                    }
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if last_underrun_report.elapsed() >= UNDERRUN_REPORT_INTERVAL {
+            let samples = PLAYBACK_UNDERRUN_SAMPLES.swap(0, Ordering::Relaxed);
+            if samples > 0 {
+                debug!(samples, "cpal playback underrun summary");
+            }
+            last_underrun_report = Instant::now();
         }
     }
 
@@ -265,8 +303,8 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
 /// can't see it being read; the `#[allow]` keeps the warning
 /// quiet without disabling dead-code lints elsewhere.
 struct StreamCtx {
-    #[allow(dead_code)]
     stream: cpal::Stream,
+    paused: bool,
     producer: ringbuf::HeapProd<f32>,
     /// Bumped by the cpal data callback every time the device pulls
     /// samples. The playback thread's watchdog samples this to tell a
@@ -311,21 +349,25 @@ fn build_stream() -> Result<StreamCtx> {
     let stream = match config.sample_format() {
         SampleFormat::F32 => device.build_output_stream(
             &config.config(),
-            move |out: &mut [f32], _| {
+            {
+                let mut playback_started = false;
+                move |out: &mut [f32], _| {
                 ticks_f32.fetch_add(1, Ordering::Relaxed);
-                fill_callback(out, &mut consumer);
+                    fill_callback(out, &mut consumer, &mut playback_started);
+                }
             },
             err_fn,
             None,
         ),
         SampleFormat::I16 => {
             let mut tmp = vec![0f32; 0];
+            let mut playback_started = false;
             device.build_output_stream(
                 &config.config(),
                 move |out: &mut [i16], _| {
                     ticks_i16.fetch_add(1, Ordering::Relaxed);
                     tmp.resize(out.len(), 0.0);
-                    fill_callback(&mut tmp, &mut consumer);
+                    fill_callback(&mut tmp, &mut consumer, &mut playback_started);
                     for (dst, &src) in out.iter_mut().zip(tmp.iter()) {
                         *dst = (src.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     }
@@ -341,22 +383,32 @@ fn build_stream() -> Result<StreamCtx> {
 
     Ok(StreamCtx {
         stream,
+        paused: false,
         producer,
         callback_ticks,
         stream_error,
     })
 }
 
-fn fill_callback(out: &mut [f32], consumer: &mut ringbuf::HeapCons<f32>) {
+fn fill_callback(
+    out: &mut [f32],
+    consumer: &mut ringbuf::HeapCons<f32>,
+    playback_started: &mut bool,
+) {
+    if !*playback_started {
+        if consumer.occupied_len() < JITTER_TARGET_SAMPLES {
+            out.fill(0.0);
+            return;
+        }
+        *playback_started = true;
+    }
     let popped = consumer.pop_slice(out);
     for s in &mut out[popped..] {
         *s = 0.0;
     }
     if popped < out.len() {
-        debug!(
-            underrun = out.len() - popped,
-            "cpal playback ring underrun (filled with silence)"
-        );
+        PLAYBACK_UNDERRUN_SAMPLES.fetch_add((out.len() - popped) as u64, Ordering::Relaxed);
+        *playback_started = false;
     }
 }
 
@@ -376,14 +428,14 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
             && target_rate <= c.max_sample_rate()
             && c.sample_format() == SampleFormat::F32
     }) {
-        return Ok(matched.clone().with_sample_rate(target_rate));
+        return Ok((*matched).with_sample_rate(target_rate));
     }
     if let Some(matched) = supported.iter().find(|c| {
         c.channels() == CHANNELS
             && c.min_sample_rate() <= target_rate
             && target_rate <= c.max_sample_rate()
     }) {
-        return Ok(matched.clone().with_sample_rate(target_rate));
+        return Ok((*matched).with_sample_rate(target_rate));
     }
     let default = device
         .default_output_config()

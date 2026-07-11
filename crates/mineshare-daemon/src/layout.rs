@@ -150,10 +150,7 @@ fn load_or_default() -> LayoutConfig {
         Ok(b) => b,
         Err(_) => return LayoutConfig::default(),
     };
-    match serde_json::from_slice::<LayoutConfig>(&bytes) {
-        Ok(cfg) => cfg,
-        Err(_) => LayoutConfig::default(),
-    }
+    serde_json::from_slice::<LayoutConfig>(&bytes).unwrap_or_default()
 }
 
 fn save(cfg: &LayoutConfig) -> Result<()> {

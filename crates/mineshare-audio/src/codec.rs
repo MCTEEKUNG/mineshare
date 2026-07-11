@@ -32,6 +32,9 @@ impl OpusEncoder {
         // Explicit VBR — libopus defaults to VBR on, but set it so the
         // intent is visible and stable across crate versions.
         enc.set_vbr(true).context("opus set vbr")?;
+        // DTX lets the transport suppress comfort-noise frames while a
+        // source is silent instead of waking the Wi-Fi radio 50 times/s.
+        enc.set_dtx(true).context("opus set dtx")?;
         if inband_fec {
             enc.set_inband_fec(true).context("opus set inband fec")?;
             // Tell the encoder roughly how lossy the link is so it sizes
@@ -163,5 +166,16 @@ mod tests {
         assert_eq!(frames_lost(Some(4), 5), 0); // contiguous
         assert_eq!(frames_lost(Some(4), 7), 2); // dropped 5,6
         assert_eq!(frames_lost(Some(9), 9), 0); // duplicate -> caller drops
+    }
+
+    #[test]
+    fn silence_converges_to_a_tiny_dtx_payload() {
+        let mut encoder = OpusEncoder::new(48_000, true).unwrap();
+        let silence = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+        let mut last = Vec::new();
+        for _ in 0..25 {
+            last = encoder.encode(&silence).unwrap();
+        }
+        assert!(last.len() <= 3, "DTX silence payload was {} bytes", last.len());
     }
 }

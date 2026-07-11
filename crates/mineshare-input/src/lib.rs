@@ -31,12 +31,88 @@ pub enum Button {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyCode(pub u16);
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
     MouseMove { dx: i32, dy: i32 },
     MouseButton { btn: Button, down: bool },
     Key { code: KeyCode, down: bool },
     Scroll { dx: f32, dy: f32 },
+}
+
+/// Compact authoritative state for keys/buttons currently routed to the
+/// peer. Periodic snapshots heal a lost UDP key/button edge without putting
+/// every input event behind TCP retransmission latency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedInputState {
+    key_words: [u64; 16],
+    mouse_buttons: u8,
+}
+
+impl ForwardedInputState {
+    pub fn any_held(&self) -> bool {
+        self.mouse_buttons != 0 || self.key_words.iter().any(|word| *word != 0)
+    }
+
+    pub fn apply_event(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Key { code, down } => self.set_key(code.0, down),
+            InputEvent::MouseButton { btn, down } => self.set_button(btn, down),
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => {}
+        }
+    }
+
+    pub fn reconciliation_events(&self, desired: &Self) -> Vec<InputEvent> {
+        let mut events = Vec::new();
+        for code in 0..1024u16 {
+            let current = self.key_is_down(code);
+            let want = desired.key_is_down(code);
+            if current != want {
+                events.push(InputEvent::Key {
+                    code: KeyCode(code),
+                    down: want,
+                });
+            }
+        }
+        for btn in [Button::Left, Button::Right, Button::Middle, Button::X1, Button::X2] {
+            let current = self.button_is_down(btn);
+            let want = desired.button_is_down(btn);
+            if current != want {
+                events.push(InputEvent::MouseButton { btn, down: want });
+            }
+        }
+        events
+    }
+
+    fn key_is_down(&self, code: u16) -> bool {
+        let index = code as usize;
+        index < 1024 && self.key_words[index / 64] & (1u64 << (index % 64)) != 0
+    }
+
+    fn set_key(&mut self, code: u16, down: bool) {
+        let index = code as usize;
+        if index >= 1024 {
+            return;
+        }
+        let mask = 1u64 << (index % 64);
+        if down {
+            self.key_words[index / 64] |= mask;
+        } else {
+            self.key_words[index / 64] &= !mask;
+        }
+    }
+
+    fn button_is_down(&self, btn: Button) -> bool {
+        self.mouse_buttons & (1u8 << btn_index(btn)) != 0
+    }
+
+    fn set_button(&mut self, btn: Button, down: bool) {
+        let mask = 1u8 << btn_index(btn);
+        if down {
+            self.mouse_buttons |= mask;
+        } else {
+            self.mouse_buttons &= !mask;
+        }
+    }
 }
 
 /// Captures raw HID input. `start` spawns whatever background work the
@@ -318,6 +394,7 @@ static INJ_EVENTS: AtomicU64 = AtomicU64::new(0); // injected mouse moves (Linux
 pub(crate) fn bump_fwd_events() {
     FWD_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
+#[cfg(target_os = "linux")]
 pub(crate) fn bump_inj_events() {
     INJ_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
@@ -415,24 +492,16 @@ pub(crate) fn note_key_forwarded_with_code(code: u16, down: bool) {
     // → every 50th. KEY_SPACE (57) and KEY_ENTER (28) always
     // log because they're the most common "what just typed
     // that?!" suspects.
-    if n < 10 || n % 50 == 0 || code == 57 || code == 28 {
+    if n < 10 || n.is_multiple_of(50) || code == 57 || code == 28 {
         tracing::info!(scancode = code, down, total = n + 1, "key forwarded to peer");
     }
 }
 
-pub(crate) fn note_key_forwarded() {
-    KEYS_FORWARDED.fetch_add(1, Ordering::Relaxed);
-}
-
 pub(crate) fn note_key_injected_with_code(code: u16, down: bool) {
     let n = KEYS_INJECTED.fetch_add(1, Ordering::Relaxed);
-    if n < 10 || n % 50 == 0 || code == 57 || code == 28 {
+    if n < 10 || n.is_multiple_of(50) || code == 57 || code == 28 {
         tracing::info!(scancode = code, down, total = n + 1, "key injected from peer");
     }
-}
-
-pub(crate) fn note_key_injected() {
-    KEYS_INJECTED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn keys_forwarded() -> u64 {
@@ -569,22 +638,6 @@ static HELD_FORWARDED: parking_lot::Mutex<[bool; 1024]> =
 /// up MUST also be forwarded so the peer's modifier state stays
 /// consistent. Atomic-light: a single Mutex lock per keystroke
 /// is well within budget on the WH_KEYBOARD_LL hot path.
-pub(crate) fn is_held_forwarded(code: u16) -> bool {
-    let i = code as usize;
-    if i >= 1024 {
-        return false;
-    }
-    HELD_FORWARDED.lock()[i]
-}
-
-pub(crate) fn set_held_forwarded(code: u16, held: bool) {
-    let i = code as usize;
-    if i >= 1024 {
-        return;
-    }
-    HELD_FORWARDED.lock()[i] = held;
-}
-
 /// Wipe held-state on session boundaries so the new session
 /// doesn't think a key is still in flight from the old one.
 fn clear_held_forwarded() {
@@ -681,6 +734,30 @@ fn clear_held_buttons() {
     for h in g.iter_mut() {
         *h = false;
     }
+}
+
+/// Snapshot the state that capture routing currently intends the peer to
+/// hold. The two small locks are never held together, avoiding lock-order
+/// coupling with the keyboard and mouse hook paths.
+pub fn forwarded_input_state() -> ForwardedInputState {
+    let mut state = ForwardedInputState::default();
+    {
+        let held = HELD_FORWARDED.lock();
+        for (code, down) in held.iter().copied().enumerate() {
+            if down {
+                state.set_key(code as u16, true);
+            }
+        }
+    }
+    {
+        let held = MOUSE_BTNS_FORWARDED.lock();
+        for (index, down) in held.iter().copied().enumerate().take(5) {
+            if down {
+                state.mouse_buttons |= 1u8 << index;
+            }
+        }
+    }
+    state
 }
 
 /// Should this side forward an incoming keystroke to the peer?
@@ -1395,5 +1472,56 @@ mod tests {
             0,
             "reset_smart_decision must clear stale peer-activity timing"
         );
+    }
+
+    #[test]
+    fn held_state_snapshot_reconciles_lost_edges() {
+        let mut injected = ForwardedInputState::default();
+        let mut desired = ForwardedInputState::default();
+        desired.apply_event(InputEvent::Key {
+            code: KeyCode(30),
+            down: true,
+        });
+        desired.apply_event(InputEvent::MouseButton {
+            btn: Button::Left,
+            down: true,
+        });
+
+        let presses = injected.reconciliation_events(&desired);
+        assert_eq!(presses.len(), 2);
+        for event in presses {
+            injected.apply_event(event);
+        }
+        assert_eq!(injected, desired);
+
+        let released = ForwardedInputState::default();
+        let releases = injected.reconciliation_events(&released);
+        assert_eq!(releases.len(), 2);
+        assert!(releases.iter().all(|event| matches!(
+            event,
+            InputEvent::Key { down: false, .. }
+                | InputEvent::MouseButton { down: false, .. }
+        )));
+    }
+
+    #[test]
+    fn forwarded_snapshot_matches_routing_tracker() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        assert!(route_keystroke(42, true, true));
+        assert!(route_mouse_button(Button::Right, true, true));
+
+        let snapshot = forwarded_input_state();
+        let events = ForwardedInputState::default().reconciliation_events(&snapshot);
+        assert!(events.contains(&InputEvent::Key {
+            code: KeyCode(42),
+            down: true,
+        }));
+        assert!(events.contains(&InputEvent::MouseButton {
+            btn: Button::Right,
+            down: true,
+        }));
+
+        reset_smart_decision();
     }
 }

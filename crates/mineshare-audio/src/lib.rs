@@ -246,12 +246,12 @@ pub fn input_device_version() -> u64 {
 pub fn resolve_output_device() -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    if let Some(want) = selected_output_device() {
-        if let Ok(iter) = host.output_devices() {
-            for d in iter {
-                if d.name().ok().as_deref() == Some(want.as_str()) {
-                    return Some(d);
-                }
+    if let Some(want) = selected_output_device()
+        && let Ok(iter) = host.output_devices()
+    {
+        for d in iter {
+            if d.name().ok().as_deref() == Some(want.as_str()) {
+                return Some(d);
             }
         }
         // selection no longer present — fall through to default.
@@ -263,12 +263,12 @@ pub fn resolve_output_device() -> Option<cpal::Device> {
 pub fn resolve_input_device() -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    if let Some(want) = selected_input_device() {
-        if let Ok(iter) = host.input_devices() {
-            for d in iter {
-                if d.name().ok().as_deref() == Some(want.as_str()) {
-                    return Some(d);
-                }
+    if let Some(want) = selected_input_device()
+        && let Ok(iter) = host.input_devices()
+    {
+        for d in iter {
+            if d.name().ok().as_deref() == Some(want.as_str()) {
+                return Some(d);
             }
         }
     }
