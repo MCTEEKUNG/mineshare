@@ -32,18 +32,22 @@ use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMP
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
 const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 2;
+const PLAYBACK_QUEUE_CAPACITY: usize = 4;
 const PLAYBACK_HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
 
 static PLAYBACK_UNDERRUN_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 pub struct CpalPlayback {
-    tx: mpsc::Sender<AudioFrame>,
+    tx: mpsc::SyncSender<AudioFrame>,
+    queue_dropped_frames: Arc<AtomicU64>,
 }
 
 impl CpalPlayback {
     pub fn new() -> Result<Self> {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
+        let (tx, rx) = mpsc::sync_channel::<AudioFrame>(PLAYBACK_QUEUE_CAPACITY);
+        let queue_dropped_frames = Arc::new(AtomicU64::new(0));
+        let dropped_for_thread = queue_dropped_frames.clone();
         // Asynchronous bring-up: the playback thread spawns and
         // begins building the cpal stream in the background. We
         // do NOT block on a readiness signal here — Win laptops
@@ -60,24 +64,37 @@ impl CpalPlayback {
         // up and audio "appears" without restarting the daemon.
         thread::Builder::new()
             .name("cpal-playback".into())
-            .spawn(move || run_playback_thread(rx))
+            .spawn(move || run_playback_thread(rx, dropped_for_thread))
             .context("spawn cpal-playback thread")?;
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            queue_dropped_frames,
+        })
     }
 }
 
 impl AudioPlayback for CpalPlayback {
     fn enqueue(&self, frame: AudioFrame) -> Result<()> {
-        // mpsc::Sender::send only fails if the receiver is dropped,
-        // which means the playback thread is gone — surface that as
-        // an error so the caller stops trying.
-        self.tx
-            .send(frame)
-            .map_err(|_| anyhow::anyhow!("cpal-playback thread terminated"))
+        match self.tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                // Audio is time-sensitive: retaining a stale backlog sounds
+                // worse than dropping it. The playback thread emits one
+                // aggregate diagnostic instead of logging on this hot path.
+                self.queue_dropped_frames.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err(anyhow::anyhow!("cpal-playback thread terminated"))
+            }
+        }
     }
 }
 
-fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
+fn run_playback_thread(
+    rx: mpsc::Receiver<AudioFrame>,
+    queue_dropped_frames: Arc<AtomicU64>,
+) {
     let mut decoder = match OpusDecoder::new() {
         Ok(d) => d,
         Err(e) => {
@@ -113,6 +130,7 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
     let mut frames_since_watchdog: u64 = 0;
     let mut last_health_report = Instant::now();
     let mut ring_dropped_samples = 0u64;
+    let mut queue_dropped_since_report = 0u64;
     let mut last_frame_received = Instant::now();
 
     loop {
@@ -159,6 +177,15 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
                 last_frame_received = Instant::now();
+                let queue_dropped = queue_dropped_frames.swap(0, Ordering::Relaxed);
+                if queue_dropped > 0 {
+                    queue_dropped_since_report =
+                        queue_dropped_since_report.saturating_add(queue_dropped);
+                    // A bounded-queue drop was intentional latency control,
+                    // not network loss. Do not synthesize the discarded
+                    // backlog with PLC when the next current frame arrives.
+                    last_seq = None;
+                }
                 // Drop duplicate / reordered-late frames: a seq at or
                 // below the last accepted one carries no new audio.
                 if let Some(l) = last_seq
@@ -175,6 +202,9 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                             continue;
                         }
                         ctx.paused = false;
+                        last_tick_snapshot = ctx.callback_ticks.load(Ordering::Relaxed);
+                        last_watchdog = Instant::now();
+                        frames_since_watchdog = 0;
                         debug!("cpal playback resumed after idle");
                     }
                     // Conceal any gap between the last accepted seq and
@@ -182,7 +212,15 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                     // seq reset) doesn't blast a burst of synthetic
                     // frames into the ring.
                     let lost = crate::codec::frames_lost(last_seq, frame.seq).min(5);
-                    if frame.stream == StreamKind::Mic && lost == 1 {
+                    // Always reserve one complete frame for the real packet.
+                    // Concealment is useful only while the ring has room; PLC
+                    // must never evict current audio or amplify a catch-up
+                    // burst after the Tokio receiver was briefly delayed.
+                    let conceal_room = (ctx.producer.vacant_len()
+                        / FRAME_SAMPLES_INTERLEAVED)
+                        .saturating_sub(1) as u32;
+                    let conceal = lost.min(conceal_room);
+                    if frame.stream == StreamKind::Mic && lost == 1 && conceal == 1 {
                         // Single-frame voice gap: try to *recover* the
                         // missing frame from the in-band FEC carried by
                         // this (the next) packet. Fall back to PLC if the
@@ -209,7 +247,7 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                         // Multi-frame gap, or a non-voice stream where
                         // LBRR yields little — synthesize each missing
                         // frame with Opus PLC instead of hard silence.
-                        for _ in 0..lost {
+                        for _ in 0..conceal {
                             if let Ok(n) = decoder.decode_plc(&mut scratch) {
                                 push_samples(
                                     &mut ctx.producer,
@@ -284,6 +322,9 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                     match ctx.stream.pause() {
                         Ok(()) => {
                             ctx.paused = true;
+                            last_tick_snapshot = ctx.callback_ticks.load(Ordering::Relaxed);
+                            last_watchdog = Instant::now();
+                            frames_since_watchdog = 0;
                             debug!("cpal playback paused while idle");
                         }
                         Err(e) => debug!(error = %e, "cpal playback idle pause failed"),
@@ -298,12 +339,16 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
             if samples > 0 {
                 debug!(samples, "cpal playback underrun summary");
             }
-            if ring_dropped_samples > 0 {
+            queue_dropped_since_report = queue_dropped_since_report
+                .saturating_add(queue_dropped_frames.swap(0, Ordering::Relaxed));
+            if ring_dropped_samples > 0 || queue_dropped_since_report > 0 {
                 warn!(
-                    samples = ring_dropped_samples,
-                    "cpal playback ring overflow summary"
+                    ring_samples = ring_dropped_samples,
+                    queue_frames = queue_dropped_since_report,
+                    "cpal playback backlog drop summary"
                 );
                 ring_dropped_samples = 0;
+                queue_dropped_since_report = 0;
             }
             last_health_report = Instant::now();
         }
@@ -435,8 +480,12 @@ fn push_samples(
     samples: &[f32],
     dropped_samples: &mut u64,
 ) {
+    if producer.vacant_len() < samples.len() {
+        *dropped_samples = dropped_samples.saturating_add(samples.len() as u64);
+        return;
+    }
     let pushed = producer.push_slice(samples);
-    *dropped_samples = dropped_samples.saturating_add((samples.len() - pushed) as u64);
+    debug_assert_eq!(pushed, samples.len());
 }
 
 fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
@@ -481,13 +530,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn push_samples_counts_ring_overflow() {
+    fn push_samples_drops_a_whole_frame_when_ring_is_full() {
         let ring = HeapRb::<f32>::new(2);
-        let (mut producer, _consumer) = ring.split();
+        let (mut producer, consumer) = ring.split();
         let mut dropped = 0;
 
         push_samples(&mut producer, &[0.0, 0.0, 0.0], &mut dropped);
 
-        assert_eq!(dropped, 1);
+        assert_eq!(dropped, 3);
+        assert_eq!(consumer.occupied_len(), 0);
     }
 }

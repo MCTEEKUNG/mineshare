@@ -1362,6 +1362,7 @@ async fn run_peer_session(
     let peer_label = peer_addr.to_string();
     let stats_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut prev = StatsSnapshot::default();
         loop {
             interval.tick().await;
