@@ -32,7 +32,7 @@ use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMP
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
 const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 2;
-const UNDERRUN_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+const PLAYBACK_HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
 
 static PLAYBACK_UNDERRUN_SAMPLES: AtomicU64 = AtomicU64::new(0);
@@ -111,7 +111,8 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
     let mut last_watchdog = Instant::now();
     let mut last_tick_snapshot: u64 = 0;
     let mut frames_since_watchdog: u64 = 0;
-    let mut last_underrun_report = Instant::now();
+    let mut last_health_report = Instant::now();
+    let mut ring_dropped_samples = 0u64;
     let mut last_frame_received = Instant::now();
 
     loop {
@@ -188,11 +189,19 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                         // packet has no usable LBRR data.
                         match decoder.decode_fec(&frame.opus, &mut scratch) {
                             Ok(n) => {
-                                ctx.producer.push_slice(&scratch[..n]);
+                                push_samples(
+                                    &mut ctx.producer,
+                                    &scratch[..n],
+                                    &mut ring_dropped_samples,
+                                );
                             }
                             Err(_) => {
                                 if let Ok(n) = decoder.decode_plc(&mut scratch) {
-                                    ctx.producer.push_slice(&scratch[..n]);
+                                    push_samples(
+                                        &mut ctx.producer,
+                                        &scratch[..n],
+                                        &mut ring_dropped_samples,
+                                    );
                                 }
                             }
                         }
@@ -202,7 +211,11 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                         // frame with Opus PLC instead of hard silence.
                         for _ in 0..lost {
                             if let Ok(n) = decoder.decode_plc(&mut scratch) {
-                                ctx.producer.push_slice(&scratch[..n]);
+                                push_samples(
+                                    &mut ctx.producer,
+                                    &scratch[..n],
+                                    &mut ring_dropped_samples,
+                                );
                             }
                         }
                     }
@@ -214,14 +227,12 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
                             continue;
                         }
                     };
-                    let pushed = ctx.producer.push_slice(&scratch[..n]);
+                    push_samples(
+                        &mut ctx.producer,
+                        &scratch[..n],
+                        &mut ring_dropped_samples,
+                    );
                     frames_since_watchdog += 1;
-                    if pushed != n {
-                        warn!(
-                            dropped = n - pushed,
-                            "cpal playback ring full — dropping samples"
-                        );
-                    }
                     last_seq = Some(frame.seq);
 
                     // Device-loss watchdog: if frames have been arriving
@@ -282,12 +293,19 @@ fn run_playback_thread(rx: mpsc::Receiver<AudioFrame>) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if last_underrun_report.elapsed() >= UNDERRUN_REPORT_INTERVAL {
+        if last_health_report.elapsed() >= PLAYBACK_HEALTH_REPORT_INTERVAL {
             let samples = PLAYBACK_UNDERRUN_SAMPLES.swap(0, Ordering::Relaxed);
             if samples > 0 {
                 debug!(samples, "cpal playback underrun summary");
             }
-            last_underrun_report = Instant::now();
+            if ring_dropped_samples > 0 {
+                warn!(
+                    samples = ring_dropped_samples,
+                    "cpal playback ring overflow summary"
+                );
+                ring_dropped_samples = 0;
+            }
+            last_health_report = Instant::now();
         }
     }
 
@@ -412,6 +430,15 @@ fn fill_callback(
     }
 }
 
+fn push_samples(
+    producer: &mut ringbuf::HeapProd<f32>,
+    samples: &[f32],
+    dropped_samples: &mut u64,
+) {
+    let pushed = producer.push_slice(samples);
+    *dropped_samples = dropped_samples.saturating_add((samples.len() - pushed) as u64);
+}
+
 fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
     // Prefer 48 kHz / 2-channel / f32 — the canonical bridge format.
     // Fall back to whatever the device's default is if we can't get
@@ -447,4 +474,20 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
         "no exact match for 48 kHz stereo f32 — falling back to device default"
     );
     Ok(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_samples_counts_ring_overflow() {
+        let ring = HeapRb::<f32>::new(2);
+        let (mut producer, _consumer) = ring.split();
+        let mut dropped = 0;
+
+        push_samples(&mut producer, &[0.0, 0.0, 0.0], &mut dropped);
+
+        assert_eq!(dropped, 1);
+    }
 }
