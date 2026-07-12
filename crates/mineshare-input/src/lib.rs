@@ -1524,4 +1524,23 @@ mod tests {
 
         reset_smart_decision();
     }
+
+    #[test]
+    fn forwarded_snapshot_preserves_normalized_extended_keycode() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        // KEY_LEFTMETA is the Linux evdev code emitted for the Windows logo
+        // key. It must not regress to the raw Windows 0x5B scan code in a
+        // held-state snapshot.
+        assert!(route_keystroke(125, true, true));
+
+        let snapshot = forwarded_input_state();
+        let events = ForwardedInputState::default().reconciliation_events(&snapshot);
+        assert!(events.contains(&InputEvent::Key {
+            code: KeyCode(125),
+            down: true,
+        }));
+
+        reset_smart_decision();
+    }
 }

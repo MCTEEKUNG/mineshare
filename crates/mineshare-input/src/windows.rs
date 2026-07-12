@@ -31,7 +31,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
@@ -901,6 +902,7 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
 
 const LLMHF_INJECTED: u32 = 0x00000001;
 const LLMHF_LOWER_IL_INJECTED: u32 = 0x00000002;
+const LLKHF_EXTENDED: u32 = 0x00000001;
 const LLKHF_INJECTED: u32 = 0x00000010;
 const LLKHF_LOWER_IL_INJECTED: u32 = 0x00000002;
 
@@ -1238,17 +1240,21 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         // every letter forced uppercase" Caps-Lock bug when Smart
         // flips mid-keypress.
 
-        // Convert Windows VK code → Linux evdev code for extended keys
-        // (arrow keys, Windows key, nav cluster).  For ordinary keys
-        // the PS/2 scan code already equals the Linux evdev number, so
-        // we fall back to `scan` when the VK is not in the table.
-        let linux_code = EXTENDED_KEY_TABLE
-            .iter()
-            .find(|&&(_, vk)| vk == info.vkCode as u16)
-            .map(|&(evdev, _)| evdev)
-            .unwrap_or(scan as u16);
+        // Keep extended scan-code identity intact before normalising to
+        // Linux evdev numbers. In particular, keypad Enter and divide use
+        // the same base set-1 scan codes as main Enter and slash; the E0
+        // prefix is the only way to round-trip them faithfully.
+        let linux_code = captured_keycode(
+            scan as u16,
+            info.vkCode as u16,
+            info.flags.0 & LLKHF_EXTENDED != 0,
+        );
 
-        if (down || up) && super::route_keystroke(scan as u16, down, mode == MODE_REMOTE) {
+        // Route and snapshot the same normalized code we put on the wire.
+        // Using the raw scan here made a held Windows/keypad key appear as a
+        // different key in the next state snapshot (for example 0x5B vs
+        // KEY_LEFTMETA and E0-1C vs KEY_KPENTER).
+        if (down || up) && super::route_keystroke(linux_code, down, mode == MODE_REMOTE) {
             sink_send(InputEvent::Key {
                 code: KeyCode(linux_code),
                 down,
@@ -1323,6 +1329,25 @@ impl EnigoInject {
             held: Mutex::new(std::collections::HashSet::new()),
         })
     }
+
+    fn inject_key(&self, code: KeyCode, down: bool) -> Result<()> {
+        if let Some(spec) = key_injection_spec(code) {
+            return send_scancode_key_input(spec, down);
+        }
+
+        // Keep Enigo as the fallback for uncommon Linux evdev values that
+        // do not have a one-byte Windows set-1 scan-code equivalent.
+        let vk = scancode_to_vk(code.0);
+        let dir = if down {
+            Direction::Press
+        } else {
+            Direction::Release
+        };
+        self.inner
+            .lock()
+            .key(EKey::Other(vk as u32), dir)
+            .context("enigo key")
+    }
 }
 
 fn should_use_game_relative_injection(
@@ -1394,16 +1419,7 @@ impl InputInject for EnigoInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
-        let vk = scancode_to_vk(code.0);
-        let dir = if down {
-            Direction::Press
-        } else {
-            Direction::Release
-        };
-        self.inner
-            .lock()
-            .key(EKey::Other(vk as u32), dir)
-            .context("enigo key")?;
+        self.inject_key(code, down)?;
         super::note_key_injected_with_code(code.0, down);
         let mut held = self.held.lock();
         if down {
@@ -1420,9 +1436,8 @@ impl InputInject for EnigoInject {
             return Ok(());
         }
         let count = drained.len();
-        let mut enigo = self.inner.lock();
         for h in drained {
-            let res: std::result::Result<(), _> = match h {
+            let res = match h {
                 HeldKey::MouseBtn(btn) => {
                     let b = match btn {
                         Button::Left => EButton::Left,
@@ -1431,12 +1446,12 @@ impl InputInject for EnigoInject {
                         Button::X1 => EButton::Back,
                         Button::X2 => EButton::Forward,
                     };
-                    enigo.button(b, Direction::Release)
+                    self.inner
+                        .lock()
+                        .button(b, Direction::Release)
+                        .context("enigo button release")
                 }
-                HeldKey::Key(code) => {
-                    let vk = scancode_to_vk(code);
-                    enigo.key(EKey::Other(vk as u32), Direction::Release)
-                }
+                HeldKey::Key(code) => self.inject_key(KeyCode(code), false),
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");
@@ -1469,13 +1484,10 @@ impl InputInject for EnigoInject {
     }
 }
 
-/// Linux evdev codes for the "extended" key cluster that do NOT share
-/// values with their Windows PS/2 scan-code equivalents.  We use this
-/// table in two places:
-///   1. `scancode_to_vk`  — Linux→Windows injection: evdev code → VK
-///   2. `low_kb_hook`     — Windows→Linux capture: VK → evdev code
-///
-/// Bidirectional: left column is Linux evdev, right is Windows VK.
+/// Linux evdev codes for the extended key cluster that do not share values
+/// with their Windows PS/2 scan-code equivalents. The table provides the
+/// VK fallback for uncommon key injection and normalises capture where the
+/// base scan code alone is not sufficient.
 const EXTENDED_KEY_TABLE: &[(u16, u16)] = &[
     (103, 0x26), // KEY_UP        ↔ VK_UP
     (108, 0x28), // KEY_DOWN      ↔ VK_DOWN
@@ -1492,10 +1504,104 @@ const EXTENDED_KEY_TABLE: &[(u16, u16)] = &[
     (99,  0x2C), // KEY_SYSRQ     ↔ VK_SNAPSHOT (PrintScreen)
 ];
 
+/// Normalise a Windows hook event to its Linux evdev key code while retaining
+/// E0-prefixed keypad and modifier keys. `vkCode` alone cannot distinguish
+/// keypad Enter from main Enter, or keypad slash from the main slash key.
+fn captured_keycode(scan: u16, vk: u16, extended: bool) -> u16 {
+    if extended {
+        let code = match scan {
+            0x1C => Some(96),  // KEY_KPENTER
+            0x1D => Some(97),  // KEY_RIGHTCTRL
+            0x35 => Some(98),  // KEY_KPSLASH
+            0x37 => Some(99),  // KEY_SYSRQ / PrintScreen
+            0x38 => Some(100), // KEY_RIGHTALT
+            0x45 => Some(69),  // KEY_NUMLOCK
+            0x5B => Some(125), // KEY_LEFTMETA
+            0x5C => Some(126), // KEY_RIGHTMETA
+            0x5D => Some(127), // KEY_COMPOSE / application menu
+            _ => None,
+        };
+        if let Some(code) = code {
+            return code;
+        }
+    }
+
+    EXTENDED_KEY_TABLE
+        .iter()
+        .find(|&&(_, key_vk)| key_vk == vk)
+        .map(|&(evdev, _)| evdev)
+        .unwrap_or(scan)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyInjectionSpec {
+    scan: u16,
+    extended: bool,
+}
+
+/// Return a raw Windows scan-code injection for keys whose Linux evdev code
+/// either represents an E0-prefixed key or a keypad key. Sending these as a
+/// virtual key through Enigo loses the exact physical key identity on some
+/// Windows layouts, notably the logo keys and the keypad cluster.
+fn key_injection_spec(KeyCode(code): KeyCode) -> Option<KeyInjectionSpec> {
+    let (scan, extended) = match code {
+        // Numpad digits and operators that are non-extended set-1 codes.
+        55 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 | 83 => {
+            (code, false)
+        }
+        69 => (0x45, true),  // KEY_NUMLOCK
+        96 => (0x1C, true),  // KEY_KPENTER
+        97 => (0x1D, true),  // KEY_RIGHTCTRL
+        98 => (0x35, true),  // KEY_KPSLASH
+        99 => (0x37, true),  // KEY_SYSRQ / PrintScreen
+        100 => (0x38, true), // KEY_RIGHTALT
+        102 => (0x47, true), // KEY_HOME
+        103 => (0x48, true), // KEY_UP
+        104 => (0x49, true), // KEY_PAGEUP
+        105 => (0x4B, true), // KEY_LEFT
+        106 => (0x4D, true), // KEY_RIGHT
+        107 => (0x4F, true), // KEY_END
+        108 => (0x50, true), // KEY_DOWN
+        109 => (0x51, true), // KEY_PAGEDOWN
+        110 => (0x52, true), // KEY_INSERT
+        111 => (0x53, true), // KEY_DELETE
+        125 => (0x5B, true), // KEY_LEFTMETA
+        126 => (0x5C, true), // KEY_RIGHTMETA
+        127 => (0x5D, true), // KEY_COMPOSE / application menu
+        _ => return None,
+    };
+    Some(KeyInjectionSpec { scan, extended })
+}
+
+fn send_scancode_key_input(spec: KeyInjectionSpec, down: bool) -> Result<()> {
+    let mut flags = KEYEVENTF_SCANCODE;
+    if spec.extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if !down {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: spec.scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    anyhow::ensure!(sent == 1, "SendInput keyboard event was rejected");
+    Ok(())
+}
+
 /// Linux evdev KeyCode → Windows Virtual Key.
 /// For common keys the PS/2 scan-code number equals the evdev number,
-/// so `MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)` handles them.
-/// Extended keys (arrow cluster, Win key, …) need explicit remapping.
+/// so `MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)` handles them. Used as a
+/// fallback only for uncommon evdev values without a direct scan-code spec.
 fn scancode_to_vk(scan: u16) -> u16 {
     if let Some(&(_, vk)) = EXTENDED_KEY_TABLE.iter().find(|&&(evdev, _)| evdev == scan) {
         return vk;
@@ -1507,14 +1613,44 @@ fn scancode_to_vk(scan: u16) -> u16 {
     }
 }
 
-#[allow(dead_code)]
-fn _force_vk_use(_v: VIRTUAL_KEY) {}
-
 const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_key_specs_preserve_meta_and_numpad_identity() {
+        assert_eq!(
+            key_injection_spec(KeyCode(125)),
+            Some(KeyInjectionSpec {
+                scan: 0x5B,
+                extended: true,
+            }),
+            "left Win must be injected as an extended scan code"
+        );
+        assert_eq!(
+            key_injection_spec(KeyCode(96)),
+            Some(KeyInjectionSpec {
+                scan: 0x1C,
+                extended: true,
+            }),
+            "keypad Enter must not collapse into the main Enter key"
+        );
+        assert_eq!(
+            key_injection_spec(KeyCode(79)),
+            Some(KeyInjectionSpec {
+                scan: 0x4F,
+                extended: false,
+            }),
+            "keypad 1 must remain the non-extended keypad key"
+        );
+        assert_eq!(
+            captured_keycode(0x1C, 0x0D, true),
+            96,
+            "capturing keypad Enter must retain its E0 identity"
+        );
+    }
 
     #[test]
     fn anchor_cursor_only_when_game_foreground() {

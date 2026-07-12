@@ -16,7 +16,7 @@ use bincode::config::standard;
 use mineshare_audio::{AudioFrame, AudioPlayback};
 use mineshare_core::DeviceId;
 use mineshare_input::{
-    ForwardedInputState, InputEvent, InputInject, make_capture, make_inject,
+    Button, ForwardedInputState, InputEvent, InputInject, make_capture, make_inject,
 };
 use mineshare_net::{
     Discovery, DiscoveryEvent, EncryptedSession, Initiator, NoiseSession, PeerAdvert, Responder,
@@ -216,6 +216,61 @@ impl InputReceiveOrdering {
         // edge that was genuinely lost.
         self.last_event_seq
             .is_none_or(|last| last < after_input_seq)
+    }
+}
+
+/// A snapshot can observe a freshly-held key just before the sender's input
+/// task numbers and emits that key-down edge. In that order, the snapshot
+/// correctly restores the key but the late live edge would type it again.
+/// Remember only press corrections so the first matching live press is
+/// treated as the already-applied edge; subsequent typematic repeats pass.
+#[derive(Default)]
+struct SnapshotPressDeduper {
+    keys: HashSet<u16>,
+    buttons: HashSet<Button>,
+}
+
+impl SnapshotPressDeduper {
+    fn observe_snapshot_correction(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Key { code, down } => {
+                if down {
+                    self.keys.insert(code.0);
+                } else {
+                    self.keys.remove(&code.0);
+                }
+            }
+            InputEvent::MouseButton { btn, down } => {
+                if down {
+                    self.buttons.insert(btn);
+                } else {
+                    self.buttons.remove(&btn);
+                }
+            }
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => {}
+        }
+    }
+
+    fn suppress_live_event(&mut self, event: InputEvent) -> bool {
+        match event {
+            InputEvent::Key { code, down } => {
+                if down {
+                    self.keys.remove(&code.0)
+                } else {
+                    self.keys.remove(&code.0);
+                    false
+                }
+            }
+            InputEvent::MouseButton { btn, down } => {
+                if down {
+                    self.buttons.remove(&btn)
+                } else {
+                    self.buttons.remove(&btn);
+                    false
+                }
+            }
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => false,
+        }
     }
 }
 
@@ -1209,6 +1264,7 @@ async fn run_peer_session(
         let mut buf = vec![0u8; 4096];
         let mut injected_state = ForwardedInputState::default();
         let mut input_ordering = InputReceiveOrdering::default();
+        let mut snapshot_press_deduper = SnapshotPressDeduper::default();
         loop {
             match udp_recv.recv_from(&mut buf).await {
                 Ok((n, src)) if src == peer_udp => {
@@ -1234,6 +1290,14 @@ async fn run_peer_session(
                                         }
                                     }
                                     if !input_ordering.accept_event(seq) {
+                                        continue;
+                                    }
+                                    if snapshot_press_deduper.suppress_live_event(ev) {
+                                        // The snapshot already injected this exact press while
+                                        // the sender was between capture and UDP sequencing.
+                                        // Keep our local state current without typing twice.
+                                        debug!(?ev, seq, "suppressed live input edge already applied by snapshot");
+                                        injected_state.apply_event(ev);
                                         continue;
                                     }
                                     let n = stats_recv.injected.load(Ordering::Relaxed);
@@ -1269,6 +1333,8 @@ async fn run_peer_session(
                                             warn!(error = %e, "held-input reconciliation failed");
                                             stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
                                         } else {
+                                            snapshot_press_deduper
+                                                .observe_snapshot_correction(correction);
                                             injected_state.apply_event(correction);
                                             stats_recv.injected.fetch_add(1, Ordering::Relaxed);
                                         }
@@ -1444,26 +1510,6 @@ async fn run_peer_session(
             _ = &mut reader_handle => {
                 break "TCP control reader ended";
             }
-            _ = input_state_tick.tick() => {
-                let state = mineshare_input::forwarded_input_state();
-                let changed = state != last_state_sent;
-                if changed {
-                    state_repeats_remaining = 4;
-                }
-                if changed || state.any_held() || state_repeats_remaining > 0 {
-                    let seq = next_state_seq;
-                    next_state_seq = next_state_seq.wrapping_add(1);
-                    send_wire!(WireFrame::InputState {
-                        seq,
-                        after_input_seq: next_input_seq,
-                        state,
-                    }, "input-state");
-                    last_state_sent = state;
-                    if !changed && state_repeats_remaining > 0 {
-                        state_repeats_remaining -= 1;
-                    }
-                }
-            }
             // HIGH-PRIORITY: input events skip the audio queue.
             recv = input_sub.recv() => match recv {
                 // Coalesce a backlog of MouseMove deltas into a single
@@ -1511,6 +1557,29 @@ async fn run_peer_session(
                 }
                 Err(broadcast::error::RecvError::Closed) => break "input broadcast closed",
             },
+            // State snapshots must yield to already-queued input edges. If a
+            // tick wins while a key-down waits in the input channel, the
+            // snapshot can describe that key before its event has a sequence.
+            _ = input_state_tick.tick() => {
+                let state = mineshare_input::forwarded_input_state();
+                let changed = state != last_state_sent;
+                if changed {
+                    state_repeats_remaining = 4;
+                }
+                if changed || state.any_held() || state_repeats_remaining > 0 {
+                    let seq = next_state_seq;
+                    next_state_seq = next_state_seq.wrapping_add(1);
+                    send_wire!(WireFrame::InputState {
+                        seq,
+                        after_input_seq: next_input_seq,
+                        state,
+                    }, "input-state");
+                    last_state_sent = state;
+                    if !changed && state_repeats_remaining > 0 {
+                        state_repeats_remaining -= 1;
+                    }
+                }
+            }
             // LOWER-PRIORITY: audio + future bulk traffic.
             recv = sub.recv() => match recv {
                 Ok(ev) => { send_wire!(ev, "wire"); }
@@ -1825,7 +1894,9 @@ impl AudioPlayback for NullPlayback {
 
 #[cfg(test)]
 mod tests {
-    use super::InputReceiveOrdering;
+    use mineshare_input::{InputEvent, KeyCode};
+
+    use super::{InputReceiveOrdering, SnapshotPressDeduper};
 
     #[test]
     fn authoritative_snapshot_suppresses_a_late_covered_edge() {
@@ -1841,5 +1912,24 @@ mod tests {
         assert!(ordering.accept_event(1));
         assert!(!ordering.accept_snapshot(0, 1));
         assert!(ordering.accept_snapshot(1, 2));
+    }
+
+    #[test]
+    fn snapshot_press_suppresses_only_the_late_original_press() {
+        // The sender can observe a held key in a 50 ms snapshot just before
+        // its queued UDP edge is numbered. The snapshot presses it first;
+        // the one late physical edge must not type a second character.
+        let press = InputEvent::Key {
+            code: KeyCode(28),
+            down: true,
+        };
+        let mut deduper = SnapshotPressDeduper::default();
+        deduper.observe_snapshot_correction(press);
+
+        assert!(deduper.suppress_live_event(press));
+        assert!(
+            !deduper.suppress_live_event(press),
+            "a real typematic repeat after the original edge must still pass"
+        );
     }
 }
