@@ -18,8 +18,8 @@ fn main() {
         Some(s) if !s.is_empty() => "-dirty",
         _ => "",
     };
-    let date =
-        git(&["show", "-s", "--format=%cd", "--date=short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let date = git(&["show", "-s", "--format=%cd", "--date=short", "HEAD"])
+        .unwrap_or_else(|| "unknown".into());
 
     println!("cargo:rustc-env=MINESHARE_GIT_HASH={hash}");
     println!("cargo:rustc-env=MINESHARE_GIT_DIRTY={dirty}");

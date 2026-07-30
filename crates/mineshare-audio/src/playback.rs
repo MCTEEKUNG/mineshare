@@ -18,36 +18,61 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize, SupportedStreamConfig};
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use tracing::{debug, info, warn};
 
 use crate::codec::OpusDecoder;
-use crate::{AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind};
+use crate::{
+    AudioFrame, AudioPlayback, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
+};
 
 /// Ring-buffer capacity in interleaved samples. ~10 frames @ 20 ms =
 /// 200 ms. Generous enough to absorb network jitter, tight enough not
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
-const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 2;
-const PLAYBACK_QUEUE_CAPACITY: usize = 4;
+/// Start playback only after 80 ms is buffered. This is isolated to the audio
+/// plane: mouse/keyboard packets retain their existing low-latency path. The
+/// previous 40 ms reserve was smaller than observed 50–60 ms SoundWire/USB
+/// scheduling stalls and produced zero-filled callbacks (audible crackle).
+const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 4;
+/// Keep one ring-buffer's worth of ingress slack. Production logs showed the
+/// Windows playback worker occasionally being descheduled for 80–160 ms while
+/// the UDP receiver continued delivering a steady 50 frames/s. A four-frame
+/// queue therefore discarded current audio even though the decoded PCM ring
+/// had room (`ring_samples=0`). Eight frames absorb that observed burst while
+/// the existing lossy boundary still prevents unbounded latency.
+const PLAYBACK_QUEUE_CAPACITY: usize = 8;
 const PLAYBACK_HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
+const DEFAULT_DEVICE_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+/// Two Opus frames at 48 kHz. A 40 ms device period leaves enough scheduler
+/// headroom when GPU-heavy WebView applications are active, while remaining
+/// below the jitter buffer's 80 ms startup target.
+const PLAYBACK_BUFFER_FRAMES: u32 = 1_920;
 
 static PLAYBACK_UNDERRUN_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 pub struct CpalPlayback {
-    tx: mpsc::SyncSender<AudioFrame>,
+    tx: mpsc::SyncSender<QueuedAudioFrame>,
     queue_dropped_frames: Arc<AtomicU64>,
+    session_epoch: Arc<AtomicU64>,
+}
+
+struct QueuedAudioFrame {
+    session_epoch: u64,
+    frame: AudioFrame,
 }
 
 impl CpalPlayback {
     pub fn new() -> Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<AudioFrame>(PLAYBACK_QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::sync_channel::<QueuedAudioFrame>(PLAYBACK_QUEUE_CAPACITY);
         let queue_dropped_frames = Arc::new(AtomicU64::new(0));
         let dropped_for_thread = queue_dropped_frames.clone();
+        let session_epoch = Arc::new(AtomicU64::new(0));
+        let epoch_for_thread = session_epoch.clone();
         // Asynchronous bring-up: the playback thread spawns and
         // begins building the cpal stream in the background. We
         // do NOT block on a readiness signal here — Win laptops
@@ -64,18 +89,23 @@ impl CpalPlayback {
         // up and audio "appears" without restarting the daemon.
         thread::Builder::new()
             .name("cpal-playback".into())
-            .spawn(move || run_playback_thread(rx, dropped_for_thread))
+            .spawn(move || run_playback_thread(rx, dropped_for_thread, epoch_for_thread))
             .context("spawn cpal-playback thread")?;
         Ok(Self {
             tx,
             queue_dropped_frames,
+            session_epoch,
         })
     }
 }
 
 impl AudioPlayback for CpalPlayback {
     fn enqueue(&self, frame: AudioFrame) -> Result<()> {
-        match self.tx.try_send(frame) {
+        let queued = QueuedAudioFrame {
+            session_epoch: self.session_epoch.load(Ordering::Acquire),
+            frame,
+        };
+        match self.tx.try_send(queued) {
             Ok(()) => Ok(()),
             Err(mpsc::TrySendError::Full(_)) => {
                 // Audio is time-sensitive: retaining a stale backlog sounds
@@ -89,11 +119,45 @@ impl AudioPlayback for CpalPlayback {
             }
         }
     }
+
+    fn reset_session(&self) {
+        self.session_epoch.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+struct PlaybackSequence {
+    last: Option<u32>,
+}
+
+impl PlaybackSequence {
+    fn last(&self) -> Option<u32> {
+        self.last
+    }
+
+    fn reset(&mut self) {
+        self.last = None;
+    }
+
+    fn accept(&mut self, current: u32) -> bool {
+        let accepted = match self.last {
+            None => true,
+            Some(last) => {
+                let distance = current.wrapping_sub(last);
+                distance != 0 && distance < (1 << 31)
+            }
+        };
+        if accepted {
+            self.last = Some(current);
+        }
+        accepted
+    }
 }
 
 fn run_playback_thread(
-    rx: mpsc::Receiver<AudioFrame>,
+    rx: mpsc::Receiver<QueuedAudioFrame>,
     queue_dropped_frames: Arc<AtomicU64>,
+    session_epoch: Arc<AtomicU64>,
 ) {
     let mut decoder = match OpusDecoder::new() {
         Ok(d) => d,
@@ -103,9 +167,11 @@ fn run_playback_thread(
         }
     };
     let mut scratch = vec![0f32; FRAME_SAMPLES_INTERLEAVED];
-    // Last per-stream seq we accepted — drives gap detection (PLC/FEC)
-    // and duplicate/late-frame dropping. `None` until the first frame.
-    let mut last_seq: Option<u32> = None;
+    // Last sequence accepted in the current peer session. Serial-number
+    // arithmetic handles natural u32 wrap-around; the explicit session epoch
+    // handles a peer process restart that begins its counter at zero.
+    let mut sequence = PlaybackSequence::default();
+    let mut observed_session_epoch = session_epoch.load(Ordering::Acquire);
 
     // Lazy stream: starts as `None`, builds on the first iteration
     // (or after a version bump). Retry cadence is bounded so a
@@ -113,6 +179,7 @@ fn run_playback_thread(
     let mut stream_ctx: Option<StreamCtx> = None;
     let mut last_version = crate::output_device_version();
     let mut next_build_attempt = Instant::now();
+    let mut last_default_probe = Instant::now() - DEFAULT_DEVICE_PROBE_INTERVAL;
     const RETRY_BACKOFF: Duration = Duration::from_secs(3);
     let mut dropped_frames_since_warn: u64 = 0;
     let mut last_drop_warn = Instant::now();
@@ -134,6 +201,25 @@ fn run_playback_thread(
     let mut last_frame_received = Instant::now();
 
     loop {
+        // In "Follow system default" mode, Windows can move the default render
+        // endpoint while the old stream remains perfectly healthy. A callback
+        // watchdog cannot detect that, so compare the active endpoint with the
+        // current default at a low-frequency internal seam and rebuild when it
+        // changes. Explicit device selections never follow this path.
+        let default_change = if crate::selected_output_device().is_none()
+            && last_default_probe.elapsed() >= DEFAULT_DEVICE_PROBE_INTERVAL
+        {
+            last_default_probe = Instant::now();
+            stream_ctx.as_ref().and_then(|ctx| {
+                crate::default_output_device_name().and_then(|current| {
+                    default_device_changed(true, Some(&ctx.device_name), Some(&current))
+                        .then(|| (ctx.device_name.clone(), current))
+                })
+            })
+        } else {
+            None
+        };
+
         // (Re)build the stream when we need one:
         //   * none yet (startup or a previous build failed), OR
         //   * the user picked a different device on the GUI tab, OR
@@ -143,10 +229,18 @@ fn run_playback_thread(
         let errored = stream_ctx
             .as_ref()
             .is_some_and(|c| c.stream_error.load(Ordering::Acquire));
-        let want_rebuild = stream_ctx.is_none() || v != last_version || errored;
+        let want_rebuild =
+            stream_ctx.is_none() || v != last_version || errored || default_change.is_some();
         if want_rebuild && Instant::now() >= next_build_attempt {
             if errored {
                 warn!("cpal playback stream errored — rebuilding");
+            }
+            if let Some((old, new)) = &default_change {
+                info!(
+                    previous = %old,
+                    current = %new,
+                    "Windows default playback device changed — rebuilding"
+                );
             }
             // Drop any old stream first so the device handle is
             // released before we ask cpal for it back — some
@@ -175,8 +269,23 @@ fn run_playback_thread(
         // waiting on a frame that may not come (silent stream
         // periods, peer paused playback, etc.).
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(frame) => {
+            Ok(queued) => {
                 last_frame_received = Instant::now();
+                let current_session_epoch = session_epoch.load(Ordering::Acquire);
+                if queued.session_epoch != current_session_epoch {
+                    // This frame was already queued when the previous peer
+                    // session ended. Never let it seed the new sequence state.
+                    continue;
+                }
+                if queued.session_epoch != observed_session_epoch {
+                    observed_session_epoch = queued.session_epoch;
+                    sequence.reset();
+                    info!(
+                        session_epoch = observed_session_epoch,
+                        "cpal playback sequence reset for new peer session"
+                    );
+                }
+                let frame = queued.frame;
                 let queue_dropped = queue_dropped_frames.swap(0, Ordering::Relaxed);
                 if queue_dropped > 0 {
                     queue_dropped_since_report =
@@ -184,13 +293,12 @@ fn run_playback_thread(
                     // A bounded-queue drop was intentional latency control,
                     // not network loss. Do not synthesize the discarded
                     // backlog with PLC when the next current frame arrives.
-                    last_seq = None;
+                    sequence.reset();
                 }
-                // Drop duplicate / reordered-late frames: a seq at or
-                // below the last accepted one carries no new audio.
-                if let Some(l) = last_seq
-                    && frame.seq <= l
-                {
+                // Drop duplicates and reordered-late frames without treating
+                // natural u32 wrap-around as a rewind.
+                let previous_seq = sequence.last();
+                if !sequence.accept(frame.seq) {
                     continue;
                 }
                 if let Some(ctx) = stream_ctx.as_mut() {
@@ -211,13 +319,12 @@ fn run_playback_thread(
                     // this one. Cap the fill so a large gap (long stall,
                     // seq reset) doesn't blast a burst of synthetic
                     // frames into the ring.
-                    let lost = crate::codec::frames_lost(last_seq, frame.seq).min(5);
+                    let lost = crate::codec::frames_lost(previous_seq, frame.seq).min(5);
                     // Always reserve one complete frame for the real packet.
                     // Concealment is useful only while the ring has room; PLC
                     // must never evict current audio or amplify a catch-up
                     // burst after the Tokio receiver was briefly delayed.
-                    let conceal_room = (ctx.producer.vacant_len()
-                        / FRAME_SAMPLES_INTERLEAVED)
+                    let conceal_room = (ctx.producer.vacant_len() / FRAME_SAMPLES_INTERLEAVED)
                         .saturating_sub(1) as u32;
                     let conceal = lost.min(conceal_room);
                     if frame.stream == StreamKind::Mic && lost == 1 && conceal == 1 {
@@ -265,13 +372,8 @@ fn run_playback_thread(
                             continue;
                         }
                     };
-                    push_samples(
-                        &mut ctx.producer,
-                        &scratch[..n],
-                        &mut ring_dropped_samples,
-                    );
+                    push_samples(&mut ctx.producer, &scratch[..n], &mut ring_dropped_samples);
                     frames_since_watchdog += 1;
-                    last_seq = Some(frame.seq);
 
                     // Device-loss watchdog: if frames have been arriving
                     // for a full interval but the callback tick hasn't
@@ -367,6 +469,7 @@ fn run_playback_thread(
 /// quiet without disabling dead-code lints elsewhere.
 struct StreamCtx {
     stream: cpal::Stream,
+    device_name: String,
     paused: bool,
     producer: ringbuf::HeapProd<f32>,
     /// Bumped by the cpal data callback every time the device pulls
@@ -382,16 +485,18 @@ fn build_stream() -> Result<StreamCtx> {
     // Honour the user's runtime device pick (Stage 8.4); falls
     // back to the OS default when no selection is set or the
     // selected device has been unplugged since.
-    let device =
-        crate::resolve_output_device().context("no audio output device available (default or selected)")?;
+    let device = crate::resolve_output_device()
+        .context("no audio output device available (default or selected)")?;
     let device_name = device.name().unwrap_or_else(|_| "?".to_string());
 
     let config = pick_config(&device)?;
+    let stream_config = playback_stream_config(&config);
     info!(
         device = %device_name,
         sample_rate = config.sample_rate().0,
         channels = config.channels(),
         sample_format = ?config.sample_format(),
+        buffer_size = ?stream_config.buffer_size,
         "cpal playback device picked"
     );
 
@@ -411,11 +516,11 @@ fn build_stream() -> Result<StreamCtx> {
     let ticks_i16 = callback_ticks.clone();
     let stream = match config.sample_format() {
         SampleFormat::F32 => device.build_output_stream(
-            &config.config(),
+            &stream_config,
             {
                 let mut playback_started = false;
                 move |out: &mut [f32], _| {
-                ticks_f32.fetch_add(1, Ordering::Relaxed);
+                    ticks_f32.fetch_add(1, Ordering::Relaxed);
                     fill_callback(out, &mut consumer, &mut playback_started);
                 }
             },
@@ -426,7 +531,7 @@ fn build_stream() -> Result<StreamCtx> {
             let mut tmp = vec![0f32; 0];
             let mut playback_started = false;
             device.build_output_stream(
-                &config.config(),
+                &stream_config,
                 move |out: &mut [i16], _| {
                     ticks_i16.fetch_add(1, Ordering::Relaxed);
                     tmp.resize(out.len(), 0.0);
@@ -446,11 +551,23 @@ fn build_stream() -> Result<StreamCtx> {
 
     Ok(StreamCtx {
         stream,
+        device_name,
         paused: false,
         producer,
         callback_ticks,
         stream_error,
     })
+}
+
+fn playback_stream_config(config: &SupportedStreamConfig) -> StreamConfig {
+    let mut stream_config = config.config();
+    stream_config.buffer_size = match *config.buffer_size() {
+        SupportedBufferSize::Range { min, max } => {
+            BufferSize::Fixed(PLAYBACK_BUFFER_FRAMES.clamp(min, max))
+        }
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    };
+    stream_config
 }
 
 fn fill_callback(
@@ -475,17 +592,25 @@ fn fill_callback(
     }
 }
 
-fn push_samples(
-    producer: &mut ringbuf::HeapProd<f32>,
-    samples: &[f32],
-    dropped_samples: &mut u64,
-) {
+fn push_samples(producer: &mut ringbuf::HeapProd<f32>, samples: &[f32], dropped_samples: &mut u64) {
     if producer.vacant_len() < samples.len() {
         *dropped_samples = dropped_samples.saturating_add(samples.len() as u64);
         return;
     }
     let pushed = producer.push_slice(samples);
     debug_assert_eq!(pushed, samples.len());
+}
+
+fn default_device_changed(
+    following_default: bool,
+    active: Option<&str>,
+    observed_default: Option<&str>,
+) -> bool {
+    following_default
+        && matches!(
+            (active, observed_default),
+            (Some(active), Some(observed)) if active != observed
+        )
 }
 
 fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
@@ -530,6 +655,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn playback_buffer_uses_forty_ms_when_supported() {
+        let supported = SupportedStreamConfig::new(
+            2,
+            cpal::SampleRate(48_000),
+            SupportedBufferSize::Range {
+                min: 128,
+                max: 2_048,
+            },
+            SampleFormat::F32,
+        );
+        assert_eq!(
+            playback_stream_config(&supported).buffer_size,
+            BufferSize::Fixed(1_920)
+        );
+    }
+
+    #[test]
+    fn playback_buffer_clamps_to_device_range() {
+        let supported = SupportedStreamConfig::new(
+            2,
+            cpal::SampleRate(48_000),
+            SupportedBufferSize::Range {
+                min: 2_048,
+                max: 4_096,
+            },
+            SampleFormat::F32,
+        );
+        assert_eq!(
+            playback_stream_config(&supported).buffer_size,
+            BufferSize::Fixed(2_048)
+        );
+    }
+
+    #[test]
     fn push_samples_drops_a_whole_frame_when_ring_is_full() {
         let ring = HeapRb::<f32>::new(2);
         let (mut producer, consumer) = ring.split();
@@ -539,5 +698,81 @@ mod tests {
 
         assert_eq!(dropped, 3);
         assert_eq!(consumer.occupied_len(), 0);
+    }
+
+    #[test]
+    fn default_device_change_rebuilds_only_when_following_default() {
+        assert!(default_device_changed(
+            true,
+            Some("Speakers"),
+            Some("HyperX Cloud III")
+        ));
+        assert!(!default_device_changed(
+            true,
+            Some("Speakers"),
+            Some("Speakers")
+        ));
+        assert!(!default_device_changed(
+            false,
+            Some("Speakers"),
+            Some("HyperX Cloud III")
+        ));
+        assert!(!default_device_changed(true, Some("Speakers"), None));
+    }
+
+    #[test]
+    fn jitter_reserve_survives_a_sixty_millisecond_delivery_gap() {
+        // SoundWire/USB drivers can delay the decoder thread for 50–60 ms
+        // without reporting a device error. Once playback has started, the
+        // prebuffer must cover that gap without emitting a zero-filled callback
+        // (an audible click/crackle).
+        let ring = HeapRb::<f32>::new(RING_CAPACITY);
+        let (mut producer, mut consumer) = ring.split();
+        let tone = vec![0.25; JITTER_TARGET_SAMPLES];
+        assert_eq!(producer.push_slice(&tone), tone.len());
+
+        let mut playback_started = false;
+        let callback_samples = SAMPLE_RATE as usize / 100 * CHANNELS as usize; // 10 ms
+        for callback in 0..6 {
+            let mut out = vec![f32::NAN; callback_samples];
+            fill_callback(&mut out, &mut consumer, &mut playback_started);
+            assert!(
+                out.iter().all(|&sample| sample == 0.25),
+                "callback {callback} underruns before a 60 ms scheduling gap ends"
+            );
+        }
+    }
+
+    #[test]
+    fn playback_ingress_absorbs_observed_eight_frame_burst() {
+        let (tx, _rx) = mpsc::sync_channel::<u32>(PLAYBACK_QUEUE_CAPACITY);
+        for frame in 0..8 {
+            tx.try_send(frame).unwrap_or_else(|_| {
+                panic!("playback queue dropped frame {frame} in an 8-frame burst")
+            });
+        }
+    }
+
+    #[test]
+    fn new_peer_session_accepts_sequence_restart_and_u32_wrap() {
+        let mut sequence = PlaybackSequence::default();
+        assert!(sequence.accept(120_000));
+        assert!(
+            !sequence.accept(3),
+            "old session state must reject a rewind"
+        );
+
+        sequence.reset();
+        assert!(
+            sequence.accept(3),
+            "a restarted peer begins at zero and must become audible immediately"
+        );
+
+        sequence.reset();
+        assert!(sequence.accept(u32::MAX));
+        assert!(
+            sequence.accept(0),
+            "serial-number comparison must accept natural u32 wrap-around"
+        );
     }
 }

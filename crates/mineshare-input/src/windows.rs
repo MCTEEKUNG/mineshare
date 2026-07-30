@@ -16,48 +16,52 @@
 
 use std::mem;
 use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result};
-use enigo::{
-    Axis, Button as EButton, Coordinate, Direction, Enigo, Key as EKey, Keyboard, Mouse, Settings,
-};
+use enigo::{Button as EButton, Direction, Enigo, Key as EKey, Keyboard, Mouse, Settings};
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
-use windows::Win32::Foundation::POINT;
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH, RECT};
+use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThread, GetCurrentThreadId, OpenProcess, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, SetThreadPriority,
+    THREAD_PRIORITY_HIGHEST,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
-    RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, CURSORINFO, CURSOR_SHOWING, CallNextHookEx,
-    DispatchMessageW, GetClipCursor, GetCursorInfo, GetCursorPos, GetMessageW,
-    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SetCursorPos, SetWindowsHookExW, TranslateMessage,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-};
-use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH, RECT};
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    PROCESS_NAME_FORMAT,
+    CURSOR_SHOWING, CURSORINFO, CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW,
+    GA_ROOT, GetAncestor, GetClipCursor, GetCursorInfo, GetCursorPos, GetMessageW,
+    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, RI_KEY_BREAK,
+    RI_KEY_E0, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowCursor,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WindowFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 
-use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
+use super::{Button, InputCapture, InputEvent, InputInject, KeyCode, TouchpadEvent};
+
+mod touchpad;
 
 /// RAII guard that releases the raised system timer resolution
 /// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
@@ -87,6 +91,9 @@ static EVENT_SINK: OnceLock<Mutex<Option<EventSink>>> = OnceLock::new();
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
+/// Number of `ShowCursor(false)` calls made while entering Remote mode.
+/// Restoring the exact same count keeps Windows' display counter balanced.
+static REMOTE_CURSOR_HIDE_CALLS: AtomicI32 = AtomicI32::new(0);
 /// Virtual desktop bounding rectangle. On a single-monitor setup
 /// this matches `SM_CXSCREEN` / `SM_CYSCREEN`; with multiple
 /// monitors it widens to span every connected display.
@@ -108,6 +115,7 @@ static ORIGIN_Y: AtomicI32 = AtomicI32::new(0);
 /// 1920 is a sensible default until M2 Slice 2 negotiates the real width
 /// over the encrypted control channel.
 static PEER_W: AtomicI32 = AtomicI32::new(1920);
+static PEER_H: AtomicI32 = AtomicI32::new(1080);
 static VIRT_X: AtomicI32 = AtomicI32::new(0);
 static VIRT_Y: AtomicI32 = AtomicI32::new(0);
 
@@ -190,8 +198,21 @@ const RAW_INPUT_STALE_MS: u64 = 300;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_FLUSH_US: AtomicU64 = AtomicU64::new(0);
+/// Absolute monotonic deadline for the currently pending motion window.
+/// Zero means no motion is armed. Producers only wake the watchdog when
+/// they win the 0 → deadline transition, avoiding one scheduler unpark per
+/// raw hardware event.
+static NEXT_FLUSH_DEADLINE_US: AtomicU64 = AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static FLUSH_WATCHDOG_THREAD: OnceLock<thread::Thread> = OnceLock::new();
 static FLUSH_FWD_COUNT: AtomicI32 = AtomicI32::new(0);
+#[cfg(test)]
+static FLUSH_WATCHDOG_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static FLUSH_WATCHDOG_UNPARKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static FLUSH_FWD_DISTANCE_X: AtomicI64 = AtomicI64::new(0);
 
 /// Idle window after which a negative `VIRT_X` drift is snapped back to 0
 /// by the watchdog safety net.
@@ -210,28 +231,152 @@ fn should_snap_virt_x(virt_x: i32, last_flush: u64, now: u64) -> bool {
     virt_x < 0 && last_flush != 0 && now.saturating_sub(last_flush) >= REMOTE_IDLE_SNAP_MS
 }
 
+fn monotonic_us() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    // Reserve zero as the "not armed / never flushed" sentinel.
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+        .min((u64::MAX - 1) as u128) as u64
+        + 1
+}
+
 /// Atomically drain `PENDING_DX/DY` and forward the combined delta.
 /// Skips no-op events when both axes are zero.
-fn flush_pending_motion() {
+fn flush_pending_motion(now_us: u64) {
     let dx = PENDING_DX.swap(0, Ordering::AcqRel);
     let dy = PENDING_DY.swap(0, Ordering::AcqRel);
     if dx == 0 && dy == 0 {
         return;
     }
+    LAST_FLUSH_US.store(now_us, Ordering::Release);
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
+    #[cfg(test)]
+    FLUSH_FWD_DISTANCE_X.fetch_add(dx as i64, Ordering::Relaxed);
     sink_send(InputEvent::MouseMove { dx, dy });
     super::bump_fwd_events();
     let n = FLUSH_FWD_COUNT.fetch_add(1, Ordering::Relaxed);
     if n % 100 == 0 {
-        info!(dx, dy, n, "win coalesced motion forward (8ms-window)");
+        debug!(dx, dy, n, "win coalesced motion forward");
     }
 }
 
-/// Spawn the periodic flush thread once.  Wakes every
-/// `super::target_flush_us()` microseconds and drains pending motion if
-/// `CURSOR_MODE == REMOTE`.  Mirrors the
-/// Linux watchdog — needed so a "moved 2 px then paused" residual
-/// doesn't sit in the accumulator until the next motion event.
+fn pending_motion_exists() -> bool {
+    PENDING_DX.load(Ordering::Acquire) != 0 || PENDING_DY.load(Ordering::Acquire) != 0
+}
+
+/// Arm one absolute deadline for the current pending window. Returns true
+/// only for the producer that changed the state from idle to armed.
+fn arm_pending_motion(now_us: u64) -> bool {
+    if !pending_motion_exists() || NEXT_FLUSH_DEADLINE_US.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    let flush_us = super::target_flush_us();
+    let last = LAST_FLUSH_US.load(Ordering::Acquire);
+    let deadline = if last == 0 || now_us.saturating_sub(last) >= flush_us {
+        now_us
+    } else {
+        last.saturating_add(flush_us)
+    };
+    NEXT_FLUSH_DEADLINE_US
+        .compare_exchange(0, deadline, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+fn wake_motion_flush_watchdog() {
+    if let Some(thread) = FLUSH_WATCHDOG_THREAD.get() {
+        #[cfg(test)]
+        FLUSH_WATCHDOG_UNPARKS.fetch_add(1, Ordering::Relaxed);
+        thread.unpark();
+    }
+}
+
+/// Flush when the absolute deadline is due. The CAS ensures the raw-input
+/// callback and watchdog can race without double-dispatching. A producer
+/// arriving during the drain is re-armed after the swap, preventing a final
+/// fragment from being stranded.
+fn flush_pending_motion_if_due(now_us: u64) -> bool {
+    let deadline = NEXT_FLUSH_DEADLINE_US.load(Ordering::Acquire);
+    if deadline == 0 || now_us < deadline {
+        return false;
+    }
+    if NEXT_FLUSH_DEADLINE_US
+        .compare_exchange(deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+
+    flush_pending_motion(now_us);
+    let rearm_now = monotonic_us();
+    if arm_pending_motion(rearm_now) {
+        wake_motion_flush_watchdog();
+    }
+    true
+}
+
+fn queue_pending_motion(dx: i32, dy: i32) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    PENDING_DX.fetch_add(dx, Ordering::AcqRel);
+    PENDING_DY.fetch_add(dy, Ordering::AcqRel);
+
+    let now_us = monotonic_us();
+    let newly_armed = arm_pending_motion(now_us);
+    let flushed = flush_pending_motion_if_due(now_us);
+    if newly_armed && !flushed {
+        wake_motion_flush_watchdog();
+    }
+}
+
+fn remote_motion_axes(side: super::PeerSide, dx: i32, dy: i32) -> (i32, i32) {
+    match side {
+        super::PeerSide::Right => (dx, dy),
+        super::PeerSide::Left => (-dx, dy),
+        super::PeerSide::Top => (-dy, dx),
+        super::PeerSide::Bottom => (dy, dx),
+    }
+}
+
+fn peer_depth_extent(side: super::PeerSide) -> i32 {
+    match side {
+        super::PeerSide::Right | super::PeerSide::Left => PEER_W.load(Ordering::Relaxed),
+        super::PeerSide::Top | super::PeerSide::Bottom => PEER_H.load(Ordering::Relaxed),
+    }
+    .max(1)
+}
+
+/// Advance the source-side virtual cursor by the exact relative delta that is
+/// sent to the peer. Keeping edge detection in the same coordinate stream as
+/// peer injection prevents DPI, acceleration, and anchor-warp differences
+/// from making a small reverse movement look like a complete edge crossing.
+fn advance_remote_virtual_cursor(dx: i32, dy: i32) -> i32 {
+    let side = super::peer_side();
+    let (depth_delta, lateral_delta) = remote_motion_axes(side, dx, dy);
+    let peer_extent = peer_depth_extent(side);
+    let next_depth = VIRT_X
+        .load(Ordering::Relaxed)
+        .saturating_add(depth_delta)
+        .clamp(-EXIT_BUFFER_PX, peer_extent - 1);
+    VIRT_X.store(next_depth, Ordering::Relaxed);
+    VIRT_Y.fetch_add(lateral_delta, Ordering::Relaxed);
+    next_depth
+}
+
+/// Keep the Raw Input route aligned with the cursor displacement visibly
+/// applied on the peer. Game Drive forwards motion without edge switching, so
+/// it deliberately bypasses this cursor-crossing state machine.
+fn track_raw_remote_motion(dx: i32, dy: i32) -> bool {
+    CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
+        && advance_remote_virtual_cursor(dx, dy) <= -EXIT_BUFFER_PX
+}
+
+/// Spawn the event-driven flush thread once. It parks with zero polling while
+/// input stays local, then uses the configured high-resolution flush window
+/// only while motion is actively being forwarded. A final short movement still
+/// wakes the thread, so residual deltas cannot sit in the accumulator.
 fn start_motion_flush_watchdog() {
     if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -239,41 +384,45 @@ fn start_motion_flush_watchdog() {
     if let Err(e) = thread::Builder::new()
         .name("win-motion-flush".into())
         .spawn(|| {
-            // Raise the system timer resolution to 1 ms for the lifetime
-            // of this watchdog thread. The default Windows scheduler tick
-            // is ~15.6 ms, which makes sub-2 ms sleeps (needed for
-            // >500 Hz rates) round up badly. timeBeginPeriod(1) gives us
-            // ~1 ms sleep granularity. Minor system-wide power cost, only
-            // paid while the bridge's forward watchdog is running. The
-            // matching timeEndPeriod(1) is issued if the loop ever exits
-            // (it normally runs for the process lifetime).
-            unsafe { timeBeginPeriod(1) };
-            let _timer_guard = HighResTimerGuard;
+            let _ = FLUSH_WATCHDOG_THREAD.set(thread::current());
             loop {
-            let flush_us = super::target_flush_us();
-            thread::sleep(std::time::Duration::from_micros(flush_us));
-            if !forwarding_active() {
-                continue;
-            }
-            let now = super::now_ms();
-            let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-            // compare in micros where possible; ms granularity is fine for
-            // the residual-drain guard.
-            if now.saturating_sub(last) * 1000 >= flush_us {
-                flush_pending_motion();
-            }
-            // Safety net: if VIRT_X has drifted negative while the mouse
-            // has been idle (no motion in the last second), snap it back
-            // to 0.  Leftward sensor jitter is unbounded on the negative
-            // side while rightward jitter is bounded by `PEER_W`, so
-            // without this tiny vibrations (desk fan, chair wobble) can
-            // silently accumulate to -EXIT_BUFFER_PX and pop the cursor
-            // back to the local screen.  We only reset below zero, so a
-            // deliberate exit gesture (actively dragging backward past
-            // the threshold) still works correctly.
-            if should_snap_virt_x(VIRT_X.load(Ordering::Relaxed), last, now) {
-                VIRT_X.store(0, Ordering::Relaxed);
-            }
+                while !forwarding_active() {
+                    thread::park();
+                    #[cfg(test)]
+                    FLUSH_WATCHDOG_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+                }
+
+                // The default Windows scheduler tick is ~15.6 ms. Raise it
+                // only for an active remote-driving interval, then release it
+                // as soon as control returns local.
+                unsafe { timeBeginPeriod(1) };
+                let timer_guard = HighResTimerGuard;
+                while forwarding_active() {
+                    let now_us = monotonic_us();
+                    let deadline = NEXT_FLUSH_DEADLINE_US.load(Ordering::Acquire);
+                    let wait = if deadline != 0 {
+                        std::time::Duration::from_micros(deadline.saturating_sub(now_us))
+                    } else {
+                        std::time::Duration::from_millis(REMOTE_IDLE_SNAP_MS)
+                    };
+                    thread::park_timeout(wait);
+                    #[cfg(test)]
+                    FLUSH_WATCHDOG_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+
+                    if !forwarding_active() {
+                        break;
+                    }
+                    let now_us = monotonic_us();
+                    flush_pending_motion_if_due(now_us);
+                    let now = super::now_ms();
+                    let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+                    // Safety net: if VIRT_X has drifted negative while the
+                    // mouse has been idle, snap it back to zero.
+                    if should_snap_virt_x(VIRT_X.load(Ordering::Relaxed), last, now) {
+                        VIRT_X.store(0, Ordering::Relaxed);
+                    }
+                }
+                drop(timer_guard);
             }
         })
     {
@@ -334,9 +483,10 @@ pub fn local_screen_geometry() -> (u32, u32) {
     (w, h)
 }
 
-pub fn set_peer_screen(w: u32, _h: u32) {
+pub fn set_peer_screen(w: u32, h: u32) {
     PEER_W.store(w.max(1) as i32, Ordering::Relaxed);
-    info!(peer_w = w, "peer screen geometry stored");
+    PEER_H.store(h.max(1) as i32, Ordering::Relaxed);
+    info!(peer_w = w, peer_h = h, "peer screen geometry stored");
 }
 
 fn anchor() -> (i32, i32) {
@@ -358,7 +508,39 @@ fn bounds() -> (i32, i32, i32, i32) {
     (ox, oy, ox + w - 1, oy + h - 1) // (left, top, right, bottom)
 }
 
-fn enter_remote(entry_y: i32) {
+fn set_touchpad_gesture_capture(active: bool) {
+    touchpad::set_capture_active(active);
+}
+
+fn hide_source_cursor() {
+    if REMOTE_CURSOR_HIDE_CALLS.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let mut calls = 0;
+    while calls < 32 {
+        let display_count = unsafe { ShowCursor(false) };
+        calls += 1;
+        if display_count < 0 {
+            break;
+        }
+    }
+    REMOTE_CURSOR_HIDE_CALLS.store(calls, Ordering::Release);
+}
+
+fn restore_source_cursor() {
+    let calls = REMOTE_CURSOR_HIDE_CALLS.swap(0, Ordering::AcqRel);
+    for _ in 0..calls {
+        unsafe {
+            ShowCursor(true);
+        }
+    }
+}
+
+pub fn touchpad_capabilities() -> u32 {
+    touchpad::capabilities()
+}
+
+fn enter_remote(entry_lateral: i32) {
     // Refuse if the peer signalled it's already driving Remote — otherwise
     // both ends forward each other's HW input simultaneously and we end
     // up with cursors fighting on both screens.
@@ -368,18 +550,27 @@ fn enter_remote(entry_y: i32) {
     }
     let (ax, ay) = anchor();
     VIRT_X.store(0, Ordering::Relaxed);
-    VIRT_Y.store(entry_y, Ordering::Relaxed);
+    VIRT_Y.store(entry_lateral, Ordering::Relaxed);
     unsafe {
         let _ = SetCursorPos(ax, ay);
     }
     LAST_X.store(ax, Ordering::Relaxed);
     LAST_Y.store(ay, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
-    info!(entry_y, anchor = ?(ax, ay), "cursor → remote");
+    touchpad::set_capture_anchor(ax, ay);
+    set_touchpad_gesture_capture(true);
+    hide_source_cursor();
+    wake_motion_flush_watchdog();
+    info!(
+        entry_lateral,
+        anchor = ?(ax, ay),
+        source_cursor_hide_calls = REMOTE_CURSOR_HIDE_CALLS.load(Ordering::Acquire),
+        "cursor → remote"
+    );
     super::fire_remote_event(super::RemoteEvent::Entered);
 }
 
-fn exit_remote(restore_y: i32) {
+fn exit_remote(restore_lateral: i32) {
     let (left, top, right, bottom) = bounds();
     // Restore the local cursor to the edge that faces the peer
     // (per the configured layout). User came back across that
@@ -387,10 +578,10 @@ fn exit_remote(restore_y: i32) {
     // matches their hand position on the desk. For top/bottom
     // we keep their horizontal anchor, just snap Y to the edge.
     let (restore_x, restore_y) = match super::peer_side() {
-        super::PeerSide::Right => (right, restore_y.clamp(top, bottom)),
-        super::PeerSide::Left => (left, restore_y.clamp(top, bottom)),
-        super::PeerSide::Top => (LAST_X.load(Ordering::Relaxed).clamp(left, right), top),
-        super::PeerSide::Bottom => (LAST_X.load(Ordering::Relaxed).clamp(left, right), bottom),
+        super::PeerSide::Right => (right, restore_lateral.clamp(top, bottom)),
+        super::PeerSide::Left => (left, restore_lateral.clamp(top, bottom)),
+        super::PeerSide::Top => (restore_lateral.clamp(left, right), top),
+        super::PeerSide::Bottom => (restore_lateral.clamp(left, right), bottom),
     };
     unsafe {
         let _ = SetCursorPos(restore_x, restore_y);
@@ -398,8 +589,64 @@ fn exit_remote(restore_y: i32) {
     LAST_X.store(restore_x, Ordering::Relaxed);
     LAST_Y.store(restore_y, Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+    set_touchpad_gesture_capture(false);
+    restore_source_cursor();
+    wake_motion_flush_watchdog();
     info!(restore = ?(restore_x, restore_y), "cursor → local");
     super::fire_remote_event(super::RemoteEvent::Exited);
+}
+
+fn crossed_peer_edge(
+    side: super::PeerSide,
+    bounds: (i32, i32, i32, i32),
+    previous: (i32, i32),
+    current: (i32, i32),
+) -> bool {
+    let (left, top, right, bottom) = bounds;
+    let (last_x, last_y) = previous;
+    let (x, y) = current;
+    last_x != i32::MIN
+        && match side {
+            super::PeerSide::Right => last_x < right && x >= right,
+            super::PeerSide::Left => last_x > left && x <= left,
+            super::PeerSide::Top => last_y > top && y <= top,
+            super::PeerSide::Bottom => last_y < bottom && y >= bottom,
+        }
+}
+
+/// Handle genuine local motion outside the latency-critical low-level hook.
+///
+/// Raw Input calls this only after Windows has released the original input
+/// event. The hook calls it solely as a fallback when Raw Input registration
+/// is unavailable.
+fn process_local_mouse_motion(x: i32, y: i32, track_activity: bool) {
+    if track_activity {
+        super::bump_local_mouse_activity();
+    }
+
+    let last_x = LAST_X.load(Ordering::Relaxed);
+    let last_y = LAST_Y.load(Ordering::Relaxed);
+    if super::peer_in_remote()
+        && last_x != i32::MIN
+        && (x - last_x).abs() + (y - last_y).abs() > 5
+        && super::reclaim_from_peer_hardware()
+    {
+        super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
+    }
+
+    LAST_X.store(x, Ordering::Relaxed);
+    LAST_Y.store(y, Ordering::Relaxed);
+
+    if crossed_peer_edge(super::peer_side(), bounds(), (last_x, last_y), (x, y))
+        && !super::is_input_locked()
+        && super::game_drive() == super::GameDrive::Off
+    {
+        let entry_lateral = match super::peer_side() {
+            super::PeerSide::Right | super::PeerSide::Left => y,
+            super::PeerSide::Top | super::PeerSide::Bottom => x,
+        };
+        enter_remote(entry_lateral);
+    }
 }
 
 pub fn local_in_remote() -> bool {
@@ -408,12 +655,13 @@ pub fn local_in_remote() -> bool {
 
 pub fn force_exit_remote() {
     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
-        let (_, _, _, bottom) = bounds();
-        let oy = ORIGIN_Y.load(Ordering::Relaxed);
+        let (left, top, right, bottom) = bounds();
+        let restore_lateral = match super::peer_side() {
+            super::PeerSide::Right | super::PeerSide::Left => (top + bottom) / 2,
+            super::PeerSide::Top | super::PeerSide::Bottom => (left + right) / 2,
+        };
         info!("force_exit_remote — peer asked us to release");
-        // Halfway down the virtual desktop is a sensible default
-        // restore-Y when the user only knows we want out, not where.
-        exit_remote((oy + bottom) / 2);
+        exit_remote(restore_lateral);
     }
 }
 
@@ -426,6 +674,100 @@ pub fn force_exit_remote() {
 /// Set every poll by `game_detect_thread`: true when a fullscreen /
 /// cursor-confine / anti-cheat title currently owns the cursor.
 static GAME_FOREGROUND: AtomicBool = AtomicBool::new(false);
+
+/// A peer handoff also transfers Windows' foreground window. The transition
+/// starts synchronously with TakeControl; mouse motion and the first key are
+/// retries only when Windows temporarily rejects that first activation.
+struct FocusHandoff {
+    pending: AtomicBool,
+}
+
+impl FocusHandoff {
+    const fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
+
+    fn try_begin(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+
+    fn finish(&self, activated: bool) {
+        if !activated {
+            self.pending.store(true, Ordering::Release);
+        }
+    }
+}
+
+static REMOTE_FOCUS_HANDOFF: FocusHandoff = FocusHandoff::new();
+
+fn focus_point_is_safe(point: (i32, i32), screen_bounds: (i32, i32, i32, i32)) -> bool {
+    const EDGE_INSET_PX: i32 = 8;
+    let (left, top, right, bottom) = screen_bounds;
+    point.0 >= left.saturating_add(EDGE_INSET_PX)
+        && point.0 <= right.saturating_sub(EDGE_INSET_PX)
+        && point.1 >= top.saturating_add(EDGE_INSET_PX)
+        && point.1 <= bottom.saturating_sub(EDGE_INSET_PX)
+}
+
+/// Activate the top-level window under the cursor without synthesizing a
+/// click. Temporarily joining its input queue makes SetForegroundWindow
+/// reliable despite Windows' foreground-stealing restrictions.
+fn activate_window_under_cursor() -> Result<bool> {
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }.context("GetCursorPos for focus handoff")?;
+    if !focus_point_is_safe((point.x, point.y), bounds()) {
+        return Ok(false);
+    }
+    let child = unsafe { WindowFromPoint(point) };
+    if child.0.is_null() {
+        return Ok(false);
+    }
+    let target = unsafe { GetAncestor(child, GA_ROOT) };
+    if target.0.is_null() || target == unsafe { GetForegroundWindow() } {
+        return Ok(!target.0.is_null());
+    }
+
+    let target_thread = unsafe { GetWindowThreadProcessId(target, None) };
+    let current_thread = unsafe { GetCurrentThreadId() };
+    let attached = target_thread != 0
+        && target_thread != current_thread
+        && unsafe { AttachThreadInput(current_thread, target_thread, true) }.as_bool();
+    let activated = unsafe { SetForegroundWindow(target) }.as_bool();
+    if attached {
+        let _ = unsafe { AttachThreadInput(current_thread, target_thread, false) };
+    }
+    Ok(activated || target == unsafe { GetForegroundWindow() })
+}
+
+fn attempt_remote_focus(reason: &'static str) {
+    if !REMOTE_FOCUS_HANDOFF.try_begin() {
+        return;
+    }
+    let activated = match activate_window_under_cursor() {
+        Ok(true) => {
+            info!(
+                reason,
+                "remote focus activated window under cursor without click"
+            );
+            true
+        }
+        Ok(false) => {
+            debug!(reason, "remote focus handoff found no activatable window");
+            false
+        }
+        Err(error) => {
+            debug!(%error, reason, "remote focus handoff failed");
+            false
+        }
+    };
+    REMOTE_FOCUS_HANDOFF.finish(activated);
+}
 
 pub(crate) fn game_foreground() -> bool {
     GAME_FOREGROUND.load(Ordering::Relaxed)
@@ -475,6 +817,7 @@ fn take_control_action(
 }
 
 pub fn on_peer_take_control() {
+    REMOTE_FOCUS_HANDOFF.arm();
     let mut cur = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cur);
@@ -499,6 +842,10 @@ pub fn on_peer_take_control() {
             info!(at = ?(x, y), "peer take-control: cursor-locked game foreground — skipping edge warp");
         }
     }
+    // Foreground ownership is part of the control handoff, not a side effect
+    // of later mouse travel. This makes shortcuts and typing valid as soon as
+    // the peer observes TakeControl.
+    attempt_remote_focus("take-control");
 }
 
 pub struct HookCapture {
@@ -555,10 +902,37 @@ impl InputCapture for HookCapture {
         let cell = EVENT_SINK.get_or_init(|| Mutex::new(None));
         *cell.lock() = Some(sink);
 
-        thread::Builder::new()
-            .name("win-input-hooks".into())
-            .spawn(|| unsafe { hook_thread() })
-            .context("spawn hook thread")?;
+        launch_isolated_hook_workers(
+            || unsafe { mouse_hook_thread() },
+            || unsafe { keyboard_hook_thread() },
+        )
+        .context("spawn isolated Windows hook threads")?;
+
+        if let Err(e) = launch_touchpad_capture_worker(|| {
+            if let Err(e) = touchpad::run_capture_loop() {
+                warn!(error = %e, "native Precision Touchpad capture unavailable");
+            }
+        }) {
+            warn!(error = %e, "failed to launch native touchpad capture worker");
+        }
+
+        // 8ms motion coalescer: batches raw input + hook fallback events
+        // into one MouseMove every ~8ms so the peer's inject loop isn't
+        // overwhelmed by a 1000 Hz mouse. Same pattern as linux.rs.
+        start_motion_flush_watchdog();
+
+        if let Err(e) = thread::Builder::new()
+            .name("win-raw-input".into())
+            .spawn(|| unsafe { raw_input_thread() })
+        {
+            warn!(error = %e, "failed to spawn raw-input worker");
+        }
+
+        // Capability bits are part of the lockstep session handshake. Wait a
+        // bounded interval for the touchpad worker's Win32/WinRT probe so the
+        // first peer connection does not race startup and incorrectly
+        // advertise basic fallback for an available native touchpad.
+        touchpad::wait_for_capture_setup(std::time::Duration::from_millis(500));
 
         // Game auto-detect: a separate poll thread watches the
         // visible-cursor flag + the clip-cursor rect. When a
@@ -637,7 +1011,12 @@ fn current_foreground_exe_basename() -> Option<String> {
         let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; MAX_PATH as usize];
         let mut len = buf.len() as u32;
-        let res = QueryFullProcessImageNameW(proc, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+        let res = QueryFullProcessImageNameW(
+            proc,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
         let _ = CloseHandle(proc);
         if res.is_err() {
             return None;
@@ -650,13 +1029,28 @@ fn current_foreground_exe_basename() -> Option<String> {
     }
 }
 
+fn should_auto_lock_game(
+    _cursor_hidden: bool,
+    cursor_clipped: bool,
+    anticheat_match: bool,
+    game_drive_off: bool,
+) -> bool {
+    // Windows commonly hides the pointer while the user types. Treating that
+    // transient UI state as a game caused the bridge to toggle its global
+    // input lock every time typing began or ended. Cursor confinement and the
+    // explicit risky-process list are stronger, stable game signals.
+    (cursor_clipped || anticheat_match) && game_drive_off
+}
+
 /// Polls cursor visibility + clip-rect + foreground-process state
 /// every 250 ms. Auto-engages the input lock when:
-///   * the cursor is hidden (Minecraft-style fullscreen capture)
-///   * OR the cursor clip rect is smaller than the screen (FPS
+///   * the cursor clip rect is smaller than the screen (FPS
 ///     mouse-confine)
 ///   * OR the foreground process matches the anti-cheat-protected
 ///     `RISKY_GAMES` list — even if cursor is visible (main menu)
+///
+/// Cursor visibility is retained for diagnostics, but is deliberately not a
+/// lock signal: Windows hides the pointer during ordinary keyboard input.
 ///
 /// Manual user-engaged locks survive auto-detect releases (user
 /// always wins) so alt-tabbing out of a game momentarily doesn't
@@ -671,8 +1065,8 @@ fn game_detect_thread() {
             cbSize: std::mem::size_of::<CURSORINFO>() as u32,
             ..Default::default()
         };
-        let cursor_hidden = unsafe { GetCursorInfo(&mut ci) }.is_ok()
-            && (ci.flags.0 & CURSOR_SHOWING.0) == 0;
+        let cursor_hidden =
+            unsafe { GetCursorInfo(&mut ci) }.is_ok() && (ci.flags.0 & CURSOR_SHOWING.0) == 0;
 
         // Cursor confine: a real fullscreen game's clip rect is a
         // small fraction of the screen (the playable window).
@@ -699,8 +1093,12 @@ fn game_detect_thread() {
         });
         super::set_anticheat_warning(anticheat_match.clone());
 
-        let should_lock = (cursor_hidden || cursor_clipped || anticheat_match.is_some())
-            && super::game_drive() == super::GameDrive::Off;
+        let should_lock = should_auto_lock_game(
+            cursor_hidden,
+            cursor_clipped,
+            anticheat_match.is_some(),
+            super::game_drive() == super::GameDrive::Off,
+        );
         // Publish for `on_peer_take_control`: when a cursor-locked game owns
         // the cursor we must NOT warp it to the edge (camera fling).
         GAME_FOREGROUND.store(should_lock, Ordering::Relaxed);
@@ -725,40 +1123,121 @@ fn game_detect_thread() {
     }
 }
 
-unsafe fn hook_thread() {
-    let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(low_mouse_hook), None, 0) };
-    let kb = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) };
-    let mouse_ok = matches!(&mouse, Ok(h) if !h.0.is_null());
-    let kb_ok = matches!(&kb, Ok(h) if !h.0.is_null());
-    if !mouse_ok || !kb_ok {
-        warn!(?mouse, ?kb, "SetWindowsHookExW failed (need GUI session)");
+fn launch_touchpad_capture_worker<F>(worker: F) -> std::io::Result<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name("win-touchpad-capture".into())
+        .spawn(worker)
+        .map(|_| ())
+}
+
+fn launch_isolated_hook_workers<FM, FK>(
+    mouse_worker: FM,
+    keyboard_worker: FK,
+) -> std::io::Result<()>
+where
+    FM: FnOnce() + Send + 'static,
+    FK: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name("win-keyboard-hook".into())
+        .spawn(keyboard_worker)?;
+    thread::Builder::new()
+        .name("win-mouse-hook".into())
+        .spawn(mouse_worker)?;
+    Ok(())
+}
+
+unsafe fn pump_hook_messages() {
+    let mut msg = MSG::default();
+    loop {
+        let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if r.0 == 0 || r.0 == -1 {
+            break;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+unsafe fn keyboard_hook_thread() {
+    let keyboard = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) } {
+        Ok(handle) if !handle.0.is_null() => handle,
+        result => {
+            warn!(
+                ?result,
+                "WH_KEYBOARD_LL installation failed (need GUI session)"
+            );
+            return;
+        }
+    };
+    info!("Windows keyboard hook installed on isolated dispatch thread");
+    unsafe { pump_hook_messages() };
+    let _ = unsafe { UnhookWindowsHookEx(keyboard) };
+}
+
+unsafe fn mouse_hook_thread() {
+    if std::env::var_os("MINESHARE_DISABLE_MOUSE_HOOK").is_some() {
+        info!("diagnostic mode: WH_MOUSE_LL disabled");
         return;
     }
-    info!("Win hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)");
+    let mouse = match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(low_mouse_hook), None, 0) } {
+        Ok(handle) if !handle.0.is_null() => handle,
+        result => {
+            warn!(
+                ?result,
+                "WH_MOUSE_LL installation failed (need GUI session)"
+            );
+            return;
+        }
+    };
+    info!("Windows mouse hook installed on isolated dispatch thread");
+    unsafe { pump_hook_messages() };
+    let _ = unsafe { UnhookWindowsHookEx(mouse) };
+}
 
-    // 8ms motion coalescer: batches raw input + hook fallback events
-    // into one MouseMove every ~8ms so the peer's inject loop isn't
-    // overwhelmed by a 1000 Hz mouse.  Same pattern as linux.rs.
-    start_motion_flush_watchdog();
+unsafe fn raw_input_thread() {
+    if let Err(error) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
+        warn!(%error, "could not raise raw-input thread priority");
+    }
 
     // Create a message-only window so we can receive WM_INPUT via
-    // RIDEV_INPUTSINK.  Raw input gives pre-acceleration hardware mickeys
-    // — the same unit that Linux evdev forwards — so the peer cursor
-    // behaves naturally under whatever acceleration the receiver applies.
+    // RIDEV_INPUTSINK. Mouse reports provide pre-acceleration mickeys, while
+    // keyboard reports provide the event-driven fallback for shell-reserved
+    // shortcuts whose legacy key-down is not posted to the capture window.
     if let Some(hwnd) = create_raw_input_window() {
-        let rid = RAWINPUTDEVICE {
-            usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
-            usUsage: 0x02,     // HID_USAGE_GENERIC_MOUSE
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: hwnd,
-        };
-        match unsafe { RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32) } {
+        let devices = [
+            RAWINPUTDEVICE {
+                usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+                usUsage: 0x02,     // HID_USAGE_GENERIC_MOUSE
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hwnd,
+            },
+            RAWINPUTDEVICE {
+                usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+                usUsage: 0x06,     // HID_USAGE_GENERIC_KEYBOARD
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hwnd,
+            },
+        ];
+        match unsafe {
+            RegisterRawInputDevices(&devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+        } {
             Ok(()) => {
                 USING_RAW_INPUT.store(true, Ordering::Release);
-                info!("raw mouse input registered (WM_INPUT / RIDEV_INPUTSINK)");
+                touchpad::set_raw_keyboard_available(true);
+                info!("raw mouse and keyboard input registered (WM_INPUT / RIDEV_INPUTSINK)");
             }
             Err(e) => {
-                warn!(?e, "RegisterRawInputDevices failed — using hook-based delta (may feel slow at high speed)");
+                touchpad::set_raw_keyboard_available(false);
+                warn!(
+                    ?e,
+                    "RegisterRawInputDevices failed — using hook/timer input fallbacks"
+                );
             }
         }
     } else {
@@ -814,57 +1293,96 @@ fn create_raw_input_window() -> Option<HWND> {
             PCWSTR(class_name.as_ptr()),
             PCWSTR::null(),
             WINDOW_STYLE(0),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             Some(HWND_MESSAGE),
             None,
             None,
             None,
-        ).ok()
+        )
+        .ok()
     }
 }
 
-/// Process one WM_INPUT message: extract raw mouse deltas and forward
-/// them to the peer when in REMOTE mode.
+/// Process one WM_INPUT message: route the latency-critical keyboard chord or
+/// extract raw mouse deltas and forward them while in REMOTE mode.
 ///
 /// Because these are pre-acceleration hardware mickeys (same unit as
 /// Linux evdev REL_X/REL_Y), the peer OS applies its own pointer
 /// acceleration naturally — giving the same 1:1 "natural mouse" feel
 /// regardless of whether the peer is Windows or Linux.
 unsafe fn handle_raw_input(h: HRAWINPUT) {
-    if !USING_RAW_INPUT.load(Ordering::Relaxed) { return; }
-    if !forwarding_active() { return; }
-
-    // Two-pass: first get required buffer size, then read data.
-    let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
-    let mut size: u32 = 0;
-    unsafe {
-        GetRawInputData(h, RID_INPUT, None, &mut size, header_size);
+    if !USING_RAW_INPUT.load(Ordering::Relaxed) {
+        return;
     }
-    if size == 0 || size > 1024 { return; }
 
-    let mut buf = vec![0u8; size as usize];
+    // Mouse and keyboard RAWINPUT payloads are fixed-size. Read directly into
+    // an aligned stack slot: this removes one user32 call plus a heap
+    // allocation from every hardware report on the sub-millisecond path.
+    let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+    let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+    let mut raw = std::mem::MaybeUninit::<RAWINPUT>::uninit();
     let written = unsafe {
         GetRawInputData(
             h,
             RID_INPUT,
-            Some(buf.as_mut_ptr() as *mut _),
+            Some(raw.as_mut_ptr().cast()),
             &mut size,
             header_size,
         )
     };
-    if written == u32::MAX || written == 0 { return; }
+    if written == u32::MAX || written == 0 {
+        return;
+    }
 
-    let raw = unsafe { &*(buf.as_ptr() as *const RAWINPUT) };
-    // Only handle mouse events (dwType == 0 == RIM_TYPEMOUSE).
-    if raw.header.dwType != RIM_TYPEMOUSE.0 { return; }
+    let raw = unsafe { raw.assume_init_ref() };
+    if raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+        let keyboard = unsafe { &raw.data.keyboard };
+        let down = u32::from(keyboard.Flags) & RI_KEY_BREAK == 0;
+        let extended = u32::from(keyboard.Flags) & RI_KEY_E0 != 0;
+        touchpad::handle_raw_keyboard(
+            u32::from(keyboard.MakeCode),
+            u32::from(keyboard.VKey),
+            extended,
+            down,
+        );
+        return;
+    }
+
+    if raw.header.dwType != RIM_TYPEMOUSE.0 {
+        return;
+    }
 
     let mouse = unsafe { &raw.data.mouse };
     // Skip absolute-position events (touch digitiser, graphics tablet…).
-    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 { return; }
+    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
+        return;
+    }
 
     let dx = mouse.lLastX;
     let dy = mouse.lLastY;
-    if dx == 0 && dy == 0 { return; }
+    if dx == 0 && dy == 0 {
+        return;
+    }
+
+    // Record Raw Input liveness on both local and remote motion. The local
+    // samples immediately before an edge crossing let the hook know WM_INPUT
+    // owns depth tracking before the first remote callback arrives.
+    LAST_RAW_INPUT_MS.store(super::now_ms(), Ordering::Release);
+
+    // Activity bookkeeping reads the wall clock and updates several atomics.
+    // Keep it off WH_MOUSE_LL's latency-critical callback: WM_INPUT is
+    // delivered after Windows has released the original input event, so this
+    // work cannot stall the touchpad/keyboard system hook chain.
+    if !forwarding_active() {
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+            process_local_mouse_motion(cursor.x, cursor.y, true);
+        }
+        return;
+    }
 
     // Apply user sensitivity multiplier with sub-pixel residue.
     let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
@@ -874,34 +1392,33 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
     SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
     SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
 
-    // Record liveness so the hook fallback knows raw input is delivering.
-    LAST_RAW_INPUT_MS.store(super::now_ms(), Ordering::Release);
-
     static RAW_FWD: AtomicI32 = AtomicI32::new(0);
     let n = RAW_FWD.fetch_add(1, Ordering::Relaxed);
     if n % 500 == 0 {
-        info!(raw_dx = dx, raw_dy = dy, sdx, sdy, n, "sample raw motion captured");
+        debug!(
+            raw_dx = dx,
+            raw_dy = dy,
+            sdx,
+            sdy,
+            n,
+            "sample raw motion captured"
+        );
     }
 
     // Coalesce into the 8ms accumulator instead of firing one packet
     // per HW event.  The flush watchdog (or opportunistic flush below)
     // dispatches the combined delta — keeps event rate at ~125 Hz so
     // the peer's inject loop stays responsive even with a 1000 Hz mouse.
-    PENDING_DX.fetch_add(sdx, Ordering::AcqRel);
-    PENDING_DY.fetch_add(sdy, Ordering::AcqRel);
-    // Opportunistic flush: if the runtime flush window has already
-    // lapsed since the last dispatch, send now instead of waiting for
-    // the watchdog.
-    let flush_us = super::target_flush_us();
-    let now = super::now_ms();
-    let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) * 1000 >= flush_us {
-        flush_pending_motion();
+    if track_raw_remote_motion(sdx, sdy) {
+        exit_remote(VIRT_Y.load(Ordering::Relaxed));
+        return;
     }
+    queue_pending_motion(sdx, sdy);
 }
 
 const LLMHF_INJECTED: u32 = 0x00000001;
 const LLMHF_LOWER_IL_INJECTED: u32 = 0x00000002;
+const MINESHARE_INPUT_TAG: usize = 0x4D53_4852; // "MSHR"
 const LLKHF_EXTENDED: u32 = 0x00000001;
 const LLKHF_INJECTED: u32 = 0x00000010;
 const LLKHF_LOWER_IL_INJECTED: u32 = 0x00000002;
@@ -911,7 +1428,13 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-    if info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 {
+    let message = wparam.0 as u32;
+    let injected = info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0;
+    let system_touchpad_wheel = injected
+        && info.dwExtraInfo != MINESHARE_INPUT_TAG
+        && matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL)
+        && forwarding_active();
+    if injected && !system_touchpad_wheel {
         // When the peer is driving us (peer_in_remote=true), track where
         // its injected moves have put our cursor.  Without this update,
         // LAST_X/LAST_Y stay frozen at the boundary-entry point set by
@@ -921,16 +1444,27 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
         // current cursor position — a tiny touchpad nudge appears as
         // hundreds of pixels and fires a spurious `RequestPeerExit` that
         // bounces the peer's cursor back to its own screen.
-        if wparam.0 as u32 == WM_MOUSEMOVE && super::peer_in_remote() {
+        if message == WM_MOUSEMOVE && super::peer_in_remote() {
             LAST_X.store(info.pt.x, Ordering::Relaxed);
             LAST_Y.store(info.pt.y, Ordering::Relaxed);
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
+    let mode = CURSOR_MODE.load(Ordering::Acquire);
+    // Ordinary local motion is handled from WM_INPUT after Windows releases
+    // this global hook chain. Return immediately here so touchpad events never
+    // wait on MineShare's activity, ownership or edge-transition logic.
+    if wparam.0 as u32 == WM_MOUSEMOVE
+        && mode == MODE_LOCAL
+        && !forwarding_active()
+        && USING_RAW_INPUT.load(Ordering::Acquire)
+    {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
     let x = info.pt.x;
     let y = info.pt.y;
-    let mode = CURSOR_MODE.load(Ordering::Acquire);
     let last_x = LAST_X.load(Ordering::Relaxed);
     let last_y = LAST_Y.load(Ordering::Relaxed);
 
@@ -948,132 +1482,64 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
 
     match wparam.0 as u32 {
         WM_MOUSEMOVE => {
-            // Stage 11 Smart-keyboard: any HW mouse motion on this
-            // machine (the hook never sees `SetCursorPos`-driven
-            // events) is a signal that the local user is actively
-            // working here. Bump regardless of mode so the peer's
-            // Smart-target can see "Win mouse is in use, don't
-            // route Linux keys back here".
-            super::bump_local_mouse_activity();
             if mode == MODE_LOCAL {
-                let (left, top, right, bottom) = bounds();
-                // Auto-release peer Remote on real local HW motion (the
-                // user is moving Win HW while Ubuntu is driving). Same
-                // pattern as Synergy: any local input on the passive
-                // side reclaims the cursor.
-                if super::peer_in_remote()
-                    && last_x != i32::MIN
-                    && (x - last_x).abs() + (y - last_y).abs() > 5
-                {
-                    info!(
-                        dx = x - last_x,
-                        dy = y - last_y,
-                        "local HW motion while peer holds Remote — requesting peer release"
-                    );
-                    super::fire_remote_event(super::RemoteEvent::RequestPeerExit);
-                }
-                LAST_X.store(x, Ordering::Relaxed);
-                LAST_Y.store(y, Ordering::Relaxed);
-                // Edge to watch depends on layout. We treat hitting
-                // the OUTER edge of the virtual desktop as the
-                // trigger (Stage 9) — internal monitor seams don't
-                // count, so a 2-monitor user can drag freely
-                // between displays without falling into Remote.
-                // Game-mode lock pins input to this PC — skip the
-                // edge check entirely so accidental cursor moves
-                // during fullscreen play don't yank focus to the
-                // peer. Ctrl+Alt+R still works as a manual override.
-                let crossed_edge = !super::is_input_locked()
-                    && super::game_drive() == super::GameDrive::Off
-                    && last_x != i32::MIN
-                    && match super::peer_side() {
-                        super::PeerSide::Right => last_x < right && x >= right,
-                        super::PeerSide::Left => last_x > left && x <= left,
-                        super::PeerSide::Top => last_y > top && y <= top,
-                        super::PeerSide::Bottom => last_y < bottom && y >= bottom,
-                    };
-                if crossed_edge {
-                    enter_remote(y);
-                }
-                // local: don't forward, OS handles cursor as usual
+                // Raw Input normally owns local-motion bookkeeping. Reaching
+                // this branch means registration failed, so preserve the old
+                // hook-based behavior as a compatibility fallback.
+                process_local_mouse_motion(x, y, true);
             } else {
-                // REMOTE: compute delta from anchor, clamp to peer screen,
-                // and forward. The "depth" axis (how far INTO the peer
-                // we've gone) flips with the layout — right means
-                // rightward dx, left means -dx, top means -dy, bottom
-                // means dy. Exit fires when depth retreats to
-                // -EXIT_BUFFER_PX past the entry edge.
+                // REMOTE: Raw Input owns both forwarding and virtual-depth
+                // tracking while it is live. Counting the hook's accelerated
+                // screen-space delta as well would mix coordinate streams and
+                // can make a small reverse movement look like an edge exit.
                 let dx = x - last_x;
                 let dy = y - last_y;
-                let depth_dx = match super::peer_side() {
-                    super::PeerSide::Right => dx,
-                    super::PeerSide::Left => -dx,
-                    super::PeerSide::Top => -dy,
-                    super::PeerSide::Bottom => dy,
-                };
-                let peer_w = PEER_W.load(Ordering::Relaxed);
-                // Clamp accumulated virt_x to [-EXIT_BUFFER_PX, peer_w-1].
-                // The lower floor doubles as the exit trigger; the upper
-                // bound stops further depth-direction dx from being
-                // absorbed into ever-growing virt_x (which would force
-                // the user to drag back for thousands of events to escape).
-                let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
-                let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w - 1);
-                VIRT_X.store(new_virt_x, Ordering::Relaxed);
-                VIRT_Y.fetch_add(dy, Ordering::Relaxed);
-
-                if new_virt_x <= -EXIT_BUFFER_PX {
-                    exit_remote(y);
-                } else {
-                    // Anchor warp: keeps WH_MOUSE_LL firing so edge-exit
-                    // detection (VIRT_X above) continues to work.
-                    // Motion forwarding is handled by `handle_raw_input`
-                    // (WM_INPUT, pre-acceleration hardware mickeys) when
-                    // raw input is *actually delivering events*.  If
-                    // registration succeeded but WM_INPUT never arrives
-                    // (HWND_MESSAGE quirks on some Win builds, anti-
-                    // cheat conflicts, etc.), `LAST_RAW_INPUT_MS` stays
-                    // stale and we fall back here so the cursor still
-                    // moves on the peer.
-                    let (ax, ay) = anchor();
-                    let last_raw = LAST_RAW_INPUT_MS.load(Ordering::Acquire);
-                    let raw_is_live = last_raw != 0
-                        && super::now_ms().saturating_sub(last_raw) < RAW_INPUT_STALE_MS;
-                    if !raw_is_live {
-                        // Fallback: post-accel screen-space delta with cap.
-                        // Same accumulator as raw input path — the flush
-                        // watchdog dispatches at ~125 Hz so the peer sees
-                        // a steady event rate regardless of source.
-                        let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
-                        let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
-                        let scaled_dx = super::scale_delta(dx, &mut rx);
-                        let scaled_dy = super::scale_delta(dy, &mut ry);
-                        SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
-                        SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
-                        let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-                        let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
-                        if fdx != 0 || fdy != 0 {
+                let (ax, ay) = anchor();
+                let last_raw = LAST_RAW_INPUT_MS.load(Ordering::Acquire);
+                let raw_is_live =
+                    last_raw != 0 && super::now_ms().saturating_sub(last_raw) < RAW_INPUT_STALE_MS;
+                let mut exited = false;
+                if !raw_is_live {
+                    // Raw Input registration can succeed on Windows builds
+                    // where WM_INPUT later stops arriving. In that case this
+                    // fallback becomes the sole forwarding + depth source.
+                    let mut rx = f32::from_bits(SENS_RESIDUE_X.load(Ordering::Relaxed));
+                    let mut ry = f32::from_bits(SENS_RESIDUE_Y.load(Ordering::Relaxed));
+                    let scaled_dx = super::scale_delta(dx, &mut rx);
+                    let scaled_dy = super::scale_delta(dy, &mut ry);
+                    SENS_RESIDUE_X.store(rx.to_bits(), Ordering::Relaxed);
+                    SENS_RESIDUE_Y.store(ry.to_bits(), Ordering::Relaxed);
+                    let fdx = scaled_dx.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
+                    if fdx != 0 || fdy != 0 {
+                        let new_virt_x = advance_remote_virtual_cursor(fdx, fdy);
+                        if new_virt_x <= -EXIT_BUFFER_PX {
+                            exit_remote(VIRT_Y.load(Ordering::Relaxed));
+                            exited = true;
+                        } else {
                             static HOOK_CAPTURED: AtomicI32 = AtomicI32::new(0);
                             let n = HOOK_CAPTURED.fetch_add(1, Ordering::Relaxed);
                             if n % 200 == 0 {
-                                info!(
-                                    raw_dx = dx, raw_dy = dy, fdx, fdy,
-                                    virt_x = new_virt_x, n,
+                                debug!(
+                                    raw_dx = dx,
+                                    raw_dy = dy,
+                                    fdx,
+                                    fdy,
+                                    virt_x = new_virt_x,
+                                    n,
                                     "sample motion captured (hook fallback)"
                                 );
                             }
-                            PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
-                            PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
-                            // Opportunistic flush if the runtime window has lapsed.
-                            let flush_us = super::target_flush_us();
-                            let now = super::now_ms();
-                            let last_flush = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                            if now.saturating_sub(last_flush) * 1000 >= flush_us {
-                                flush_pending_motion();
-                            }
+                            queue_pending_motion(fdx, fdy);
                         }
                     }
-                    unsafe { let _ = SetCursorPos(ax, ay); }
+                }
+                if !exited {
+                    // Pin the hidden local cursor at the anchor. The virtual
+                    // cursor above, not this warp, represents peer position.
+                    unsafe {
+                        let _ = SetCursorPos(ax, ay);
+                    }
                     LAST_X.store(ax, Ordering::Relaxed);
                     LAST_Y.store(ay, Ordering::Relaxed);
                 }
@@ -1081,8 +1547,8 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 return LRESULT(1);
             }
         }
-        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
-        | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+        | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
             // Resolve which button + direction. X1 / X2 share the
             // same WM_* — `info.mouseData` high word disambiguates.
             let (btn, down) = match wparam.0 as u32 {
@@ -1117,12 +1583,11 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                 }
             }
         }
-        WM_MOUSEWHEEL if forwarding_active() => {
-            let delta = ((info.mouseData >> 16) as i16) as f32 / 120.0;
-            // Stage 10: optional Y-axis inversion. Win has no
-            // horizontal-wheel hook here so only Y matters.
-            let dy = if super::invert_scroll_y() { -delta } else { delta };
-            sink_send(InputEvent::Scroll { dx: 0.0, dy });
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL if forwarding_active() => {
+            let delta =
+                (((info.mouseData >> 16) as i16) as f32 / 120.0) * super::touchpad_scroll_speed();
+            let horizontal = wparam.0 as u32 == WM_MOUSEHWHEEL;
+            sink_send(windows_wheel_event(horizontal, delta));
         }
         _ => {}
     }
@@ -1240,31 +1705,53 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         // every letter forced uppercase" Caps-Lock bug when Smart
         // flips mid-keypress.
 
-        // Keep extended scan-code identity intact before normalising to
-        // Linux evdev numbers. In particular, keypad Enter and divide use
-        // the same base set-1 scan codes as main Enter and slash; the E0
-        // prefix is the only way to round-trip them faithfully.
-        let linux_code = captured_keycode(
-            scan as u16,
-            info.vkCode as u16,
-            info.flags.0 & LLKHF_EXTENDED != 0,
-        );
-
-        // Route and snapshot the same normalized code we put on the wire.
-        // Using the raw scan here made a held Windows/keypad key appear as a
-        // different key in the next state snapshot (for example 0x5B vs
-        // KEY_LEFTMETA and E0-1C vs KEY_KPENTER).
-        if (down || up) && super::route_keystroke(linux_code, down, mode == MODE_REMOTE) {
-            sink_send(InputEvent::Key {
-                code: KeyCode(linux_code),
+        if (down || up)
+            && route_physical_key(
+                scan,
+                info.vkCode,
+                info.flags.0 & LLKHF_EXTENDED != 0,
                 down,
-            });
-            super::note_key_forwarded_with_code(linux_code, down);
+                mode == MODE_REMOTE,
+            )
+        {
             // Consume so Windows doesn't also act on the keystroke.
             return LRESULT(1);
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn route_physical_key(
+    scan: u32,
+    vk: u32,
+    extended: bool,
+    down: bool,
+    cursor_in_remote: bool,
+) -> bool {
+    // Keep extended scan-code identity intact before normalising to Linux
+    // evdev numbers. In particular, keypad Enter and divide use the same base
+    // set-1 scan codes as main Enter and slash; E0 is the only discriminator.
+    let linux_code = captured_keycode(scan as u16, vk as u16, extended);
+    if !super::route_keystroke(linux_code, down, cursor_in_remote) {
+        return false;
+    }
+    sink_send(InputEvent::Key {
+        code: KeyCode(linux_code),
+        down,
+    });
+    if cursor_in_remote {
+        touchpad::note_forwarded_key(linux_code, down);
+    }
+    super::note_key_forwarded_with_code(linux_code, down);
+    true
+}
+
+/// Keyboard fallback for the foreground Precision Touchpad capture window.
+/// A successful low-level hook consumes the event before Windows posts the
+/// legacy message, so this path is naturally de-duplicated. It runs only when
+/// that capture surface actually receives a key the hook did not consume.
+pub(super) fn route_touchpad_capture_key(scan: u32, vk: u32, extended: bool, down: bool) -> bool {
+    route_physical_key(scan, vk, extended, down, true)
 }
 
 /// Tag tracking which kind of code is held so `release_all_held`
@@ -1273,42 +1760,6 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
 enum HeldKey {
     MouseBtn(Button),
     Key(u16),
-}
-
-// --- Inject-cadence instrumentation ---------------------------------------
-// Confirms the receive→inject path actually keeps up with the sender's
-// forward rate (see `super::target_flush_us`). Once per window of injected motion
-// events it logs the effective rate and the worst inter-inject gap. A healthy
-// 500 Hz stream reads approx_hz≈500 with max_gap_ms≈2–4; a stalled inject
-// loop shows low Hz or large gaps, which would mean the bottleneck is
-// injection (mutex/tokio serialisation) rather than coalescing — the signal
-// that a user-mode fidelity bump has hit its ceiling.
-static INJECT_COUNT: AtomicU64 = AtomicU64::new(0);
-static INJECT_WINDOW_START_MS: AtomicU64 = AtomicU64::new(0);
-static INJECT_LAST_MS: AtomicU64 = AtomicU64::new(0);
-static INJECT_MAX_GAP_MS: AtomicU64 = AtomicU64::new(0);
-
-fn record_inject_cadence() {
-    let now = super::now_ms();
-    let last = INJECT_LAST_MS.swap(now, Ordering::Relaxed);
-    if last != 0 {
-        INJECT_MAX_GAP_MS.fetch_max(now.saturating_sub(last), Ordering::Relaxed);
-    }
-    let c = INJECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if c.is_multiple_of(500) {
-        let ws = INJECT_WINDOW_START_MS.swap(now, Ordering::Relaxed);
-        let max_gap = INJECT_MAX_GAP_MS.swap(0, Ordering::Relaxed);
-        if ws != 0 {
-            let elapsed = now.saturating_sub(ws).max(1);
-            let approx_hz = 500_000 / elapsed;
-            info!(
-                approx_hz,
-                max_gap_ms = max_gap,
-                elapsed_ms = elapsed,
-                "inject motion cadence (per 500 events)"
-            );
-        }
-    }
 }
 
 pub struct EnigoInject {
@@ -1350,13 +1801,6 @@ impl EnigoInject {
     }
 }
 
-fn should_use_game_relative_injection(
-    game_foreground: bool,
-    game_drive: super::GameDrive,
-) -> bool {
-    game_foreground || matches!(game_drive, super::GameDrive::Receiving)
-}
-
 fn send_relative_mouse_input(dx: i32, dy: i32) -> Result<()> {
     let input = INPUT {
         r#type: INPUT_MOUSE,
@@ -1367,7 +1811,7 @@ fn send_relative_mouse_input(dx: i32, dy: i32) -> Result<()> {
                 mouseData: 0,
                 dwFlags: MOUSEEVENTF_MOVE,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MINESHARE_INPUT_TAG,
             },
         },
     };
@@ -1376,22 +1820,100 @@ fn send_relative_mouse_input(dx: i32, dy: i32) -> Result<()> {
     Ok(())
 }
 
+fn move_desktop_cursor_rel(dx: i32, dy: i32) -> Result<()> {
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }.context("get desktop cursor position")?;
+    let x = cursor.x.saturating_add(dx);
+    let y = cursor.y.saturating_add(dy);
+    unsafe { SetCursorPos(x, y) }.context("set desktop cursor position")?;
+    Ok(())
+}
+
+fn send_desktop_mouse_move(dx: i32, dy: i32) -> Result<()> {
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }.context("get desktop cursor position")?;
+
+    let origin_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let origin_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
+    let x = cursor
+        .x
+        .saturating_add(dx)
+        .clamp(origin_x, origin_x.saturating_add(width - 1));
+    let y = cursor
+        .y
+        .saturating_add(dy)
+        .clamp(origin_y, origin_y.saturating_add(height - 1));
+
+    let normalize = |value: i32, origin: i32, extent: i32| -> i32 {
+        if extent <= 1 {
+            0
+        } else {
+            ((i64::from(value - origin) * 65_535) / i64::from(extent - 1)) as i32
+        }
+    };
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: normalize(x, origin_x, width),
+                dy: normalize(y, origin_y, height),
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                dwExtraInfo: MINESHARE_INPUT_TAG,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    anyhow::ensure!(sent == 1, "SendInput desktop mouse move was rejected");
+    Ok(())
+}
+
+fn should_use_true_relative_injection(game_foreground: bool, game_drive: super::GameDrive) -> bool {
+    game_foreground || matches!(game_drive, super::GameDrive::Receiving)
+}
+
+fn should_emit_mouse_motion_packet(
+    game_foreground: bool,
+    game_drive: super::GameDrive,
+    mouse_button_held: bool,
+) -> bool {
+    should_use_true_relative_injection(game_foreground, game_drive) || mouse_button_held
+}
+
 impl InputInject for EnigoInject {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> Result<()> {
-        if should_use_game_relative_injection(game_foreground(), super::game_drive()) {
-            // Enigo's default Windows `Coordinate::Rel` path converts to
-            // GetCursorPos + an absolute move to bypass pointer acceleration.
-            // Pointer-lock games recenter every frame, so that conversion
-            // races the game and causes camera flings. Send true relative
-            // mickeys only for game-locked receiving; keep desktop behavior.
+        let game_foreground = game_foreground();
+        let game_drive = super::game_drive();
+        let mouse_button_held = self
+            .held
+            .lock()
+            .iter()
+            .any(|held| matches!(held, HeldKey::MouseBtn(_)));
+        if should_use_true_relative_injection(game_foreground, game_drive) {
+            // Pointer-lock games continually recenter the cursor and require
+            // true relative mickeys.
             send_relative_mouse_input(dx, dy)?;
+        } else if should_emit_mouse_motion_packet(game_foreground, game_drive, mouse_button_held) {
+            // Drag-sensitive Windows surfaces (notably the Win+Shift+S
+            // snipping overlay) require real mouse-move packets while a
+            // button is held. SetCursorPos alone changes the cursor location
+            // but does not extend their selection gesture.
+            send_desktop_mouse_move(dx, dy)?;
         } else {
-            self.inner
-                .lock()
-                .move_mouse(dx, dy, Coordinate::Rel)
-                .context("enigo move_mouse")?;
+            // Desktop sharing deliberately avoids SendInput. Every SendInput
+            // call traverses the machine-wide low-level-hook chain; on the
+            // affected Laptop that path stalled for 50–180 ms and delayed
+            // genuine touchpad events in the same Windows input queue.
+            // Direct cursor positioning measured below one millisecond p99
+            // and preserves the existing desktop-relative semantics.
+            move_desktop_cursor_rel(dx, dy)?;
         }
-        record_inject_cadence();
+        if dx != 0 || dy != 0 {
+            attempt_remote_focus("first-motion-retry");
+        }
         Ok(())
     }
 
@@ -1419,6 +1941,9 @@ impl InputInject for EnigoInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
+        if down {
+            attempt_remote_focus("first-key-retry");
+        }
         self.inject_key(code, down)?;
         super::note_key_injected_with_code(code.0, down);
         let mut held = self.held.lock();
@@ -1432,9 +1957,6 @@ impl InputInject for EnigoInject {
 
     fn release_all_held(&self) -> Result<()> {
         let drained: Vec<HeldKey> = self.held.lock().drain().collect();
-        if drained.is_empty() {
-            return Ok(());
-        }
         let count = drained.len();
         for h in drained {
             let res = match h {
@@ -1457,31 +1979,85 @@ impl InputInject for EnigoInject {
                 warn!(error = %e, "failed to release held key on session end");
             }
         }
-        info!(
-            count,
-            "released stale held keys at session end (preventing stuck-key after peer disconnect)"
-        );
-        Ok(())
+        if count > 0 {
+            info!(
+                count,
+                "released stale held keys at session end (preventing stuck-key after peer disconnect)"
+            );
+        }
+        touchpad::release_all()
     }
 
-    fn scroll(&self, _dx: f32, dy: f32) -> Result<()> {
-        // Sign convention mismatch:
-        //   * Linux/Win HW: REL_WHEEL / WM_MOUSEWHEEL positive = wheel
-        //     rotated forward (away from user) → content scrolls UP.
-        //   * enigo's `scroll(length, Vertical)`: positive = scroll
-        //     DOWN. (See enigo docs: "positive value means scroll
-        //     down/right, negative means scroll up/left".)
-        // Without negation, every wheel-up on the controller becomes
-        // wheel-down on the Win receiver — exactly the inverted
-        // "looking" feel the user reported.
+    fn scroll(&self, dx: f32, dy: f32) -> Result<()> {
+        // Precision Touchpads emit partial deltas smaller than one 120-unit
+        // wheel notch. Enigo accepts whole notches, so rounding dx/dy here
+        // discarded most two-finger frames. Restore the original Windows
+        // wheel units and inject without quantising.
         if dy != 0.0 {
-            self.inner
-                .lock()
-                .scroll(-dy.round() as i32, Axis::Vertical)
-                .context("enigo scroll v")?;
+            send_wheel_input(dy, false).context("SendInput scroll v")?;
+        }
+        if dx != 0.0 {
+            send_wheel_input(dx, true).context("SendInput scroll h")?;
         }
         Ok(())
     }
+
+    fn touchpad(&self, event: TouchpadEvent) -> Result<()> {
+        touchpad::inject(event)
+    }
+}
+
+fn windows_wheel_event(horizontal: bool, delta: f32) -> InputEvent {
+    if horizontal {
+        let dx = if super::invert_scroll_x() {
+            -delta
+        } else {
+            delta
+        };
+        InputEvent::Scroll { dx, dy: 0.0 }
+    } else {
+        let dy = if super::invert_scroll_y() {
+            -delta
+        } else {
+            delta
+        };
+        InputEvent::Scroll { dx: 0.0, dy }
+    }
+}
+
+fn wheel_units(delta: f32) -> i32 {
+    if delta.is_finite() {
+        (delta * 120.0).round() as i32
+    } else {
+        0
+    }
+}
+
+fn send_wheel_input(delta: f32, horizontal: bool) -> Result<()> {
+    let units = wheel_units(delta);
+    if units == 0 {
+        return Ok(());
+    }
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: units as u32,
+                dwFlags: if horizontal {
+                    MOUSEEVENTF_HWHEEL
+                } else {
+                    MOUSEEVENTF_WHEEL
+                },
+                time: 0,
+                dwExtraInfo: MINESHARE_INPUT_TAG,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    anyhow::ensure!(sent == 1, "SendInput wheel event was rejected");
+    Ok(())
 }
 
 /// Linux evdev codes for the extended key cluster that do not share values
@@ -1501,7 +2077,7 @@ const EXTENDED_KEY_TABLE: &[(u16, u16)] = &[
     (111, 0x2E), // KEY_DELETE    ↔ VK_DELETE
     (125, 0x5B), // KEY_LEFTMETA  ↔ VK_LWIN
     (126, 0x5C), // KEY_RIGHTMETA ↔ VK_RWIN
-    (99,  0x2C), // KEY_SYSRQ     ↔ VK_SNAPSHOT (PrintScreen)
+    (99, 0x2C),  // KEY_SYSRQ     ↔ VK_SNAPSHOT (PrintScreen)
 ];
 
 /// Normalise a Windows hook event to its Linux evdev key code while retaining
@@ -1546,9 +2122,7 @@ struct KeyInjectionSpec {
 fn key_injection_spec(KeyCode(code): KeyCode) -> Option<KeyInjectionSpec> {
     let (scan, extended) = match code {
         // Numpad digits and operators that are non-extended set-1 codes.
-        55 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 | 83 => {
-            (code, false)
-        }
+        55 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 | 83 => (code, false),
         69 => (0x45, true),  // KEY_NUMLOCK
         96 => (0x1C, true),  // KEY_KPENTER
         97 => (0x1D, true),  // KEY_RIGHTCTRL
@@ -1620,6 +2194,144 @@ mod tests {
     use super::*;
 
     #[test]
+    fn touchpad_capture_worker_is_isolated_from_hook_dispatch() {
+        let hook_thread_id = thread::current().id();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+        launch_touchpad_capture_worker(move || {
+            tx.send((
+                thread::current().id(),
+                thread::current().name().map(str::to_owned),
+            ))
+            .expect("report touchpad worker identity");
+        })
+        .expect("launch touchpad capture worker");
+
+        let (capture_thread_id, capture_thread_name) = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("touchpad worker should start");
+        assert_ne!(
+            capture_thread_id, hook_thread_id,
+            "touchpad window traffic must not share the low-level keyboard hook thread"
+        );
+        assert_eq!(capture_thread_name.as_deref(), Some("win-touchpad-capture"));
+    }
+
+    #[test]
+    fn keyboard_and_mouse_hooks_use_isolated_dispatch_threads() {
+        let test_thread_id = thread::current().id();
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let mouse_tx = tx.clone();
+
+        launch_isolated_hook_workers(
+            move || {
+                mouse_tx
+                    .send((
+                        "mouse",
+                        thread::current().id(),
+                        thread::current().name().map(str::to_owned),
+                    ))
+                    .expect("report mouse hook worker identity");
+            },
+            move || {
+                tx.send((
+                    "keyboard",
+                    thread::current().id(),
+                    thread::current().name().map(str::to_owned),
+                ))
+                .expect("report keyboard hook worker identity");
+            },
+        )
+        .expect("launch isolated hook workers");
+
+        let first = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first hook worker should start");
+        let second = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("second hook worker should start");
+        assert_ne!(first.1, test_thread_id);
+        assert_ne!(second.1, test_thread_id);
+        assert_ne!(
+            first.1, second.1,
+            "mouse traffic must not share the low-level keyboard hook thread"
+        );
+
+        let workers = [first, second]
+            .into_iter()
+            .map(|(role, _, name)| (role, name))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            workers["mouse"].as_deref(),
+            Some("win-mouse-hook"),
+            "mouse hook worker should be identifiable in diagnostics"
+        );
+        assert_eq!(
+            workers["keyboard"].as_deref(),
+            Some("win-keyboard-hook"),
+            "keyboard hook worker should be identifiable in diagnostics"
+        );
+    }
+
+    #[test]
+    fn focus_handoff_starts_immediately_and_retries_only_after_failure() {
+        let handoff = FocusHandoff::new();
+        handoff.arm();
+        assert!(handoff.try_begin());
+        handoff.finish(false);
+        assert!(handoff.try_begin());
+        handoff.finish(true);
+        assert!(!handoff.try_begin());
+    }
+
+    #[test]
+    fn focus_handoff_waits_until_cursor_leaves_warped_edge() {
+        let screen = (0, 0, 1919, 1079);
+        assert!(!focus_point_is_safe((0, 539), screen));
+        assert!(!focus_point_is_safe((7, 539), screen));
+        assert!(focus_point_is_safe((8, 539), screen));
+        assert!(!focus_point_is_safe((1919, 539), screen));
+        assert!(focus_point_is_safe((1911, 539), screen));
+        assert!(!focus_point_is_safe((960, 0), screen));
+        assert!(focus_point_is_safe((960, 8), screen));
+    }
+
+    #[test]
+    fn raw_input_edge_detection_preserves_every_layout_direction() {
+        let desktop = (0, 0, 99, 99);
+        assert!(crossed_peer_edge(
+            super::super::PeerSide::Right,
+            desktop,
+            (98, 50),
+            (99, 50),
+        ));
+        assert!(crossed_peer_edge(
+            super::super::PeerSide::Left,
+            desktop,
+            (1, 50),
+            (0, 50),
+        ));
+        assert!(crossed_peer_edge(
+            super::super::PeerSide::Top,
+            desktop,
+            (50, 1),
+            (50, 0),
+        ));
+        assert!(crossed_peer_edge(
+            super::super::PeerSide::Bottom,
+            desktop,
+            (50, 98),
+            (50, 99),
+        ));
+        assert!(!crossed_peer_edge(
+            super::super::PeerSide::Right,
+            desktop,
+            (50, 50),
+            (51, 50),
+        ));
+    }
+
+    #[test]
     fn direct_key_specs_preserve_meta_and_numpad_identity() {
         assert_eq!(
             key_injection_spec(KeyCode(125)),
@@ -1683,23 +2395,122 @@ mod tests {
     }
 
     #[test]
+    fn hidden_cursor_alone_does_not_trigger_game_lock() {
+        assert!(
+            !should_auto_lock_game(true, false, false, true),
+            "Windows hides the pointer while typing; that alone is not evidence of a game"
+        );
+        assert!(should_auto_lock_game(false, true, false, true));
+        assert!(should_auto_lock_game(false, false, true, true));
+        assert!(!should_auto_lock_game(false, true, false, false));
+    }
+
+    #[test]
     fn true_relative_injection_is_scoped_to_game_receiving() {
-        assert!(should_use_game_relative_injection(
+        assert!(should_use_true_relative_injection(
             true,
             super::super::GameDrive::Off
         ));
-        assert!(should_use_game_relative_injection(
+        assert!(should_use_true_relative_injection(
             false,
             super::super::GameDrive::Receiving
         ));
-        assert!(!should_use_game_relative_injection(
+        assert!(!should_use_true_relative_injection(
             false,
             super::super::GameDrive::Driving
         ));
-        assert!(!should_use_game_relative_injection(
+        assert!(!should_use_true_relative_injection(
             false,
             super::super::GameDrive::Off
         ));
+    }
+
+    #[test]
+    fn desktop_drag_emits_mouse_motion_packets() {
+        assert!(should_emit_mouse_motion_packet(
+            false,
+            super::super::GameDrive::Off,
+            true
+        ));
+        assert!(!should_emit_mouse_motion_packet(
+            false,
+            super::super::GameDrive::Off,
+            false
+        ));
+    }
+
+    #[test]
+    fn wheel_capture_preserves_both_touchpad_scroll_axes() {
+        super::super::set_invert_scroll(false, false);
+        super::super::set_touchpad_scroll_speed(1.0);
+        assert_eq!(
+            windows_wheel_event(false, 1.25),
+            InputEvent::Scroll { dx: 0.0, dy: 1.25 }
+        );
+        assert_eq!(
+            windows_wheel_event(true, -0.5),
+            InputEvent::Scroll { dx: -0.5, dy: 0.0 }
+        );
+        assert_eq!(wheel_units(1.0), 120);
+        assert_eq!(wheel_units(1.0 / 120.0), 1);
+        assert_eq!(wheel_units(-0.25), -30);
+    }
+
+    #[test]
+    fn raw_forwarded_motion_tracks_visible_peer_depth() {
+        super::super::set_peer_side(super::super::PeerSide::Right);
+        PEER_W.store(1_920, Ordering::Relaxed);
+        VIRT_X.store(0, Ordering::Relaxed);
+        VIRT_Y.store(500, Ordering::Relaxed);
+        CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+
+        // The peer applies this exact desktop delta. If the source keeps
+        // VIRT_X at the entry edge, a small reverse movement can incorrectly
+        // satisfy the exit threshold even though the visible peer cursor is
+        // still hundreds of pixels away from its edge.
+        assert!(!track_raw_remote_motion(600, 20));
+
+        assert_eq!(
+            VIRT_X.load(Ordering::Relaxed),
+            600,
+            "source virtual depth must follow the delta visibly applied on the peer"
+        );
+        assert_eq!(VIRT_Y.load(Ordering::Relaxed), 520);
+
+        assert!(!track_raw_remote_motion(-50, 0));
+        assert_eq!(
+            VIRT_X.load(Ordering::Relaxed),
+            550,
+            "a small reverse movement must not jump back to the laptop"
+        );
+
+        // Reaching the visible edge (550 px back) still keeps the 100 px
+        // hysteresis buffer. Only the final 100 px requests the handoff.
+        assert!(!track_raw_remote_motion(-600, 0));
+        assert_eq!(VIRT_X.load(Ordering::Relaxed), -50);
+        assert!(track_raw_remote_motion(-50, 0));
+        assert_eq!(VIRT_X.load(Ordering::Relaxed), -EXIT_BUFFER_PX);
+        CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+    }
+
+    #[test]
+    fn remote_depth_axis_matches_every_layout_side() {
+        assert_eq!(
+            remote_motion_axes(super::super::PeerSide::Right, 7, 11),
+            (7, 11)
+        );
+        assert_eq!(
+            remote_motion_axes(super::super::PeerSide::Left, -7, 11),
+            (7, 11)
+        );
+        assert_eq!(
+            remote_motion_axes(super::super::PeerSide::Top, 11, -7),
+            (7, 11)
+        );
+        assert_eq!(
+            remote_motion_axes(super::super::PeerSide::Bottom, 11, 7),
+            (7, 11)
+        );
     }
 
     #[test]
@@ -1729,5 +2540,95 @@ mod tests {
         let now = 5_000;
         let last_flush = now - REMOTE_IDLE_SNAP_MS;
         assert!(should_snap_virt_x(-50, last_flush, now));
+    }
+
+    #[test]
+    #[ignore = "manual CPU regression gate; starts the process-lifetime watchdog"]
+    fn idle_motion_watchdog_is_event_driven() {
+        super::super::set_game_drive(super::super::GameDrive::Off);
+        CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+        super::super::set_mouse_rate_hz(1_000);
+        start_motion_flush_watchdog();
+
+        thread::sleep(std::time::Duration::from_millis(20));
+        let before = FLUSH_WATCHDOG_WAKEUPS.load(Ordering::Relaxed);
+        thread::sleep(std::time::Duration::from_millis(40));
+        let wakeups = FLUSH_WATCHDOG_WAKEUPS
+            .load(Ordering::Relaxed)
+            .saturating_sub(before);
+
+        assert!(
+            wakeups <= 1,
+            "idle watchdog polled {wakeups} times in 40 ms instead of parking"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual active-latency regression gate; starts the process-lifetime watchdog"]
+    fn active_motion_burst_does_not_unpark_per_hardware_event() {
+        super::super::set_game_drive(super::super::GameDrive::Off);
+        CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+        super::super::set_mouse_rate_hz(1_000);
+        start_motion_flush_watchdog();
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        let before = FLUSH_WATCHDOG_UNPARKS.load(Ordering::Relaxed);
+        let distance_before = FLUSH_FWD_DISTANCE_X.load(Ordering::Relaxed);
+        for _ in 0..1_000 {
+            queue_pending_motion(1, 0);
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+        let unparks = FLUSH_WATCHDOG_UNPARKS
+            .load(Ordering::Relaxed)
+            .saturating_sub(before);
+        let distance = FLUSH_FWD_DISTANCE_X
+            .load(Ordering::Relaxed)
+            .saturating_sub(distance_before);
+        CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+        wake_motion_flush_watchdog();
+
+        assert!(
+            unparks <= 4,
+            "1,000-event burst caused {unparks} scheduler unparks"
+        );
+        assert_eq!(
+            distance, 1_000,
+            "scheduler lost {distance}/1,000 motion units"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual live latency gate; briefly moves the real Windows cursor"]
+    fn desktop_inject_path_has_no_user_visible_stalls() {
+        super::super::set_game_drive(super::super::GameDrive::Off);
+        let inject = EnigoInject::new().expect("create Windows input injector");
+        let mut samples = Vec::with_capacity(1_000);
+
+        for i in 0usize..1_000 {
+            let dx = if i.is_multiple_of(2) { 1 } else { -1 };
+            // Match the fastest supported production cadence. A tight
+            // unpaced loop measures Windows queue saturation rather than the
+            // MineShare dispatcher, which now uses the same 1,000 Hz ceiling.
+            thread::sleep(std::time::Duration::from_millis(1));
+            let started = std::time::Instant::now();
+            inject
+                .mouse_move_rel(dx, 0)
+                .expect("inject desktop-relative mouse move");
+            samples.push(started.elapsed());
+        }
+
+        samples.sort_unstable();
+        let p99 = samples[samples.len() * 99 / 100];
+        let max = *samples.last().expect("latency sample");
+        eprintln!("desktop inject latency: p99={p99:?} max={max:?}");
+
+        assert!(
+            p99 <= std::time::Duration::from_millis(8),
+            "desktop inject p99 {p99:?} exceeds one 120 Hz display frame"
+        );
+        assert!(
+            max <= std::time::Duration::from_millis(50),
+            "desktop inject stalled for {max:?}, which is user-visible"
+        );
     }
 }

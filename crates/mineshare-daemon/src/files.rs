@@ -319,7 +319,10 @@ pub fn snapshot() -> Vec<TransferSnapshot> {
                 name: t.name.clone(),
                 size_bytes: t.size_bytes,
                 bytes_so_far: t.bytes_so_far,
-                final_path: t.final_path.as_ref().and_then(|p| p.to_str().map(|s| s.to_string())),
+                final_path: t
+                    .final_path
+                    .as_ref()
+                    .and_then(|p| p.to_str().map(|s| s.to_string())),
                 error: t.error.clone(),
                 seconds_elapsed: t.started_at.elapsed().as_secs_f32(),
             })
@@ -350,7 +353,10 @@ pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> 
     let final_path = resolve_destination(&dir, &safe_name);
     let temp_path = final_path.with_file_name(format!(
         ".{}.partial",
-        final_path.file_name().and_then(|s| s.to_str()).unwrap_or("transfer")
+        final_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("transfer")
     ));
     let file = File::create(&temp_path)
         .await
@@ -397,7 +403,10 @@ pub async fn write_chunk(id: u64, offset: u64, data: &[u8]) -> Result<()> {
             bail!("transfer {id} not active");
         }
         validate_chunk(t.bytes_so_far, t.size_bytes, offset, data.len())?;
-        let file = t.incoming_file.take().context("transfer file handle gone")?;
+        let file = t
+            .incoming_file
+            .take()
+            .context("transfer file handle gone")?;
         let sha = t.incoming_sha.take().context("transfer sha gone")?;
         (file, sha)
     };
@@ -480,7 +489,12 @@ pub fn clear_session_tx() {
     // showing a stuck progress bar after the peer drops.
     let pending: Vec<u64> = with_state(|m| {
         m.values()
-            .filter(|t| matches!(t.status, Status::Pending | Status::Active | Status::Verifying))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    Status::Pending | Status::Active | Status::Verifying
+                )
+            })
             .map(|t| t.id)
             .collect()
     });
@@ -598,7 +612,10 @@ fn validate_offer(name: &str, size_bytes: u64) -> Result<()> {
 }
 
 fn validate_chunk(received: u64, declared: u64, offset: u64, len: usize) -> Result<()> {
-    anyhow::ensure!(len <= CHUNK_BYTES, "incoming file chunk exceeds {CHUNK_BYTES} bytes");
+    anyhow::ensure!(
+        len <= CHUNK_BYTES,
+        "incoming file chunk exceeds {CHUNK_BYTES} bytes"
+    );
     anyhow::ensure!(offset == received, "non-sequential incoming file chunk");
     let end = offset
         .checked_add(len as u64)
@@ -614,7 +631,15 @@ mod transfer_validation_tests {
     #[test]
     fn accepts_sequential_chunks_within_declared_size() {
         assert!(validate_chunk(0, 64 * 1024, 0, CHUNK_BYTES).is_ok());
-        assert!(validate_chunk(CHUNK_BYTES as u64, 64 * 1024, CHUNK_BYTES as u64, CHUNK_BYTES).is_ok());
+        assert!(
+            validate_chunk(
+                CHUNK_BYTES as u64,
+                64 * 1024,
+                CHUNK_BYTES as u64,
+                CHUNK_BYTES
+            )
+            .is_ok()
+        );
     }
 
     #[test]

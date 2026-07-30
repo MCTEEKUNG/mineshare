@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">MineShare Linked M</title>
+  <desc id="desc">A geometric linked M in antique gold on an ivory marble tile.</desc>
+  <defs>
+    <linearGradient id="ivory" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.52" stop-color="#FBFAF7"/>
+      <stop offset="1" stop-color="#F1ECE3"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0.12" y1="0.08" x2="0.9" y2="0.94">
+      <stop offset="0" stop-color="#E4C968"/>
+      <stop offset="0.34" stop-color="#B68A2E"/>
+      <stop offset="0.68" stop-color="#D4AF37"/>
+      <stop offset="1" stop-color="#8A651F"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#3B2C12" flood-opacity="0.18"/>
+    </filter>
+    <filter id="markShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="9" flood-color="#6D501B" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <rect x="52" y="52" width="920" height="920" rx="218" fill="url(#ivory)" filter="url(#tileShadow)"/>
+  <rect x="61" y="61" width="902" height="902" rx="209" fill="none" stroke="#B68A2E" stroke-opacity="0.34" stroke-width="10"/>
+
+  <g fill="none" stroke-linecap="round">
+    <path d="M87 331C212 280 266 170 407 153C538 138 566 230 716 209C818 194 879 135 946 119"
+          stroke="#D8D2C8" stroke-width="17" stroke-opacity="0.62"/>
+    <path d="M83 353C205 306 282 216 412 201C546 186 598 270 727 251C831 236 882 188 947 170"
+          stroke="#FFFFFF" stroke-width="8" stroke-opacity="0.82"/>
+    <path d="M76 785C192 746 260 804 378 746C489 691 552 704 652 773C763 850 850 831 951 755"
+          stroke="#D8D2C8" stroke-width="15" stroke-opacity="0.48"/>
+    <path d="M102 813C216 774 276 831 389 779C500 728 556 741 648 806C754 880 842 863 924 804"
+          stroke="#FFFFFF" stroke-width="7" stroke-opacity="0.74"/>
+    <path d="M159 96C190 195 144 251 185 348M838 651C887 730 850 825 923 914"
+          stroke="#C9C1B5" stroke-width="10" stroke-opacity="0.32"/>
+  </g>
+
+  <g filter="url(#markShadow)">
+    <path d="M246 724V330L512 596L778 330V724"
+          fill="none" stroke="#76551A" stroke-width="126" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M246 724V330L512 596L778 330V724"
+          fill="none" stroke="url(#gold)" stroke-width="102" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M236 321L512 607L788 321"
+          fill="none" stroke="#F1D77A" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.72"/>
+  </g>
+
+  <rect x="475" y="559" width="74" height="74" rx="16"
+        transform="rotate(45 512 596)" fill="#FBFAF7" stroke="#8A651F" stroke-width="8"/>
+</svg>

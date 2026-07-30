@@ -18,6 +18,7 @@ pub mod layout;
 pub mod logs;
 pub mod pairing;
 pub mod runtime;
+pub mod runtime_owner;
 pub mod settings;
 pub mod status;
 pub mod trust;

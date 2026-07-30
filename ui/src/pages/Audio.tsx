@@ -160,7 +160,7 @@ function Switch({ on }: { on: boolean }) {
     <span
       className={
         "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
-        (on ? "bg-emerald-500" : "bg-ds-hover")
+        (on ? "bg-ds-accent" : "bg-ds-hover")
       }
     >
       <span
@@ -184,7 +184,7 @@ function VirtualMicCard({
     return (
       <Card status="ok" title="Virtual microphone">
         <p>
-          PipeWire null-sink <code className="font-mono text-emerald-400">mineshare_mic</code>{" "}
+          PipeWire null-sink <code className="font-mono text-ds-accent">mineshare_mic</code>{" "}
           loaded. Discord / Zoom / OBS see the matching monitor as{" "}
           <strong className="text-ds-text">"Monitor of MineShare-Mic"</strong> in their input picker.
         </p>
@@ -196,8 +196,8 @@ function VirtualMicCard({
       <Card status="ok" title="Virtual microphone">
         <p>
           VB-CABLE detected. Peer mic frames render into{" "}
-          <code className="font-mono text-emerald-400">CABLE Input</code>; pick{" "}
-          <code className="font-mono text-emerald-400">CABLE Output</code> as your mic in any app.
+          <code className="font-mono text-ds-accent">CABLE Input</code>; pick{" "}
+          <code className="font-mono text-ds-accent">CABLE Output</code> as your mic in any app.
         </p>
       </Card>
     );
@@ -213,7 +213,7 @@ function VirtualMicCard({
             href="https://vb-audio.com/Cable/"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300 transition-colors"
+            className="text-ds-accent underline underline-offset-2 hover:text-ds-accent-strong transition-colors"
           >
             Install from vb-audio.com/Cable
           </a>{" "}

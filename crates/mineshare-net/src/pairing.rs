@@ -217,7 +217,9 @@ impl EncryptedSession {
         let counter = nonce & NONCE_COUNTER_MASK;
         let accepted = match domain {
             TransportDomain::Control => self.inner.control_replay.lock().check_and_record(counter),
-            TransportDomain::Datagram => self.inner.datagram_replay.lock().check_and_record(counter),
+            TransportDomain::Datagram => {
+                self.inner.datagram_replay.lock().check_and_record(counter)
+            }
         };
         anyhow::ensure!(accepted, "replay or out-of-window nonce {nonce}");
         Ok(buf)
@@ -298,16 +300,26 @@ mod tests {
         // initiator -> responder
         let pt = b"hello mineshare";
         let frame = init_aead.seal_for(TransportDomain::Datagram, pt).unwrap();
-        let out = resp_aead.open_for(TransportDomain::Datagram, &frame).unwrap();
+        let out = resp_aead
+            .open_for(TransportDomain::Datagram, &frame)
+            .unwrap();
         assert_eq!(out, pt);
 
         // replay should fail
-        assert!(resp_aead.open_for(TransportDomain::Datagram, &frame).is_err());
+        assert!(
+            resp_aead
+                .open_for(TransportDomain::Datagram, &frame)
+                .is_err()
+        );
 
         // responder -> initiator (reversed direction works because
         // StatelessTransportState exposes both write and read)
-        let frame2 = resp_aead.seal_for(TransportDomain::Datagram, b"reply").unwrap();
-        let out2 = init_aead.open_for(TransportDomain::Datagram, &frame2).unwrap();
+        let frame2 = resp_aead
+            .seal_for(TransportDomain::Datagram, b"reply")
+            .unwrap();
+        let out2 = init_aead
+            .open_for(TransportDomain::Datagram, &frame2)
+            .unwrap();
         assert_eq!(out2, b"reply");
 
         // A delayed TCP control frame must remain valid even after enough UDP

@@ -8,6 +8,7 @@ import AudioDevicesPage from "./pages/AudioDevices";
 import SettingsPage from "./pages/Settings";
 import PairingModal from "./PairingModal";
 import { LanguageToggle, useT } from "./i18n";
+import appIcon from "./assets/mineshare-app-icon.svg";
 import {
   IconActivity, IconVolume, IconFile, IconSliders,
   IconArrowDown, IconArrowUp, IconArrowUpRight, IconArrowDownLeft,
@@ -207,7 +208,7 @@ export default function App() {
   const tabTitle = t(`nav_${tab}`);
 
   return (
-    <div className="h-screen flex bg-ds-bg text-ds-text overflow-hidden">
+    <div className="app-marble h-screen flex bg-ds-bg text-ds-text overflow-hidden">
       <PairingModal />
       <DropOverlay visible={dropOverlay} />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -218,10 +219,11 @@ export default function App() {
         {/* Logo */}
         <div className="px-4 mb-7">
           <div className="flex items-center gap-2.5">
-            <div className="size-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0">
-              <IconActivity className="size-3.5 text-emerald-400" />
+            <img src={appIcon} alt="" className="size-9 shrink-0 drop-shadow-sm" />
+            <div>
+              <span className="block text-sm font-semibold text-ds-text tracking-tight">MineShare</span>
+              <span className="block text-[9px] uppercase tracking-[0.22em] text-ds-accent">Seamless control</span>
             </div>
-            <span className="text-sm font-semibold text-ds-text tracking-tight">MineShare</span>
           </div>
         </div>
 
@@ -299,13 +301,13 @@ function VersionFooter({ status }: { status: Status | null }) {
 function DropOverlay({ visible }: { visible: boolean }) {
   if (!visible) return null;
   return (
-    <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center bg-emerald-500/10 backdrop-blur-sm">
-      <div className="rounded-2xl border-2 border-dashed border-emerald-400/60 bg-ds-surface/95 px-12 py-10 shadow-2xl flex flex-col items-center gap-4">
-        <div className="size-14 rounded-full bg-emerald-500/20 flex items-center justify-center">
-          <IconArrowDown className="size-7 text-emerald-400" />
+    <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center bg-ds-accent-soft">
+      <div className="rounded-2xl border-2 border-dashed border-ds-accent-border bg-ds-surface px-12 py-10 shadow-2xl flex flex-col items-center gap-4">
+        <div className="size-14 rounded-full bg-ds-accent-soft flex items-center justify-center">
+          <IconArrowDown className="size-7 text-ds-accent" />
         </div>
         <div className="text-center">
-          <p className="text-base font-semibold text-emerald-300">Drop to send to peer</p>
+          <p className="text-base font-semibold text-ds-accent">Drop to send to peer</p>
           <p className="text-xs text-ds-text-muted mt-1">Encrypted · auto-saves to Downloads/MineShare</p>
         </div>
       </div>
@@ -324,9 +326,9 @@ function ActiveTransfersBadge({
   return (
     <button
       onClick={onClick}
-      className="fixed bottom-4 left-4 z-30 flex items-center gap-2 rounded-full bg-emerald-500 hover:bg-emerald-400 text-white px-3 py-1.5 shadow-lg shadow-emerald-500/25 text-xs font-medium transition-all duration-150"
+      className="fixed bottom-4 left-4 z-30 flex items-center gap-2 rounded-full bg-ds-accent hover:bg-ds-accent-strong text-ds-on-accent px-3 py-1.5 shadow-lg text-xs font-medium transition-all duration-150"
     >
-      <span className="inline-block size-1.5 rounded-full bg-white animate-pulse" />
+      <span className="inline-block size-1.5 rounded-full bg-white" />
       <IconArrowUp className="size-3.5" />
       {count} transfer{count === 1 ? "" : "s"}
     </button>
@@ -453,7 +455,7 @@ function ConnectionPill({
   if (!status) {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-ds-text-muted">
-        <span className="size-1.5 rounded-full bg-slate-500 animate-pulse" />
+        <span className="size-1.5 rounded-full bg-slate-500" />
         {t("conn_connecting")}
       </span>
     );
@@ -468,7 +470,7 @@ function ConnectionPill({
   }
   return (
     <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 rounded-full px-2.5 py-1">
-      <span className="size-1.5 rounded-full bg-emerald-400 animate-pulse" />
+      <span className="size-1.5 rounded-full bg-emerald-400" />
       {t("conn_paired_with")} {status.peer_addr}
     </span>
   );
@@ -498,18 +500,17 @@ function NavItem({
       }
     >
       {active && (
-        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-emerald-400 rounded-r-full" />
+        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-ds-accent rounded-r-full" />
       )}
-      <span className={active ? "text-emerald-400" : "group-hover:text-ds-text transition-colors"}>
+      <span className={active ? "text-ds-accent" : "group-hover:text-ds-text transition-colors"}>
         {icon}
       </span>
       <span className="flex-1">{children}</span>
       {badge ? (
-        <span className="text-[10px] bg-emerald-500 text-white rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-medium">
+        <span className="text-[10px] bg-ds-accent text-ds-on-accent rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-medium">
           {badge}
         </span>
       ) : null}
     </button>
   );
 }
-

@@ -36,15 +36,8 @@ fn get_audio_status() -> AudioStatus {
 
 #[tauri::command]
 fn set_audio_toggle(stream: String, direction: String, enabled: bool) -> Result<(), String> {
-    use mineshare_daemon::audio_status as a;
-    match (stream.as_str(), direction.as_str()) {
-        ("sysout", "send") => a::set_send_sysout(enabled),
-        ("sysout", "play") => a::set_play_sysout(enabled),
-        ("mic", "send") => a::set_send_mic(enabled),
-        ("mic", "play") => a::set_play_mic(enabled),
-        _ => return Err(format!("unknown audio toggle: {stream}/{direction}")),
-    }
-    Ok(())
+    mineshare_daemon::settings::set_audio_toggle(&stream, &direction, enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -55,6 +48,7 @@ struct DevicesSnapshot {
     /// runtime is following the OS default (Stage 8.4).
     selected_output: Option<String>,
     selected_input: Option<String>,
+    selected_sysout_capture: Option<String>,
 }
 
 #[tauri::command]
@@ -175,6 +169,7 @@ async fn list_audio_devices() -> DevicesSnapshot {
         inputs: mineshare_audio::list_input_devices(),
         selected_output: mineshare_audio::selected_output_device(),
         selected_input: mineshare_audio::selected_input_device(),
+        selected_sysout_capture: mineshare_audio::selected_sysout_capture_device(),
     })
     .await
     .unwrap_or(DevicesSnapshot {
@@ -182,6 +177,7 @@ async fn list_audio_devices() -> DevicesSnapshot {
         inputs: vec![],
         selected_output: None,
         selected_input: None,
+        selected_sysout_capture: None,
     })
 }
 
@@ -197,14 +193,69 @@ fn refresh_audio_devices() {
 /// the field) to revert to the OS default. Takes effect within
 /// ~200 ms, no daemon restart required (Stage 8.4).
 #[tauri::command]
-fn set_audio_output_device(name: Option<String>) {
-    mineshare_audio::set_output_device(name);
+fn set_audio_output_device(name: Option<String>) -> Result<(), String> {
+    mineshare_daemon::settings::set_audio_output_device(name).map_err(|e| e.to_string())
 }
 
 /// Mirror of [`set_audio_output_device`] for the mic capture path.
 #[tauri::command]
-fn set_audio_input_device(name: Option<String>) {
-    mineshare_audio::set_input_device(name);
+fn set_audio_input_device(name: Option<String>) -> Result<(), String> {
+    mineshare_daemon::settings::set_audio_input_device(name).map_err(|e| e.to_string())
+}
+
+/// Choose and persist the Windows endpoint captured as local system audio.
+#[tauri::command]
+fn set_sysout_capture_device(name: Option<String>) -> Result<(), String> {
+    mineshare_daemon::settings::set_sysout_capture_device(name).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn promote_taskbar_window_icon(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        ICON_BIG, ICON_SMALL, ICON_SMALL2, SendMessageW, WM_GETICON, WM_SETICON,
+    };
+
+    let hwnd = window.hwnd()?;
+    // Tauri/wry supplies the small titlebar icon, but on some Windows 11
+    // builds leaves WM_GETICON(ICON_BIG) empty. The taskbar then falls back
+    // to the generic white-document glyph. Reuse the live small HICON for
+    // BIG/SMALL2 so every shell surface resolves the same application mark.
+    let mut icon = unsafe {
+        SendMessageW(
+            hwnd,
+            WM_GETICON,
+            Some(WPARAM(ICON_SMALL2 as usize)),
+            None,
+        )
+    };
+    if icon.0 == 0 {
+        icon = unsafe {
+            SendMessageW(
+                hwnd,
+                WM_GETICON,
+                Some(WPARAM(ICON_SMALL as usize)),
+                None,
+            )
+        };
+    }
+    if icon.0 != 0 {
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(icon.0)),
+            );
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL2 as usize)),
+                Some(LPARAM(icon.0)),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -228,6 +279,19 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Set the live window icon explicitly. The bundle icon is enough
+            // for Explorer and installers, but Windows can otherwise keep a
+            // generic document icon for the running WebView taskbar button.
+            use tauri::Manager;
+            if let (Some(window), Some(icon)) = (
+                app.get_webview_window("main"),
+                app.default_window_icon().cloned(),
+            ) {
+                window.set_icon(icon)?;
+                #[cfg(target_os = "windows")]
+                promote_taskbar_window_icon(&window)?;
+            }
+
             // Spawn the daemon here (not before the builder) so it
             // only ever starts in the surviving single instance.
             if let Err(e) = state::bootstrap_runtime() {
@@ -256,6 +320,7 @@ pub fn run() {
             refresh_audio_devices,
             set_audio_output_device,
             set_audio_input_device,
+            set_sysout_capture_device,
             set_input_lock,
             cycle_keyboard_target,
             set_keyboard_target,

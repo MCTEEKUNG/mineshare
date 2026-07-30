@@ -24,9 +24,8 @@ impl OpusEncoder {
     /// mic/voice stream; near-useless for stereo music sysout, so the
     /// callers pass `false` there.
     pub fn new(bitrate_bps: i32, inband_fec: bool) -> Result<Self> {
-        let mut enc =
-            opus::Encoder::new(SAMPLE_RATE, channels(), opus::Application::Audio)
-                .context("opus encoder init")?;
+        let mut enc = opus::Encoder::new(SAMPLE_RATE, channels(), opus::Application::Audio)
+            .context("opus encoder init")?;
         enc.set_bitrate(opus::Bitrate::Bits(bitrate_bps))
             .context("opus set bitrate")?;
         // Explicit VBR — libopus defaults to VBR on, but set it so the
@@ -176,6 +175,10 @@ mod tests {
         for _ in 0..25 {
             last = encoder.encode(&silence).unwrap();
         }
-        assert!(last.len() <= 3, "DTX silence payload was {} bytes", last.len());
+        assert!(
+            last.len() <= 3,
+            "DTX silence payload was {} bytes",
+            last.len()
+        );
     }
 }

@@ -24,7 +24,7 @@ function ConnectionHero({ status, latency }: { status: Status; latency: Latency 
       <div className="flex items-center justify-between gap-6">
         <div className="flex items-center gap-4">
           <MachineBadge label="This PC" active />
-          <span className="text-emerald-400 font-mono text-lg">━━●━━▶</span>
+          <span className="text-ds-accent font-mono text-lg">━━●━━▶</span>
           <MachineBadge label={status.peer_name ?? "Peer"} active={connected} />
         </div>
         <div className="text-right">

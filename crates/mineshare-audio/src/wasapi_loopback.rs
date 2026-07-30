@@ -23,22 +23,22 @@
 //! encoded frames out via a Tokio mpsc to the runtime.
 
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver as WakeReceiver, RecvTimeoutError, SyncSender as WakeSender};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cpal::SampleFormat;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::codec::OpusEncoder;
 use crate::{
-    AudioCapture, AudioFrame, CHANNELS, FRAME_SAMPLES_INTERLEAVED, FRAME_SAMPLES_PER_CHANNEL,
-    SAMPLE_RATE, StreamKind,
+    AudioCapture, AudioFrame, CHANNELS, CaptureSink, FRAME_SAMPLES_INTERLEAVED,
+    FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE, StreamKind,
 };
 
 /// Capture-side ring capacity in *interleaved* samples. ~5 frames at
@@ -61,7 +61,7 @@ impl WasapiLoopback {
 }
 
 impl AudioCapture for WasapiLoopback {
-    fn start(&mut self, sink: UnboundedSender<AudioFrame>) -> Result<()> {
+    fn start(&mut self, sink: CaptureSink) -> Result<()> {
         if self.started {
             return Ok(());
         }
@@ -79,11 +79,31 @@ impl AudioCapture for WasapiLoopback {
     }
 }
 
-fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .context("no default audio output device for WASAPI loopback")?;
+fn run_capture_thread(sink: CaptureSink) -> Result<()> {
+    loop {
+        let selection_version = crate::sysout_capture_device_version();
+        match run_capture_stream(sink.clone(), selection_version) {
+            Ok(CaptureExit::Reconfigure) => {
+                info!("WASAPI loopback device selection changed — rebuilding stream");
+            }
+            Ok(CaptureExit::SinkClosed) => return Ok(()),
+            Err(e) => {
+                warn!(error = %e, "WASAPI loopback stream failed — retrying");
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureExit {
+    Reconfigure,
+    SinkClosed,
+}
+
+fn run_capture_stream(sink: CaptureSink, selection_version: u64) -> Result<CaptureExit> {
+    let device = crate::resolve_sysout_capture_device()
+        .context("no audio output device available for WASAPI loopback")?;
     let device_name = device.name().unwrap_or_else(|_| "?".to_string());
 
     // The shared-mode mixer format — that's what loopback actually
@@ -116,6 +136,11 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
     let (producer, consumer) = rb.split();
     let producer = Arc::new(Mutex::new(producer));
     let producer_cb = producer.clone();
+    // Capacity one intentionally coalesces callback notifications. The
+    // encoder cares only that enough samples may now exist, not how many
+    // device callbacks occurred.
+    let (samples_ready_tx, samples_ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let samples_ready_cb = samples_ready_tx.clone();
     let err_fn = |e| warn!(error = %e, "WASAPI loopback stream error");
 
     let stream = match cfg.sample_format() {
@@ -130,6 +155,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
                         "wasapi capture ring full — dropping samples"
                     );
                 }
+                notify_samples_ready(&samples_ready_cb);
             },
             err_fn,
             None,
@@ -144,6 +170,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
                         break;
                     }
                 }
+                notify_samples_ready(&samples_ready_cb);
             },
             err_fn,
             None,
@@ -151,21 +178,32 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
         other => anyhow::bail!("unsupported loopback sample format: {other:?}"),
     }
     .context("build WASAPI loopback input stream")?;
+    // Only the live cpal callback should keep the notifier connected.
+    drop(samples_ready_tx);
     stream.play().context("cpal play (loopback)")?;
     info!("WASAPI loopback stream started");
 
-    drive_encode_loop(consumer, sink, in_rate, in_channels)?;
+    let exit = drive_encode_loop(
+        consumer,
+        sink,
+        in_rate,
+        in_channels,
+        samples_ready_rx,
+        selection_version,
+    )?;
 
     drop(stream);
-    Ok(())
+    Ok(exit)
 }
 
 fn drive_encode_loop(
     mut consumer: ringbuf::HeapCons<f32>,
-    sink: UnboundedSender<AudioFrame>,
+    sink: CaptureSink,
     in_rate: u32,
     in_channels: u16,
-) -> Result<()> {
+    samples_ready: WakeReceiver<()>,
+    selection_version: u64,
+) -> Result<CaptureExit> {
     let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
     // Number of input *frames* (one frame = one sample per channel)
     // we need to fill one 20 ms output frame after resampling. Round
@@ -193,10 +231,25 @@ fn drive_encode_loop(
 
     loop {
         while consumer.occupied_len() < in_samples_per_out {
-            std::thread::sleep(Duration::from_millis(2));
+            if crate::sysout_capture_device_version() != selection_version {
+                return Ok(CaptureExit::Reconfigure);
+            }
+            // A short timeout makes a manual device switch responsive even
+            // while the selected endpoint is silent. This is four wakeups/s,
+            // replacing the old 500 wakeups/s polling loop.
+            match samples_ready.recv_timeout(Duration::from_millis(250)) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    info!("WASAPI callback stopped — ending loopback encode loop");
+                    return Ok(CaptureExit::SinkClosed);
+                }
+            }
         }
         let n = consumer.pop_slice(&mut in_buf);
         if n < in_samples_per_out {
+            continue;
+        }
+        if !sink.is_active() {
             continue;
         }
 
@@ -223,10 +276,15 @@ fn drive_encode_loop(
         };
         seq = seq.wrapping_add(1);
 
-        if sink.send(frame).is_err() {
+        if !sink.send_lossy(frame) {
             info!("audio sink closed — stopping WASAPI loopback");
-            return Ok(());
+            return Ok(CaptureExit::SinkClosed);
         }
     }
 }
 
+fn notify_samples_ready(tx: &WakeSender<()>) {
+    // Full means a wake token is already pending, which is exactly what we
+    // want. Disconnected means the encode thread has exited.
+    let _ = tx.try_send(());
+}

@@ -74,7 +74,7 @@ function DisplayPin({ pin, peer_addr }: { pin: string; peer_addr: string }) {
       </p>
       <p className="font-mono text-sm mb-6 text-ds-text">{peer_addr}</p>
       <p className="text-sm text-ds-text-muted mb-3">{t("pair_show_pin")}</p>
-      <p className="font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 my-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300">
+      <p className="font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 my-2 rounded-xl bg-ds-accent-soft border border-ds-accent-border text-ds-accent">
         {pin}
       </p>
       <p className="text-[11px] text-ds-text-muted mt-4 text-center">{t("pair_cancel_note")}</p>
@@ -114,13 +114,13 @@ function EnterPin({ peer_addr }: { peer_addr: string }) {
         value={value}
         onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 6))}
         onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-        className="w-full font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 rounded-xl bg-ds-hover border-2 border-ds-border text-ds-text focus:outline-none focus:border-emerald-500/60 transition-colors placeholder-slate-700"
+        className="w-full font-mono text-5xl font-bold text-center tracking-[0.3em] py-6 rounded-xl bg-ds-hover border-2 border-ds-border text-ds-text focus:outline-none focus:border-ds-accent transition-colors placeholder:text-ds-text-muted"
         placeholder="──────"
       />
       <button
         onClick={submit}
         disabled={value.length !== 6 || submitting}
-        className="mt-4 w-full rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold py-2.5 transition-all duration-150 shadow-lg shadow-emerald-500/20"
+        className="mt-4 w-full rounded-xl bg-ds-accent hover:bg-ds-accent-strong disabled:opacity-40 disabled:cursor-not-allowed text-ds-on-accent text-sm font-semibold py-2.5 transition-all duration-150 shadow-lg"
       >
         {submitting ? t("pair_button_sending") : t("pair_button")}
       </button>

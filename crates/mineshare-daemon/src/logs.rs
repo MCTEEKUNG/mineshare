@@ -50,8 +50,7 @@ pub fn init() -> Result<()> {
         .thread_name("mineshare-log-writer")
         .finish(appender);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let already_set = tracing_subscriber::registry()
         .with(filter)
@@ -90,8 +89,8 @@ fn prune_old_logs(dir: &std::path::Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60));
+    let cutoff =
+        SystemTime::now().checked_sub(Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60));
     let mut logs = Vec::new();
 
     for entry in entries.flatten() {
