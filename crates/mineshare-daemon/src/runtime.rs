@@ -5,21 +5,25 @@
 //! mouse/keyboard events over UDP. M1 forwards *all* captured events
 //! continuously; M2 will gate forwarding via the source/routing FSMs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use bincode::config::standard;
 use mineshare_audio::{AudioFrame, AudioPlayback};
 use mineshare_core::DeviceId;
-use mineshare_input::{InputEvent, InputInject, make_capture, make_inject};
+use mineshare_input::{
+    Button, ForwardedInputState, InputEvent, InputInject, make_capture, make_inject,
+};
 use mineshare_net::{
     Discovery, DiscoveryEvent, EncryptedSession, Initiator, NoiseSession, PeerAdvert, Responder,
+    TransportDomain,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -30,6 +34,7 @@ use crate::identity::Identity;
 use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
+static LOCAL_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
 
 /// Echo-loop guard: the peer's *sysout* coming out of our speakers
 /// is what our own loopback re-captures and would forward back as a
@@ -48,6 +53,7 @@ const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 /// while still triggering on quiet music.
 const ECHO_GUARD_MS: u64 = 500;
 const ECHO_TRIGGER_MIN_BYTES: usize = 12;
+const DTX_COMFORT_NOISE_MAX_BYTES: usize = 3;
 static LAST_PEER_SYSOUT_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
@@ -55,6 +61,233 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Moves synchronous OS injection off the UDP receive task.
+///
+/// Windows input injection can briefly block while low-level hooks process a
+/// `SendInput` call. Keeping that work in the socket reader turns a normal
+/// network delivery burst into a long queue of stale mouse moves, with key
+/// events trapped behind them. The dedicated worker keeps draining UDP at
+/// network speed and merges only adjacent mouse deltas before dispatch.
+struct InjectDispatcher {
+    queue: Arc<InjectQueue>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+struct PendingInject {
+    event: InputEvent,
+    merged_motion: bool,
+}
+
+struct InjectQueue {
+    pending: Mutex<VecDeque<PendingInject>>,
+    wake: Condvar,
+    stopped: AtomicBool,
+}
+
+struct MotionPacer {
+    next_deadline: Option<std::time::Instant>,
+}
+
+impl MotionPacer {
+    fn new() -> Self {
+        Self {
+            next_deadline: None,
+        }
+    }
+
+    fn wait_before_motion(&mut self) {
+        let now = std::time::Instant::now();
+        let interval = Duration::from_micros(mineshare_input::target_flush_us().max(1));
+        let (wait, next) = motion_pacing_step(now, self.next_deadline, interval);
+        if !wait.is_zero() {
+            thread::sleep(wait);
+        }
+        self.next_deadline = Some(next);
+    }
+}
+
+/// Absolute-deadline pacing: an idle worker dispatches immediately, while a
+/// catch-up burst is spread at the configured mouse rate. Advancing from the
+/// previous deadline avoids drift; resetting when late avoids accumulating
+/// debt after the user pauses.
+fn motion_pacing_step(
+    now: std::time::Instant,
+    next_deadline: Option<std::time::Instant>,
+    interval: Duration,
+) -> (Duration, std::time::Instant) {
+    match next_deadline {
+        Some(deadline) if deadline > now => (deadline - now, deadline + interval),
+        _ => (Duration::ZERO, now + interval),
+    }
+}
+
+#[derive(Clone)]
+struct InjectSender {
+    queue: Arc<InjectQueue>,
+}
+
+/// Never turn an arbitrarily long sender backlog into one cursor jump. Four
+/// adjacent samples still amortise AEAD/UDP overhead during a short scheduler
+/// delay, while bounding spatial quantisation at 250 Hz for a 1,000 Hz source.
+const MAX_WIRE_MOTION_MERGE: usize = 4;
+
+fn can_merge_wire_motion(merged_samples: usize) -> bool {
+    merged_samples < MAX_WIRE_MOTION_MERGE
+}
+
+impl InjectSender {
+    fn send(&self, event: InputEvent) -> std::result::Result<(), &'static str> {
+        if self.queue.stopped.load(Ordering::Acquire) {
+            return Err("input inject queue stopped");
+        }
+        let mut pending = self.queue.pending.lock();
+        if self.queue.stopped.load(Ordering::Acquire) {
+            return Err("input inject queue stopped");
+        }
+        let was_empty = pending.is_empty();
+        match (pending.back_mut(), event) {
+            (
+                Some(PendingInject {
+                    event: InputEvent::MouseMove { dx, dy },
+                    merged_motion,
+                }),
+                InputEvent::MouseMove {
+                    dx: next_dx,
+                    dy: next_dy,
+                },
+            ) => {
+                *dx = dx.saturating_add(next_dx);
+                *dy = dy.saturating_add(next_dy);
+                *merged_motion = true;
+            }
+            (
+                Some(PendingInject {
+                    event: InputEvent::Touchpad(current),
+                    merged_motion,
+                }),
+                InputEvent::Touchpad(next),
+            ) if current.coalescible_stream().is_some()
+                && current.coalescible_stream() == next.coalescible_stream() =>
+            {
+                *current = next;
+                *merged_motion = false;
+            }
+            (_, event) => pending.push_back(PendingInject {
+                event,
+                merged_motion: false,
+            }),
+        }
+        drop(pending);
+        if was_empty {
+            self.queue.wake.notify_one();
+        }
+        Ok(())
+    }
+}
+
+impl InjectDispatcher {
+    fn start(inject: Arc<dyn InputInject>, stats: Arc<SessionStats>) -> Result<Self> {
+        let queue = Arc::new(InjectQueue {
+            pending: Mutex::new(VecDeque::new()),
+            wake: Condvar::new(),
+            stopped: AtomicBool::new(false),
+        });
+        let worker_queue = queue.clone();
+        let worker = thread::Builder::new()
+            .name("mineshare-input-inject".into())
+            .spawn(move || {
+                raise_input_thread_priority();
+                let mut motion_pacer = MotionPacer::new();
+                loop {
+                    let entry = {
+                        let mut pending = worker_queue.pending.lock();
+                        while pending.is_empty() && !worker_queue.stopped.load(Ordering::Acquire) {
+                            worker_queue.wake.wait(&mut pending);
+                        }
+                        if worker_queue.stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        pending.pop_front()
+                    };
+                    if let Some(entry) = entry {
+                        if matches!(entry.event, InputEvent::MouseMove { .. }) {
+                            motion_pacer.wait_before_motion();
+                        }
+                        dispatch_inject_event(&*inject, &stats, entry.event, entry.merged_motion);
+                    }
+                }
+            })
+            .context("spawn input inject worker")?;
+        Ok(Self {
+            queue,
+            worker: Some(worker),
+        })
+    }
+
+    fn sender(&self) -> InjectSender {
+        InjectSender {
+            queue: self.queue.clone(),
+        }
+    }
+
+    fn stop(mut self) {
+        // Change the predicate while holding the same mutex used by
+        // `Condvar::wait`, otherwise a worker can observe `false`, then miss
+        // the notify just before it actually parks.
+        let pending = self.queue.pending.lock();
+        self.queue.stopped.store(true, Ordering::Release);
+        self.queue.wake.notify_all();
+        drop(pending);
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                warn!("input inject worker panicked during shutdown");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn raise_input_thread_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
+    let ok = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+    if ok == 0 {
+        warn!("failed to raise input inject thread priority");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn raise_input_thread_priority() {}
+
+fn dispatch_inject_event(
+    inject: &dyn InputInject,
+    stats: &SessionStats,
+    event: InputEvent,
+    merged_motion: bool,
+) {
+    if matches!(event, InputEvent::Touchpad(touchpad) if !touchpad.is_terminal())
+        && !mineshare_input::peer_in_remote()
+        && !mineshare_input::is_game_receiving()
+    {
+        return;
+    }
+    // A single untrusted/pathological delta still passes through `dispatch`
+    // and its safety clamp. A sum of several already-validated motion events
+    // must keep its full distance; clamping the merged result would make the
+    // remote cursor fall short after every network burst.
+    let result = match (event, merged_motion) {
+        (InputEvent::MouseMove { dx, dy }, true) => inject.mouse_move_rel(dx, dy),
+        (event, _) => inject.dispatch(event),
+    };
+    if let Err(e) = result {
+        warn!(error = %e, "inject failed");
+        stats.inject_errs.fetch_add(1, Ordering::Relaxed);
+    } else {
+        stats.injected.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// One-shot message exchanged on the encrypted TCP control channel after
@@ -71,6 +304,7 @@ struct PortAnnounce {
     daemon_version: String,
     screen_w: u32,
     screen_h: u32,
+    touchpad_capabilities: u32,
 }
 
 /// Streamed messages on the encrypted TCP control channel after the
@@ -92,6 +326,20 @@ pub enum ControlMsg {
     /// flooding the control channel; receivers should also sanity-
     /// check length before applying.
     ClipboardText(String),
+    ClipboardImageStart {
+        id: u64,
+        width: u32,
+        height: u32,
+        total_bytes: u64,
+    },
+    ClipboardImageChunk {
+        id: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    ClipboardImageEnd {
+        id: u64,
+    },
     /// Peer changed their layout — they want OUR `peer_side` to
     /// be the value they sent. The sender flips left↔right /
     /// top↔bottom on their side before sending, so receivers can
@@ -121,8 +369,12 @@ pub enum ControlMsg {
     /// `now - ts_ms` to learn round-trip time. Carrying our own
     /// timestamp on both legs avoids any need for clock sync
     /// between peers.
-    Ping { ts_ms: u64 },
-    Pong { ts_ms: u64 },
+    Ping {
+        ts_ms: u64,
+    },
+    Pong {
+        ts_ms: u64,
+    },
     /// Activity beacon driving the Smart keyboard target. Each side
     /// periodically advertises `last_input_ago_ms` — ms since its
     /// most recent activity (a deliberate mouse drag OR a click),
@@ -159,12 +411,46 @@ pub enum ControlMsg {
     /// Sender finished — receiver verifies sha256 against the
     /// running hash, atomically renames the `.partial` to the
     /// final destination on match, deletes + fails on mismatch.
-    FileEnd { id: u64, sha256: [u8; 32] },
+    FileEnd {
+        id: u64,
+        sha256: [u8; 32],
+    },
     /// Either side aborted the transfer.
-    FileCancel { id: u64 },
+    FileCancel {
+        id: u64,
+    },
     /// Toggle the peer into / out of Game Drive "Receiving" — it should
     /// inject our pure-relative input and suppress its own cursor-crossing.
-    GameDrive { active: bool },
+    GameDrive {
+        active: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlCollisionAction {
+    AcceptPeer,
+    KeepLocal,
+    YieldToPeer,
+}
+
+/// Resolve the only ambiguous ownership transition: both endpoints crossing
+/// their peer-facing edge before either `TakeControl` reaches the other.
+///
+/// Noise static public keys are stable, authenticated, and known to both
+/// endpoints, so ordering them gives both sides the same winner without an
+/// extra network round trip. The lower key wins only during a collision;
+/// ordinary, uncontested handovers are unaffected.
+fn control_collision_action(
+    local_is_driving: bool,
+    local_has_priority: bool,
+) -> ControlCollisionAction {
+    if !local_is_driving {
+        ControlCollisionAction::AcceptPeer
+    } else if local_has_priority {
+        ControlCollisionAction::KeepLocal
+    } else {
+        ControlCollisionAction::YieldToPeer
+    }
 }
 
 /// Tagged UDP payload — input events and audio frames share the same
@@ -174,18 +460,133 @@ pub enum ControlMsg {
 /// Wire format is positional; both daemons must run the same version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireFrame {
-    Input(InputEvent),
+    Input {
+        seq: u64,
+        event: InputEvent,
+    },
+    InputState {
+        seq: u64,
+        after_input_seq: u64,
+        state: ForwardedInputState,
+    },
     Audio(AudioFrame),
+}
+
+#[derive(Default)]
+struct InputReceiveOrdering {
+    last_event_seq: Option<u64>,
+    last_snapshot_seq: Option<u64>,
+    event_floor: u64,
+}
+
+impl InputReceiveOrdering {
+    fn accept_event(&mut self, seq: u64) -> bool {
+        if seq < self.event_floor || self.last_event_seq.is_some_and(|last| seq <= last) {
+            return false;
+        }
+        self.last_event_seq = Some(seq);
+        true
+    }
+
+    fn accept_snapshot(&mut self, seq: u64, after_input_seq: u64) -> bool {
+        if self.last_snapshot_seq.is_some_and(|last| seq <= last) {
+            return false;
+        }
+        self.last_snapshot_seq = Some(seq);
+        self.event_floor = self.event_floor.max(after_input_seq);
+
+        // A snapshot only describes events below `after_input_seq`. If a
+        // newer event already arrived, applying this older state could undo a
+        // key-up and briefly re-stick the key. A later snapshot will heal any
+        // edge that was genuinely lost.
+        self.last_event_seq
+            .is_none_or(|last| last < after_input_seq)
+    }
+}
+
+/// A snapshot can observe a freshly-held key just before the sender's input
+/// task numbers and emits that key-down edge. In that order, the snapshot
+/// correctly restores the key but the late live edge would type it again.
+/// Remember only press corrections so the first matching live press is
+/// treated as the already-applied edge; subsequent typematic repeats pass.
+#[derive(Default)]
+struct SnapshotPressDeduper {
+    keys: HashSet<u16>,
+    buttons: HashSet<Button>,
+}
+
+impl SnapshotPressDeduper {
+    fn observe_snapshot_correction(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Key { code, down } => {
+                if down {
+                    self.keys.insert(code.0);
+                } else {
+                    self.keys.remove(&code.0);
+                }
+            }
+            InputEvent::MouseButton { btn, down } => {
+                if down {
+                    self.buttons.insert(btn);
+                } else {
+                    self.buttons.remove(&btn);
+                }
+            }
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } | InputEvent::Touchpad(_) => {}
+        }
+    }
+
+    fn suppress_live_event(&mut self, event: InputEvent) -> bool {
+        match event {
+            InputEvent::Key { code, down } => {
+                if down {
+                    self.keys.remove(&code.0)
+                } else {
+                    self.keys.remove(&code.0);
+                    false
+                }
+            }
+            InputEvent::MouseButton { btn, down } => {
+                if down {
+                    self.buttons.remove(&btn)
+                } else {
+                    self.buttons.remove(&btn);
+                    false
+                }
+            }
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } | InputEvent::Touchpad(_) => {
+                false
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
     pub capture: bool,
     pub inject: bool,
+    /// Start audio capture and playback pipelines. Input capture/injection
+    /// remain independently controlled by `capture` and `inject`.
+    pub audio: bool,
+}
+
+fn audio_component_enabled(audio: bool, disable_env: &str) -> bool {
+    audio && std::env::var_os(disable_env).is_none()
 }
 
 pub async fn run(opts: RunOpts) -> Result<()> {
     logs::init()?;
+    // This guard lives at the runtime seam rather than in either executable:
+    // GUI + headless daemon therefore cannot open duplicate network/audio/
+    // input pipelines in the same Windows user session.
+    let _runtime_owner = crate::runtime_owner::RuntimeOwner::acquire()?;
+    let sysout_capture_enabled =
+        audio_component_enabled(opts.audio, "MINESHARE_DISABLE_SYSOUT_CAPTURE");
+    let mic_capture_enabled = audio_component_enabled(opts.audio, "MINESHARE_DISABLE_MIC_CAPTURE");
+    let audio_playback_enabled =
+        audio_component_enabled(opts.audio, "MINESHARE_DISABLE_AUDIO_PLAYBACK");
+    let mic_playback_enabled =
+        audio_component_enabled(opts.audio, "MINESHARE_DISABLE_MIC_PLAYBACK");
 
     let identity = Identity::load_or_create().context("identity bootstrap failed")?;
 
@@ -207,6 +608,11 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         os = %identity.os,
         capture = opts.capture,
         inject = opts.inject,
+        audio = opts.audio,
+        sysout_capture = sysout_capture_enabled,
+        mic_capture = mic_capture_enabled,
+        audio_playback = audio_playback_enabled,
+        mic_playback = mic_playback_enabled,
         peer_side = ?layout_cfg.peer_side,
         "MineShare daemon starting"
     );
@@ -266,10 +672,20 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let _cap_alive = cap_started;
 
     // --- Audio sysout capture (Win loopback / Linux PipeWire monitor) --
-    let (audio_cap_tx, mut audio_cap_rx) = mpsc::unbounded_channel::<AudioFrame>();
-    let audio_cap_started = if opts.capture {
+    // Capture is real-time and lossy by nature. Bound the cross-thread queue
+    // so a stalled runtime cannot accumulate minutes of stale audio or grow
+    // memory without limit during long-running sessions.
+    const AUDIO_CAPTURE_QUEUE_CAPACITY: usize = 8;
+    let (audio_cap_tx, mut audio_cap_rx) =
+        mpsc::channel::<AudioFrame>(AUDIO_CAPTURE_QUEUE_CAPACITY);
+    let audio_cap_started = if opts.capture && sysout_capture_enabled {
+        let sysout_wire = wire_bcast.clone();
+        let sysout_sink = mineshare_audio::CaptureSink::new(audio_cap_tx.clone(), move || {
+            crate::audio_status::SEND_SYSOUT.load(Ordering::Relaxed)
+                && sysout_wire.receiver_count() != 0
+        });
         match mineshare_audio::make_sysout_capture() {
-            Ok(mut cap) => match cap.start(audio_cap_tx.clone()) {
+            Ok(mut cap) => match cap.start(sysout_sink) {
                 Ok(()) => {
                     info!("audio sysout capture started");
                     Some(cap)
@@ -285,7 +701,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
             }
         }
     } else {
-        info!("audio capture disabled via --no-capture");
+        info!("audio sysout capture disabled");
         None
     };
     let _audio_cap_alive = audio_cap_started;
@@ -296,9 +712,13 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // `StreamKind::Mic` tag so the receiver can route them to a
     // virtual mic device (PipeWire null-sink / VB-CABLE) rather than
     // mixing them with sysout into the speakers.
-    let mic_cap_started = if opts.capture {
+    let mic_cap_started = if opts.capture && mic_capture_enabled {
+        let mic_wire = wire_bcast.clone();
+        let mic_sink = mineshare_audio::CaptureSink::new(audio_cap_tx, move || {
+            crate::audio_status::SEND_MIC.load(Ordering::Relaxed) && mic_wire.receiver_count() != 0
+        });
         match mineshare_audio::make_mic_capture() {
-            Ok(mut cap) => match cap.start(audio_cap_tx) {
+            Ok(mut cap) => match cap.start(mic_sink) {
                 Ok(()) => {
                     info!("mic capture started");
                     Some(cap)
@@ -320,22 +740,29 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 
     let bcast_for_audio_drain = wire_bcast.clone();
     tokio::spawn(async move {
-        while let Some(frame) = audio_cap_rx.recv().await {
+        let mut sysout_wire_seq = 0u32;
+        let mut mic_wire_seq = 0u32;
+        while let Some(mut frame) = audio_cap_rx.recv().await {
             // GUI-driven outbound toggle — flipped from the Audio
             // tab. Off → drop the frame before it hits the broadcast
             // (capture pipeline keeps running so re-enable is
             // instant; we just don't forward).
             let pass = match frame.stream {
                 mineshare_audio::StreamKind::SysOut => {
-                    crate::audio_status::SEND_SYSOUT
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                    crate::audio_status::SEND_SYSOUT.load(std::sync::atomic::Ordering::Relaxed)
                 }
                 mineshare_audio::StreamKind::Mic => {
-                    crate::audio_status::SEND_MIC
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                    crate::audio_status::SEND_MIC.load(std::sync::atomic::Ordering::Relaxed)
                 }
             };
             if !pass {
+                continue;
+            }
+
+            // Opus DTX still emits tiny comfort-noise payloads. Silence does
+            // not need transport keepalives (the control channel already has
+            // them), so suppress these packets and avoid ~100 idle UDP pps.
+            if frame.opus.len() <= DTX_COMFORT_NOISE_MAX_BYTES {
                 continue;
             }
 
@@ -351,6 +778,18 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     continue;
                 }
             }
+            frame.seq = match frame.stream {
+                mineshare_audio::StreamKind::SysOut => {
+                    let seq = sysout_wire_seq;
+                    sysout_wire_seq = sysout_wire_seq.wrapping_add(1);
+                    seq
+                }
+                mineshare_audio::StreamKind::Mic => {
+                    let seq = mic_wire_seq;
+                    mic_wire_seq = mic_wire_seq.wrapping_add(1);
+                    seq
+                }
+            };
             let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
         }
         debug!("audio capture pump terminated");
@@ -372,12 +811,26 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         info!("inject disabled via --no-inject");
         Arc::new(NullInject)
     };
+    let mut touchpad_capabilities = mineshare_input::local_touchpad_capabilities();
+    if !opts.capture {
+        touchpad_capabilities &= !(mineshare_input::TOUCHPAD_CAP_FRAME_CAPTURE
+            | mineshare_input::TOUCHPAD_CAP_ACTION_CAPTURE);
+    }
+    if !opts.inject {
+        touchpad_capabilities &= !(mineshare_input::TOUCHPAD_CAP_FRAME_INJECT
+            | mineshare_input::TOUCHPAD_CAP_ACTION_INJECT);
+    }
+    LOCAL_TOUCHPAD_CAPABILITIES.store(touchpad_capabilities, Ordering::Release);
+    info!(
+        capabilities = format_args!("{touchpad_capabilities:#x}"),
+        "local touchpad capability probe complete"
+    );
 
     // --- Audio playback ---------------------------------------------------
     // Playback is built on both sides so either end can render the
     // peer's sysout. Slice 1 only uses it on the Linux side, but
     // running it everywhere is harmless if no audio frames arrive.
-    let playback: Arc<dyn AudioPlayback> = if opts.inject {
+    let playback: Arc<dyn AudioPlayback> = if opts.inject && audio_playback_enabled {
         match mineshare_audio::make_playback() {
             Ok(p) => {
                 info!("audio playback ready");
@@ -389,7 +842,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
             }
         }
     } else {
-        info!("audio playback disabled via --no-inject");
+        info!("audio playback disabled");
         Arc::new(NullPlayback)
     };
 
@@ -400,7 +853,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // user installed it. Either failure is non-fatal — the bridge
     // keeps working, mic frames just become silent on this side until
     // VB-CABLE is installed (or the daemon restarted).
-    let mic_playback: Arc<dyn AudioPlayback> = if opts.inject {
+    let mic_playback: Arc<dyn AudioPlayback> = if opts.inject && mic_playback_enabled {
         match mineshare_audio::make_virtual_mic_playback() {
             Ok(p) => {
                 info!("virtual mic playback ready");
@@ -582,7 +1035,9 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             .await
                             {
                                 Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
-                                Err(e) => warn!(peer = %peer_id, error = %e, "session error — will reconnect"),
+                                Err(e) => {
+                                    warn!(peer = %peer_id, error = %e, "session error — will reconnect")
+                                }
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
@@ -601,6 +1056,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: TcpListener,
     static_priv: Vec<u8>,
@@ -647,6 +1103,7 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound(
     mut stream: TcpStream,
     static_priv: &[u8],
@@ -679,6 +1136,7 @@ async fn handle_inbound(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dial_and_run(
     peer: &PeerAdvert,
     static_priv: &[u8],
@@ -710,11 +1168,19 @@ async fn dial_and_run(
                     break;
                 }
                 Ok(Err(e)) => last_err = Some(format!("{sock}: {e}")),
-                Err(_) => last_err = Some(format!("{sock}: connect timed out after {CONNECT_TIMEOUT:?}")),
+                Err(_) => {
+                    last_err = Some(format!(
+                        "{sock}: connect timed out after {CONNECT_TIMEOUT:?}"
+                    ))
+                }
             }
         }
-        connected
-            .with_context(|| format!("all addresses failed (last: {})", last_err.as_deref().unwrap_or("none")))?
+        connected.with_context(|| {
+            format!(
+                "all addresses failed (last: {})",
+                last_err.as_deref().unwrap_or("none")
+            )
+        })?
     };
     let mut init = Initiator::new(static_priv)?;
     let session = init.handshake(&mut stream).await?;
@@ -743,6 +1209,7 @@ async fn dial_and_run(
 /// 2. Receive the peer's UDP port.
 /// 3. Spawn UDP-recv → decrypt → inject loop.
 /// 4. Spawn capture-bcast-recv → encrypt → UDP-send loop.
+#[allow(clippy::too_many_arguments)]
 async fn run_peer_session(
     mut stream: TcpStream,
     session: NoiseSession,
@@ -754,7 +1221,9 @@ async fn run_peer_session(
     input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
-    let peer_static = session.remote_static.clone();
+    let peer_static = session.remote_static;
+    let local_wins_control_collision =
+        identity.noise_static_pub.as_slice() < peer_static.as_slice();
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
@@ -788,7 +1257,15 @@ async fn run_peer_session(
     // we let them past the handshake.
     if !crate::trust::is_trusted(&peer_static) {
         info!(%peer_addr, "peer not in trust list — running PIN pairing");
-        match pair_peer(&mut stream, &aead, &peer_static, peer_addr, is_initiator, &identity).await
+        match pair_peer(
+            &mut stream,
+            &aead,
+            &peer_static,
+            peer_addr,
+            is_initiator,
+            &identity,
+        )
+        .await
         {
             Ok(peer_id) => {
                 info!(peer_device = %peer_id.0, "pairing succeeded");
@@ -846,12 +1323,23 @@ async fn run_peer_session(
         daemon_version: crate::build_id(),
         screen_w: local_w,
         screen_h: local_h,
+        touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire),
     };
     write_encrypted(&mut stream, &aead, &announce).await?;
     let peer_announce: PortAnnounce = read_encrypted(&mut stream, &aead).await?;
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
     mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
+    mineshare_input::set_peer_touchpad_capabilities(peer_announce.touchpad_capabilities);
     crate::status::set_peer_version(Some(peer_announce.daemon_version.clone()));
+    let local_touchpad_capabilities = announce.touchpad_capabilities;
+    let touchpad_mode = if mineshare_input::native_touchpad_pair_available(
+        local_touchpad_capabilities,
+        peer_announce.touchpad_capabilities,
+    ) {
+        "native"
+    } else {
+        "basic-fallback"
+    };
     info!(
         %peer_addr,
         local_udp = local_udp_port,
@@ -859,8 +1347,17 @@ async fn run_peer_session(
         peer_ver = %peer_announce.daemon_version,
         local_screen = ?(local_w, local_h),
         peer_screen = ?(peer_announce.screen_w, peer_announce.screen_h),
+        local_touchpad_capabilities = format_args!("{local_touchpad_capabilities:#x}"),
+        peer_touchpad_capabilities = format_args!("{:#x}", peer_announce.touchpad_capabilities),
+        touchpad_mode,
         "input UDP channel established"
     );
+
+    // Playback workers outlive individual peer connections. A restarted peer
+    // begins its audio sequence counters at zero, so explicitly establish a
+    // new receive epoch before this session can enqueue its first frame.
+    playback.reset_session();
+    mic_playback.reset_session();
 
     // Split the TCP stream so we can run a writer task (forwarding
     // RemoteEvent → ControlMsg) and a reader task (receiving the peer's
@@ -874,10 +1371,11 @@ async fn run_peer_session(
     let (rev_tx, mut rev_rx) =
         tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
     mineshare_input::set_remote_event_sender(rev_tx);
-    let (clip_tx, mut clip_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<crate::clipboard::ClipboardEvent>(
+        crate::clipboard::queue_capacity(),
+    );
     crate::clipboard::ensure_watcher(clip_tx);
-    let (side_tx, mut side_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
+    let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
     crate::layout::set_propagate_sender(side_tx);
     // Stage 8.5 RTT plumbing: a generic ControlMsg pipe used by
     // both the periodic Ping sender and the reader's Pong echo.
@@ -885,10 +1383,13 @@ async fn run_peer_session(
     // writer is currently selecting on; capacity is unbounded but
     // traffic is at most ~4 msgs/s.
     let (rtt_tx, mut rtt_rx) = tokio::sync::mpsc::unbounded_channel::<ControlMsg>();
+    let (file_tx, mut file_rx) =
+        tokio::sync::mpsc::channel::<ControlMsg>(crate::files::file_queue_capacity());
     let aead_writer = aead.clone_handle();
     let writer_handle = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
+                biased;
                 ev = rev_rx.recv() => match ev {
                     Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
@@ -901,15 +1402,40 @@ async fn run_peer_session(
                     }
                     None => break,
                 },
-                clip = clip_rx.recv() => match clip {
-                    Some(text) => ControlMsg::ClipboardText(text),
+                rtt = rtt_rx.recv() => match rtt {
+                    Some(m) => m,
                     None => break,
                 },
                 side = side_rx.recv() => match side {
                     Some(s) => ControlMsg::SetPeerSide(s),
                     None => break,
                 },
-                rtt = rtt_rx.recv() => match rtt {
+                clip = clip_rx.recv() => match clip {
+                    Some(crate::clipboard::ClipboardEvent::Text(text)) => {
+                        ControlMsg::ClipboardText(text)
+                    }
+                    Some(crate::clipboard::ClipboardEvent::ImageStart {
+                        id,
+                        width,
+                        height,
+                        total_bytes,
+                    }) => ControlMsg::ClipboardImageStart {
+                        id,
+                        width,
+                        height,
+                        total_bytes,
+                    },
+                    Some(crate::clipboard::ClipboardEvent::ImageChunk {
+                        id,
+                        offset,
+                        data,
+                    }) => ControlMsg::ClipboardImageChunk { id, offset, data },
+                    Some(crate::clipboard::ClipboardEvent::ImageEnd { id }) => {
+                        ControlMsg::ClipboardImageEnd { id }
+                    }
+                    None => break,
+                },
+                file = file_rx.recv() => match file {
                     Some(m) => m,
                     None => break,
                 },
@@ -931,7 +1457,7 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
-    crate::files::set_session_tx(rtt_tx.clone());
+    crate::files::set_session_tx(file_tx);
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
     // sender clone so dropping the rtt channel kills the task at
@@ -981,8 +1507,7 @@ async fn run_peer_session(
             };
             let category_changed = last_sent_category != Some(category);
             let refresh = {
-                static COUNTER: std::sync::atomic::AtomicU32 =
-                    std::sync::atomic::AtomicU32::new(0);
+                static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 3
             };
             if actively_engaged || category_changed || refresh {
@@ -1011,21 +1536,49 @@ async fn run_peer_session(
         loop {
             match read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader).await {
                 Ok(ControlMsg::TakeControl) => {
-                    info!("peer took Remote control");
-                    mineshare_input::set_peer_in_remote(true);
-                    // Warp our cursor to the boundary edge so the peer's
-                    // virt_x model lines up with the real cursor position
-                    // — otherwise their exit threshold fires after a tiny
-                    // rightward motion even though the cursor is mid-screen.
-                    mineshare_input::on_peer_take_control(&*inject_for_reader);
+                    let action = control_collision_action(
+                        mineshare_input::local_in_remote(),
+                        local_wins_control_collision,
+                    );
+                    match action {
+                        ControlCollisionAction::AcceptPeer => {
+                            info!("peer took Remote control");
+                            mineshare_input::set_peer_in_remote(true);
+                            // Warp our cursor to the boundary edge so the peer's
+                            // virt_x model lines up with the real cursor position
+                            // — otherwise their exit threshold fires after a tiny
+                            // rightward motion even though the cursor is mid-screen.
+                            mineshare_input::on_peer_take_control(&*inject_for_reader);
+                        }
+                        ControlCollisionAction::KeepLocal => {
+                            warn!("simultaneous cursor handover — keeping local ownership");
+                            mineshare_input::set_peer_in_remote(false);
+                            // The peer deterministically reaches YieldToPeer for
+                            // the same collision. ForceRelease is a safety net
+                            // if its TakeControl raced with other control traffic.
+                            let _ = pong_tx.send(ControlMsg::ForceRelease);
+                        }
+                        ControlCollisionAction::YieldToPeer => {
+                            warn!("simultaneous cursor handover — yielding to peer");
+                            mineshare_input::force_local_exit_remote();
+                            mineshare_input::set_peer_in_remote(true);
+                            mineshare_input::on_peer_take_control(&*inject_for_reader);
+                        }
+                    }
                 }
                 Ok(ControlMsg::ReleaseControl) => {
                     info!("peer released Remote control");
                     mineshare_input::set_peer_in_remote(false);
+                    if let Err(e) = inject_for_reader.release_all_held() {
+                        warn!(error = %e, "failed to release peer input on control handback");
+                    }
                 }
                 Ok(ControlMsg::ForceRelease) => {
                     info!("peer asked us to release Remote");
                     mineshare_input::force_local_exit_remote();
+                    if let Err(e) = inject_for_reader.release_all_held() {
+                        warn!(error = %e, "failed to release peer input on forced handback");
+                    }
                 }
                 Ok(ControlMsg::GameDrive { active }) => {
                     if active {
@@ -1042,15 +1595,55 @@ async fn run_peer_session(
                     }
                 }
                 Ok(ControlMsg::ClipboardText(text)) => {
-                    if let Err(e) = crate::clipboard::apply_from_peer(&text) {
+                    if let Err(e) = crate::clipboard::apply_from_peer(
+                        crate::clipboard::ClipboardEvent::Text(text),
+                    ) {
                         warn!(error = %e, "failed to apply peer clipboard");
+                    }
+                }
+                Ok(ControlMsg::ClipboardImageStart {
+                    id,
+                    width,
+                    height,
+                    total_bytes,
+                }) => {
+                    if let Err(e) = crate::clipboard::apply_from_peer(
+                        crate::clipboard::ClipboardEvent::ImageStart {
+                            id,
+                            width,
+                            height,
+                            total_bytes,
+                        },
+                    ) {
+                        warn!(error = %e, "failed to begin peer clipboard image");
+                    }
+                }
+                Ok(ControlMsg::ClipboardImageChunk { id, offset, data }) => {
+                    if data.len() > crate::clipboard::IMAGE_CHUNK_BYTES {
+                        warn!(
+                            bytes = data.len(),
+                            "rejected oversized clipboard image chunk"
+                        );
+                        continue;
+                    }
+                    if let Err(e) = crate::clipboard::apply_from_peer(
+                        crate::clipboard::ClipboardEvent::ImageChunk { id, offset, data },
+                    ) {
+                        warn!(error = %e, "failed to apply peer clipboard image chunk");
+                    }
+                }
+                Ok(ControlMsg::ClipboardImageEnd { id }) => {
+                    if let Err(e) = crate::clipboard::apply_from_peer(
+                        crate::clipboard::ClipboardEvent::ImageEnd { id },
+                    ) {
+                        warn!(error = %e, "failed to finish peer clipboard image");
                     }
                 }
                 Ok(ControlMsg::SetPeerSide(side)) => {
                     info!(?side, "peer pushed a layout side — applying locally");
-                    if let Err(e) = crate::layout::apply_from_peer(
-                        crate::layout::LayoutConfig { peer_side: side },
-                    ) {
+                    if let Err(e) = crate::layout::apply_from_peer(crate::layout::LayoutConfig {
+                        peer_side: side,
+                    }) {
                         warn!(error = %e, "failed to apply peer layout");
                     }
                 }
@@ -1120,11 +1713,12 @@ async fn run_peer_session(
 
     let udp = Arc::new(udp);
     let stats = Arc::new(SessionStats::default());
+    let inject_dispatcher = InjectDispatcher::start(inject.clone(), stats.clone())?;
 
     // --- recv → inject / playback ---------------------------------------
     let aead_recv = aead.clone_handle();
     let udp_recv = udp.clone();
-    let inject_recv = inject.clone();
+    let inject_tx = inject_dispatcher.sender();
     let playback_recv = playback.clone();
     let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
@@ -1133,27 +1727,97 @@ async fn run_peer_session(
         // tiny but Opus frames + AEAD tag + bincode framing top out
         // around 1.5 KB. 4 KB leaves comfortable headroom.
         let mut buf = vec![0u8; 4096];
+        let mut injected_state = ForwardedInputState::default();
+        let mut input_ordering = InputReceiveOrdering::default();
+        let mut snapshot_press_deduper = SnapshotPressDeduper::default();
         loop {
             match udp_recv.recv_from(&mut buf).await {
                 Ok((n, src)) if src == peer_udp => {
                     stats_recv.recv_pkts.fetch_add(1, Ordering::Relaxed);
                     stats_recv.recv_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                    match aead_recv.open(&buf[..n]) {
+                    match aead_recv.open_for(TransportDomain::Datagram, &buf[..n]) {
                         Ok(pt) => {
-                            match bincode::serde::decode_from_slice::<WireFrame, _>(
-                                &pt,
-                                standard(),
-                            ) {
-                                Ok((WireFrame::Input(ev), _)) => {
+                            match bincode::serde::decode_from_slice::<WireFrame, _>(&pt, standard())
+                            {
+                                Ok((WireFrame::Input { seq, event: ev }, _)) => {
+                                    if let Some(last) = input_ordering.last_event_seq {
+                                        if seq > last.saturating_add(1) {
+                                            debug!(
+                                                missing = seq - last - 1,
+                                                last, seq, "input UDP sequence gap"
+                                            );
+                                        } else if seq <= last {
+                                            debug!(last, seq, "input UDP packet reordered");
+                                        }
+                                    }
+                                    if !input_ordering.accept_event(seq) {
+                                        continue;
+                                    }
+                                    // Genuine local hardware motion revokes
+                                    // peer ownership immediately. Drop stale
+                                    // UDP motion already in flight instead of
+                                    // letting it fight the local touchpad while
+                                    // RequestPeerExit crosses the control link.
+                                    if (matches!(ev, InputEvent::MouseMove { .. })
+                                        || matches!(
+                                            ev,
+                                            InputEvent::Touchpad(event) if !event.is_terminal()
+                                        ))
+                                        && !mineshare_input::peer_in_remote()
+                                        && !mineshare_input::is_game_receiving()
+                                    {
+                                        continue;
+                                    }
+                                    if snapshot_press_deduper.suppress_live_event(ev) {
+                                        // The snapshot already injected this exact press while
+                                        // the sender was between capture and UDP sequencing.
+                                        // Keep our local state current without typing twice.
+                                        debug!(
+                                            ?ev,
+                                            seq,
+                                            "suppressed live input edge already applied by snapshot"
+                                        );
+                                        injected_state.apply_event(ev);
+                                        continue;
+                                    }
                                     let n = stats_recv.injected.load(Ordering::Relaxed);
                                     if n % 200 == 0 {
-                                        tracing::info!(?ev, n, "sample inject event");
+                                        debug!(?ev, n, "sample inject event");
                                     }
-                                    if let Err(e) = inject_recv.dispatch(ev) {
-                                        warn!(error = %e, "inject failed");
+                                    if let Err(e) = inject_tx.send(ev) {
+                                        warn!(error = %e, "inject queue closed");
                                         stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
                                     } else {
-                                        stats_recv.injected.fetch_add(1, Ordering::Relaxed);
+                                        injected_state.apply_event(ev);
+                                    }
+                                }
+                                Ok((
+                                    WireFrame::InputState {
+                                        seq,
+                                        after_input_seq,
+                                        state,
+                                    },
+                                    _,
+                                )) => {
+                                    if !input_ordering.accept_snapshot(seq, after_input_seq) {
+                                        continue;
+                                    }
+                                    let corrections = injected_state.reconciliation_events(&state);
+                                    if !corrections.is_empty() {
+                                        debug!(
+                                            count = corrections.len(),
+                                            seq, "reconciling peer held-input snapshot"
+                                        );
+                                    }
+                                    for correction in corrections {
+                                        if let Err(e) = inject_tx.send(correction) {
+                                            warn!(error = %e, "held-input reconciliation queue closed");
+                                            stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            snapshot_press_deduper
+                                                .observe_snapshot_correction(correction);
+                                            injected_state.apply_event(correction);
+                                        }
                                     }
                                 }
                                 Ok((WireFrame::Audio(frame), _)) => {
@@ -1168,17 +1832,14 @@ async fn run_peer_session(
                                     // Opus DTX comfort noise (≤ 3 bytes) so
                                     // the always-on silence stream doesn't
                                     // permanently suppress us.
-                                    if matches!(
-                                        frame.stream,
-                                        mineshare_audio::StreamKind::SysOut
-                                    ) && frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES
+                                    if matches!(frame.stream, mineshare_audio::StreamKind::SysOut)
+                                        && frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES
                                     {
-                                        LAST_PEER_SYSOUT_AT_MS
-                                            .store(now_ms(), Ordering::Relaxed);
+                                        LAST_PEER_SYSOUT_AT_MS.store(now_ms(), Ordering::Relaxed);
                                     }
                                     let n = stats_recv.audio_recv.load(Ordering::Relaxed);
                                     if n % 250 == 0 {
-                                        tracing::info!(
+                                        debug!(
                                             seq = frame.seq,
                                             stream = ?frame.stream,
                                             opus_bytes = frame.opus.len(),
@@ -1191,12 +1852,10 @@ async fn run_peer_session(
                                     // frame before enqueuing.
                                     let play = match frame.stream {
                                         mineshare_audio::StreamKind::SysOut => {
-                                            crate::audio_status::PLAY_SYSOUT
-                                                .load(Ordering::Relaxed)
+                                            crate::audio_status::PLAY_SYSOUT.load(Ordering::Relaxed)
                                         }
                                         mineshare_audio::StreamKind::Mic => {
-                                            crate::audio_status::PLAY_MIC
-                                                .load(Ordering::Relaxed)
+                                            crate::audio_status::PLAY_MIC.load(Ordering::Relaxed)
                                         }
                                     };
                                     if !play {
@@ -1244,6 +1903,7 @@ async fn run_peer_session(
     let peer_label = peer_addr.to_string();
     let stats_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut prev = StatsSnapshot::default();
         loop {
             interval.tick().await;
@@ -1282,6 +1942,12 @@ async fn run_peer_session(
     // to drag-across motion.
     let mut input_sub = input_bcast.subscribe();
     let mut sub = bcast.subscribe();
+    let mut next_input_seq = 0u64;
+    let mut next_state_seq = 0u64;
+    let mut input_state_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    input_state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_state_sent = ForwardedInputState::default();
+    let mut state_repeats_remaining = 0u8;
     tokio::pin!(reader_handle);
     let exit_reason = loop {
         // Each arm goes through this same encode → encrypt → send →
@@ -1293,7 +1959,7 @@ async fn run_peer_session(
                     Ok(b) => b,
                     Err(e) => { warn!(error = %e, "encode failed"); continue; }
                 };
-                let ct = match aead.seal(&pt) {
+                let ct = match aead.seal_for(TransportDomain::Datagram, &pt) {
                     Ok(b) => b,
                     Err(e) => { warn!(error = %e, "encrypt failed"); continue; }
                 };
@@ -1304,6 +1970,14 @@ async fn run_peer_session(
                 }
                 stats.sent_pkts.fetch_add(1, Ordering::Relaxed);
                 stats.sent_bytes.fetch_add(len as u64, Ordering::Relaxed);
+            }};
+        }
+        macro_rules! send_input {
+            ($event:expr) => {{
+                let event = $event;
+                let seq = next_input_seq;
+                next_input_seq = next_input_seq.wrapping_add(1);
+                send_wire!(WireFrame::Input { seq, event }, "input");
             }};
         }
         tokio::select! {
@@ -1330,11 +2004,13 @@ async fn run_peer_session(
                 // non-move we pull is sent right after the merged move.
                 Ok(InputEvent::MouseMove { mut dx, mut dy }) => {
                     let mut trailer: Option<InputEvent> = None;
-                    loop {
+                    let mut merged_samples = 1usize;
+                    while can_merge_wire_motion(merged_samples) {
                         match input_sub.try_recv() {
                             Ok(InputEvent::MouseMove { dx: ndx, dy: ndy }) => {
                                 dx = dx.saturating_add(ndx);
                                 dy = dy.saturating_add(ndy);
+                                merged_samples += 1;
                             }
                             Ok(other) => { trailer = Some(other); break; }
                             Err(broadcast::error::TryRecvError::Empty) => break,
@@ -1347,17 +2023,79 @@ async fn run_peer_session(
                             }
                         }
                     }
-                    send_wire!(WireFrame::Input(InputEvent::MouseMove { dx, dy }), "input");
+                    send_input!(InputEvent::MouseMove { dx, dy });
                     if let Some(other) = trailer {
-                        send_wire!(WireFrame::Input(other), "input");
+                        send_input!(other);
                     }
                 }
-                Ok(ev) => { send_wire!(WireFrame::Input(ev), "input"); }
+                // Touchpad contact frames are absolute active-contact
+                // snapshots. When UDP backpressure leaves several updates
+                // queued for the same stream, only the newest one is useful:
+                // it contains all current contacts and the receiver derives
+                // any missing DOWN/UPDATE/UP transitions from it. Terminal
+                // frames and direct actions are never coalesced.
+                Ok(InputEvent::Touchpad(mut latest))
+                    if latest.coalescible_stream().is_some() =>
+                {
+                    let stream_id = latest.coalescible_stream().unwrap();
+                    let mut trailer: Option<InputEvent> = None;
+                    loop {
+                        match input_sub.try_recv() {
+                            Ok(InputEvent::Touchpad(next))
+                                if next.coalescible_stream() == Some(stream_id) =>
+                            {
+                                latest = next;
+                            }
+                            Ok(other) => {
+                                trailer = Some(other);
+                                break;
+                            }
+                            Err(broadcast::error::TryRecvError::Empty)
+                            | Err(broadcast::error::TryRecvError::Closed) => break,
+                            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                warn!(
+                                    skipped = n,
+                                    stream_id,
+                                    "input subscriber lagged during touchpad coalesce"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    send_input!(InputEvent::Touchpad(latest));
+                    if let Some(other) = trailer {
+                        send_input!(other);
+                    }
+                }
+                Ok(ev) => { send_input!(ev); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "input subscriber lagged — events dropped");
                 }
                 Err(broadcast::error::RecvError::Closed) => break "input broadcast closed",
             },
+            // State snapshots must yield to already-queued input edges. If a
+            // tick wins while a key-down waits in the input channel, the
+            // snapshot can describe that key before its event has a sequence.
+            _ = input_state_tick.tick() => {
+                let state = mineshare_input::forwarded_input_state();
+                let changed = state != last_state_sent;
+                if changed {
+                    state_repeats_remaining = 4;
+                }
+                if changed || state.any_held() || state_repeats_remaining > 0 {
+                    let seq = next_state_seq;
+                    next_state_seq = next_state_seq.wrapping_add(1);
+                    send_wire!(WireFrame::InputState {
+                        seq,
+                        after_input_seq: next_input_seq,
+                        state,
+                    }, "input-state");
+                    last_state_sent = state;
+                    if !changed && state_repeats_remaining > 0 {
+                        state_repeats_remaining -= 1;
+                    }
+                }
+            }
             // LOWER-PRIORITY: audio + future bulk traffic.
             recv = sub.recv() => match recv {
                 Ok(ev) => { send_wire!(ev, "wire"); }
@@ -1375,6 +2113,7 @@ async fn run_peer_session(
     beacon_handle.abort();
     recv_handle.abort();
     stats_handle.abort();
+    inject_dispatcher.stop();
     // Wipe RTT samples so the next session's stats start clean.
     crate::latency::reset();
     // Drop the file-transfer session sender + fail any in-flight
@@ -1382,7 +2121,9 @@ async fn run_peer_session(
     crate::files::clear_session_tx();
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
+    mineshare_input::force_local_exit_remote();
     mineshare_input::set_peer_in_remote(false);
+    mineshare_input::set_peer_touchpad_capabilities(0);
     mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
     mineshare_input::clear_remote_event_sender();
     crate::layout::clear_propagate_sender();
@@ -1403,7 +2144,7 @@ where
     T: Serialize,
 {
     let pt = bincode::serde::encode_to_vec(msg, standard())?;
-    let ct = aead.seal(&pt)?;
+    let ct = aead.seal_for(TransportDomain::Control, &pt)?;
     let len = u32::try_from(ct.len()).context("frame too large")?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&ct).await?;
@@ -1418,9 +2159,14 @@ where
     let mut hdr = [0u8; 4];
     stream.read_exact(&mut hdr).await?;
     let len = u32::from_be_bytes(hdr) as usize;
+    const MAX_ENCRYPTED_CONTROL_FRAME: usize = 65_543; // Noise max ciphertext + explicit nonce.
+    anyhow::ensure!(
+        len <= MAX_ENCRYPTED_CONTROL_FRAME,
+        "encrypted control frame too large: {len}"
+    );
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    let pt = aead.open(&buf)?;
+    let pt = aead.open_for(TransportDomain::Control, &buf)?;
     let (val, _) = bincode::serde::decode_from_slice::<T, _>(&pt, standard())?;
     Ok(val)
 }
@@ -1662,5 +2408,268 @@ struct NullPlayback;
 impl AudioPlayback for NullPlayback {
     fn enqueue(&self, _frame: AudioFrame) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use mineshare_input::{
+        Button, InputEvent, InputInject, KeyCode, TouchpadAction, TouchpadContact, TouchpadEvent,
+    };
+    use mineshare_net::{
+        EncryptedSession, Initiator, Responder, TransportDomain, pairing::generate_static_key,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::{
+        ControlCollisionAction, InjectDispatcher, InjectQueue, InjectSender, InputReceiveOrdering,
+        MAX_WIRE_MOTION_MERGE, SessionStats, SnapshotPressDeduper, WireFrame,
+        can_merge_wire_motion, control_collision_action, motion_pacing_step,
+    };
+
+    struct SlowMouseInject {
+        mouse_calls: AtomicU64,
+        mouse_distance: AtomicI64,
+        key_seen: std::sync::mpsc::Sender<(u64, i64)>,
+    }
+
+    impl InputInject for SlowMouseInject {
+        fn mouse_move_rel(&self, dx: i32, _dy: i32) -> Result<()> {
+            std::thread::sleep(Duration::from_millis(10));
+            self.mouse_calls.fetch_add(1, Ordering::Relaxed);
+            self.mouse_distance.fetch_add(dx as i64, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn mouse_button(&self, _btn: Button, _down: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn key(&self, _code: KeyCode, _down: bool) -> Result<()> {
+            let _ = self.key_seen.send((
+                self.mouse_calls.load(Ordering::Relaxed),
+                self.mouse_distance.load(Ordering::Relaxed),
+            ));
+            Ok(())
+        }
+
+        fn scroll(&self, _dx: f32, _dy: f32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mouse_burst_does_not_trap_keyboard_input() {
+        let (key_seen_tx, key_seen_rx) = std::sync::mpsc::channel();
+        let inject = Arc::new(SlowMouseInject {
+            mouse_calls: AtomicU64::new(0),
+            mouse_distance: AtomicI64::new(0),
+            key_seen: key_seen_tx,
+        });
+        let dispatcher =
+            InjectDispatcher::start(inject, Arc::new(SessionStats::default())).unwrap();
+        let tx = dispatcher.sender();
+
+        for _ in 0..100 {
+            tx.send(InputEvent::MouseMove { dx: 1, dy: 0 }).unwrap();
+        }
+        tx.send(InputEvent::Key {
+            code: KeyCode(30),
+            down: true,
+        })
+        .unwrap();
+
+        let (mouse_calls_before_key, mouse_distance_before_key) = key_seen_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("keyboard event was trapped behind stale mouse moves");
+        assert!(
+            mouse_calls_before_key <= 2,
+            "keyboard waited behind {mouse_calls_before_key} mouse injections"
+        );
+        assert_eq!(
+            mouse_distance_before_key, 100,
+            "coalescing lost remote cursor distance"
+        );
+        dispatcher.stop();
+    }
+
+    #[test]
+    fn wire_motion_merge_is_bounded_for_smooth_cursor_delivery() {
+        assert!(can_merge_wire_motion(1));
+        assert!(can_merge_wire_motion(MAX_WIRE_MOTION_MERGE - 1));
+        assert!(
+            !can_merge_wire_motion(MAX_WIRE_MOTION_MERGE),
+            "an unlimited backlog becomes a user-visible cursor jump"
+        );
+    }
+
+    fn touchpad_frame(stream_id: u32, x: u16) -> InputEvent {
+        InputEvent::Touchpad(
+            TouchpadEvent::frame(stream_id, &[TouchpadContact { id: 1, x, y: 20 }], false).unwrap(),
+        )
+    }
+
+    #[test]
+    fn inject_queue_keeps_latest_touchpad_update_and_preserves_terminal() {
+        let queue = Arc::new(InjectQueue {
+            pending: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            wake: parking_lot::Condvar::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        sender.send(touchpad_frame(77, 100)).unwrap();
+        sender.send(touchpad_frame(77, 200)).unwrap();
+        sender
+            .send(InputEvent::Touchpad(TouchpadEvent::terminal(77)))
+            .unwrap();
+
+        let pending = queue.pending.lock();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].event, touchpad_frame(77, 200));
+        assert_eq!(
+            pending[1].event,
+            InputEvent::Touchpad(TouchpadEvent::terminal(77))
+        );
+    }
+
+    #[tokio::test]
+    async fn touchpad_event_serializes_encrypts_and_decrypts() {
+        let init_kp = generate_static_key().unwrap();
+        let resp_kp = generate_static_key().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let resp_private = resp_kp.private.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut responder = Responder::new(&resp_private).unwrap();
+            responder.handshake(&mut stream).await.unwrap()
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut initiator = Initiator::new(&init_kp.private).unwrap();
+        let init_session = initiator.handshake(&mut stream).await.unwrap();
+        let resp_session = server.await.unwrap();
+        let sender = EncryptedSession::from(init_session);
+        let receiver = EncryptedSession::from(resp_session);
+
+        let event = InputEvent::Touchpad(TouchpadEvent::Action {
+            fingers: 4,
+            action: TouchpadAction::Press,
+        });
+        let plaintext = bincode::serde::encode_to_vec(
+            &WireFrame::Input { seq: 42, event },
+            bincode::config::standard(),
+        )
+        .unwrap();
+        let encrypted = sender
+            .seal_for(TransportDomain::Datagram, &plaintext)
+            .unwrap();
+        let decrypted = receiver
+            .open_for(TransportDomain::Datagram, &encrypted)
+            .unwrap();
+        let (decoded, _) = bincode::serde::decode_from_slice::<WireFrame, _>(
+            &decrypted,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        match decoded {
+            WireFrame::Input {
+                seq,
+                event: decoded_event,
+            } => {
+                assert_eq!(seq, 42);
+                assert_eq!(decoded_event, event);
+            }
+            other => panic!("unexpected decoded frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn motion_pacing_uses_absolute_deadlines_without_idle_debt() {
+        let start = std::time::Instant::now();
+        let interval = Duration::from_millis(1);
+
+        let (wait0, next0) = motion_pacing_step(start, None, interval);
+        assert_eq!(
+            wait0,
+            Duration::ZERO,
+            "first motion must inject immediately"
+        );
+        assert_eq!(next0, start + interval);
+
+        let half_tick = start + Duration::from_micros(500);
+        let (wait1, next1) = motion_pacing_step(half_tick, Some(next0), interval);
+        assert_eq!(wait1, Duration::from_micros(500));
+        assert_eq!(
+            next1,
+            start + Duration::from_millis(2),
+            "deadline must advance absolutely instead of drifting from wake time"
+        );
+
+        let after_idle = start + Duration::from_millis(20);
+        let (idle_wait, idle_next) = motion_pacing_step(after_idle, Some(next1), interval);
+        assert_eq!(idle_wait, Duration::ZERO);
+        assert_eq!(idle_next, after_idle + interval);
+    }
+
+    #[test]
+    fn simultaneous_take_control_has_exactly_one_deterministic_winner() {
+        assert_eq!(
+            control_collision_action(true, true),
+            ControlCollisionAction::KeepLocal,
+            "the lower stable device key must keep ownership"
+        );
+        assert_eq!(
+            control_collision_action(true, false),
+            ControlCollisionAction::YieldToPeer,
+            "the other endpoint must yield the same collision"
+        );
+        assert_eq!(
+            control_collision_action(false, false),
+            ControlCollisionAction::AcceptPeer,
+            "an uncontested take-control must still be accepted"
+        );
+    }
+
+    #[test]
+    fn authoritative_snapshot_suppresses_a_late_covered_edge() {
+        let mut ordering = InputReceiveOrdering::default();
+        assert!(ordering.accept_snapshot(0, 1));
+        assert!(!ordering.accept_event(0));
+        assert!(ordering.accept_event(1));
+    }
+
+    #[test]
+    fn snapshot_cannot_undo_an_event_newer_than_its_coverage() {
+        let mut ordering = InputReceiveOrdering::default();
+        assert!(ordering.accept_event(1));
+        assert!(!ordering.accept_snapshot(0, 1));
+        assert!(ordering.accept_snapshot(1, 2));
+    }
+
+    #[test]
+    fn snapshot_press_suppresses_only_the_late_original_press() {
+        // The sender can observe a held key in a 50 ms snapshot just before
+        // its queued UDP edge is numbered. The snapshot presses it first;
+        // the one late physical edge must not type a second character.
+        let press = InputEvent::Key {
+            code: KeyCode(28),
+            down: true,
+        };
+        let mut deduper = SnapshotPressDeduper::default();
+        deduper.observe_snapshot_correction(press);
+
+        assert!(deduper.suppress_live_event(press));
+        assert!(
+            !deduper.suppress_live_event(press),
+            "a real typematic repeat after the original edge must still pass"
+        );
     }
 }

@@ -50,6 +50,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 /// throughput (still ~3800 chunks/s at 1 Gbit, plenty for
 /// real-world file transfers, and TCP coalesces them anyway).
 pub const CHUNK_BYTES: usize = 32 * 1024;
+pub const MAX_INCOMING_FILE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+const MAX_FILE_NAME_BYTES: usize = 255;
+const FILE_QUEUE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -316,7 +319,10 @@ pub fn snapshot() -> Vec<TransferSnapshot> {
                 name: t.name.clone(),
                 size_bytes: t.size_bytes,
                 bytes_so_far: t.bytes_so_far,
-                final_path: t.final_path.as_ref().and_then(|p| p.to_str().map(|s| s.to_string())),
+                final_path: t
+                    .final_path
+                    .as_ref()
+                    .and_then(|p| p.to_str().map(|s| s.to_string())),
                 error: t.error.clone(),
                 seconds_elapsed: t.started_at.elapsed().as_secs_f32(),
             })
@@ -335,6 +341,7 @@ pub fn snapshot() -> Vec<TransferSnapshot> {
 /// Allocate the destination path and open the `.partial` file.
 /// Idempotent — re-offering the same id is a no-op.
 pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> {
+    validate_offer(name, size_bytes)?;
     if with_state(|m| m.contains_key(&id)) {
         return Ok(());
     }
@@ -346,7 +353,10 @@ pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> 
     let final_path = resolve_destination(&dir, &safe_name);
     let temp_path = final_path.with_file_name(format!(
         ".{}.partial",
-        final_path.file_name().and_then(|s| s.to_str()).unwrap_or("transfer")
+        final_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("transfer")
     ));
     let file = File::create(&temp_path)
         .await
@@ -379,10 +389,8 @@ pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> 
     Ok(())
 }
 
-/// Append a chunk at `offset`. Out-of-order chunks are tolerated
-/// via seek (file_chunk variant carries explicit offset for
-/// future support, even though current sender streams strictly
-/// sequentially).
+/// Append the next sequential chunk at `offset`. Rejecting gaps, overlaps, and
+/// oversized chunks keeps the declared size and streaming digest trustworthy.
 pub async fn write_chunk(id: u64, offset: u64, data: &[u8]) -> Result<()> {
     // Take ownership of the file handle + sha briefly so we can
     // do async IO without holding the parking_lot mutex across
@@ -394,7 +402,11 @@ pub async fn write_chunk(id: u64, offset: u64, data: &[u8]) -> Result<()> {
         if !matches!(t.status, Status::Active) {
             bail!("transfer {id} not active");
         }
-        let file = t.incoming_file.take().context("transfer file handle gone")?;
+        validate_chunk(t.bytes_so_far, t.size_bytes, offset, data.len())?;
+        let file = t
+            .incoming_file
+            .take()
+            .context("transfer file handle gone")?;
         let sha = t.incoming_sha.take().context("transfer sha gone")?;
         (file, sha)
     };
@@ -407,7 +419,7 @@ pub async fn write_chunk(id: u64, offset: u64, data: &[u8]) -> Result<()> {
         if let Some(t) = m.get_mut(&id) {
             t.incoming_file = Some(file);
             t.incoming_sha = Some(sha);
-            t.bytes_so_far = t.bytes_so_far.saturating_add(len);
+            t.bytes_so_far = offset + len;
         }
     });
     Ok(())
@@ -420,6 +432,12 @@ pub async fn finalize_incoming(id: u64, expected_sha: [u8; 32]) -> Result<()> {
         let mut guard = TRANSFERS.lock();
         let m = guard.get_or_insert_with(HashMap::new);
         let t = m.get_mut(&id).context("unknown transfer id")?;
+        anyhow::ensure!(
+            t.bytes_so_far == t.size_bytes,
+            "transfer {id} incomplete: received {} of {} bytes",
+            t.bytes_so_far,
+            t.size_bytes
+        );
         t.status = Status::Verifying;
         let file = t.incoming_file.take().context("file handle gone")?;
         let sha = t.incoming_sha.take().context("sha gone")?;
@@ -453,8 +471,11 @@ pub async fn finalize_incoming(id: u64, expected_sha: [u8; 32]) -> Result<()> {
 // variants without owning the broadcast handle directly.
 // ----------------------------------------------------------------------------
 
-pub type ControlSender =
-    tokio::sync::mpsc::UnboundedSender<crate::runtime::ControlMsg>;
+pub type ControlSender = tokio::sync::mpsc::Sender<crate::runtime::ControlMsg>;
+
+pub const fn file_queue_capacity() -> usize {
+    FILE_QUEUE_CAPACITY
+}
 
 static SESSION_TX: Mutex<Option<ControlSender>> = Mutex::new(None);
 
@@ -468,7 +489,12 @@ pub fn clear_session_tx() {
     // showing a stuck progress bar after the peer drops.
     let pending: Vec<u64> = with_state(|m| {
         m.values()
-            .filter(|t| matches!(t.status, Status::Pending | Status::Active | Status::Verifying))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    Status::Pending | Status::Active | Status::Verifying
+                )
+            })
             .map(|t| t.id)
             .collect()
     });
@@ -537,12 +563,13 @@ async fn drive_send(
         name: name.clone(),
         size_bytes,
     })
+    .await
     .map_err(|_| anyhow::anyhow!("control channel closed"))?;
     mark_active(id);
 
     loop {
         if is_cancelled(id) {
-            let _ = tx.send(M::FileCancel { id });
+            let _ = tx.send(M::FileCancel { id }).await;
             bail!("cancelled by user");
         }
         let n = file.read(&mut buf).await?;
@@ -556,14 +583,77 @@ async fn drive_send(
             offset,
             data: chunk,
         })
+        .await
         .map_err(|_| anyhow::anyhow!("control channel closed mid-transfer"))?;
         add_progress(id, n as u64);
         offset += n as u64;
     }
     let sha: [u8; 32] = hasher.finalize().into();
     tx.send(M::FileEnd { id, sha256: sha })
+        .await
         .map_err(|_| anyhow::anyhow!("control channel closed at finalize"))?;
     mark_done(id);
     tracing::info!(id, name = %name, "outgoing file complete");
     Ok(())
+}
+
+fn validate_offer(name: &str, size_bytes: u64) -> Result<()> {
+    anyhow::ensure!(!name.is_empty(), "incoming filename is empty");
+    anyhow::ensure!(
+        name.len() <= MAX_FILE_NAME_BYTES,
+        "incoming filename exceeds {MAX_FILE_NAME_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        size_bytes <= MAX_INCOMING_FILE_BYTES,
+        "incoming file exceeds {} byte safety limit",
+        MAX_INCOMING_FILE_BYTES
+    );
+    Ok(())
+}
+
+fn validate_chunk(received: u64, declared: u64, offset: u64, len: usize) -> Result<()> {
+    anyhow::ensure!(
+        len <= CHUNK_BYTES,
+        "incoming file chunk exceeds {CHUNK_BYTES} bytes"
+    );
+    anyhow::ensure!(offset == received, "non-sequential incoming file chunk");
+    let end = offset
+        .checked_add(len as u64)
+        .context("incoming file chunk offset overflow")?;
+    anyhow::ensure!(end <= declared, "incoming file chunk exceeds declared size");
+    Ok(())
+}
+
+#[cfg(test)]
+mod transfer_validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_sequential_chunks_within_declared_size() {
+        assert!(validate_chunk(0, 64 * 1024, 0, CHUNK_BYTES).is_ok());
+        assert!(
+            validate_chunk(
+                CHUNK_BYTES as u64,
+                64 * 1024,
+                CHUNK_BYTES as u64,
+                CHUNK_BYTES
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_sparse_oversized_and_overflowing_chunks() {
+        assert!(validate_chunk(0, 1_000_000, 500_000, 1).is_err());
+        assert!(validate_chunk(0, 1_000_000, 0, CHUNK_BYTES + 1).is_err());
+        assert!(validate_chunk(0, 10, 0, 11).is_err());
+        assert!(validate_chunk(u64::MAX, u64::MAX, u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_unbounded_file_offers() {
+        assert!(validate_offer("", 10).is_err());
+        assert!(validate_offer("a", MAX_INCOMING_FILE_BYTES + 1).is_err());
+        assert!(validate_offer(&"x".repeat(MAX_FILE_NAME_BYTES + 1), 10).is_err());
+    }
 }

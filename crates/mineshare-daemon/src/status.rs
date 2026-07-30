@@ -131,22 +131,3 @@ pub(crate) fn clear_peer_connected() {
 pub(crate) fn set_peer_version(v: Option<String>) {
     *PEER_VERSION.lock() = v;
 }
-
-pub(crate) fn add_sent_pkts(n: u64) {
-    SENT_PKTS.fetch_add(n, Ordering::Relaxed);
-}
-pub(crate) fn add_recv_pkts(n: u64) {
-    RECV_PKTS.fetch_add(n, Ordering::Relaxed);
-}
-pub(crate) fn add_injected(n: u64) {
-    INJECTED.fetch_add(n, Ordering::Relaxed);
-}
-pub(crate) fn add_audio_recv(n: u64) {
-    AUDIO_RECV.fetch_add(n, Ordering::Relaxed);
-}
-pub(crate) fn add_inject_errs(n: u64) {
-    INJECT_ERRS.fetch_add(n, Ordering::Relaxed);
-}
-pub(crate) fn add_decrypt_errs(n: u64) {
-    DECRYPT_ERRS.fetch_add(n, Ordering::Relaxed);
-}

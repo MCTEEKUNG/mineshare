@@ -23,12 +23,12 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 use crate::codec::OpusEncoder;
 use crate::{
-    AudioCapture, AudioFrame, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
+    AudioCapture, AudioFrame, CHANNELS, CaptureSink, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE,
+    StreamKind,
 };
 
 const OPUS_BITRATE_BPS: i32 = 128_000;
@@ -59,7 +59,7 @@ impl Drop for PipewireMonitor {
 }
 
 impl AudioCapture for PipewireMonitor {
-    fn start(&mut self, sink: UnboundedSender<AudioFrame>) -> Result<()> {
+    fn start(&mut self, sink: CaptureSink) -> Result<()> {
         if self.started {
             return Ok(());
         }
@@ -82,14 +82,8 @@ impl AudioCapture for PipewireMonitor {
                  routing follows the user's default sink via @DEFAULT_MONITOR@)",
             )?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .context("parec stdout pipe missing")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("parec stderr pipe missing")?;
+        let stdout = child.stdout.take().context("parec stdout pipe missing")?;
+        let stderr = child.stderr.take().context("parec stderr pipe missing")?;
 
         // Surface parec's own diagnostics if it complains about the
         // monitor source not existing, the user not being in the
@@ -129,10 +123,7 @@ impl AudioCapture for PipewireMonitor {
     }
 }
 
-fn drive_encode_loop<R: Read>(
-    mut reader: R,
-    sink: UnboundedSender<AudioFrame>,
-) -> Result<()> {
+fn drive_encode_loop<R: Read>(mut reader: R, sink: CaptureSink) -> Result<()> {
     let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
     // 20 ms frame = 1920 interleaved f32 samples = 7680 bytes.
     let bytes_per_frame = FRAME_SAMPLES_INTERLEAVED * std::mem::size_of::<f32>();
@@ -146,6 +137,9 @@ fn drive_encode_loop<R: Read>(
             // down or parec died. Either way, terminate cleanly.
             warn!(error = %e, "parec stdout closed — stopping monitor capture");
             return Ok(());
+        }
+        if !sink.is_active() {
+            continue;
         }
         // Reinterpret the byte buffer as f32 little-endian.
         for (i, sample) in pcm.iter_mut().enumerate() {
@@ -168,7 +162,7 @@ fn drive_encode_loop<R: Read>(
         };
         seq = seq.wrapping_add(1);
 
-        if sink.send(frame).is_err() {
+        if !sink.send_lossy(frame) {
             info!("audio sink closed — stopping PipeWire monitor capture");
             return Ok(());
         }

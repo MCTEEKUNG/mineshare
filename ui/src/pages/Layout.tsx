@@ -264,7 +264,7 @@ function Tile({
         (relative ? "relative " : "absolute ") +
         "rounded-lg border-2 flex flex-col items-center justify-center pointer-events-none select-none transition-colors " +
         (accent
-          ? "border-emerald-500/50 bg-emerald-500/10"
+          ? "border-ds-accent-border bg-ds-accent-soft"
           : muted
             ? "border-dashed border-ds-border bg-ds-hover text-ds-text-muted"
             : "border-ds-border bg-ds-elevated")
@@ -273,10 +273,10 @@ function Tile({
         relative ? { width: w, height: h } : { left: x, top: y, width: w, height: h }
       }
     >
-      <p className={"text-sm font-medium " + (accent ? "text-emerald-300" : muted ? "text-ds-text-muted" : "text-ds-text")}>
+      <p className={"text-sm font-medium " + (accent ? "text-ds-accent" : muted ? "text-ds-text-muted" : "text-ds-text")}>
         {label}
       </p>
-      <p className={"text-[11px] " + (accent ? "text-emerald-500" : "text-ds-text-muted")}>
+      <p className={"text-[11px] " + (accent ? "text-ds-accent" : "text-ds-text-muted")}>
         {sub}
       </p>
     </div>
@@ -311,7 +311,7 @@ function EdgeHint({
   }
   return (
     <div
-      className="absolute rounded-full bg-emerald-400/70 pointer-events-none transition-opacity"
+      className="absolute rounded-full bg-ds-accent pointer-events-none transition-opacity"
       style={style}
     />
   );

@@ -135,9 +135,7 @@ impl Drop for PipewireVirtualMic {
             let _ = child.wait();
         }
         if let Some(idx) = self.module_index.take() {
-            let _ = Command::new("pactl")
-                .args(["unload-module", &idx])
-                .status();
+            let _ = Command::new("pactl").args(["unload-module", &idx]).status();
             info!(module = %idx, "unloaded PipeWire null-sink");
         }
     }
@@ -190,14 +188,14 @@ fn cleanup_stale_modules() {
     for line in String::from_utf8_lossy(&listing).lines() {
         // Format: "<idx>\t<module-name>\t<args>"
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3
-            && parts[1] == "module-null-sink"
-            && parts[2].contains(&arg_match)
-        {
+        if parts.len() >= 3 && parts[1] == "module-null-sink" && parts[2].contains(&arg_match) {
             let _ = Command::new("pactl")
                 .args(["unload-module", parts[0]])
                 .output();
-            info!(stale_module = parts[0], "cleaned up leftover mineshare_mic module");
+            info!(
+                stale_module = parts[0],
+                "cleaned up leftover mineshare_mic module"
+            );
         }
     }
 }

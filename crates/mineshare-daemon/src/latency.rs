@@ -70,7 +70,7 @@ pub fn record_rtt_ms(rtt_ms: f32) {
     // 500ms-spaced ping) so users / debuggers can see live values
     // in the daemon log without flooding it. Cheap proxy for "is
     // NODELAY working" — a healthy LAN should be < 5 ms here.
-    if s.len % 20 == 0 {
+    if s.len.is_multiple_of(20) {
         tracing::info!(rtt_ms = %format!("{:.1}", rtt_ms), "RTT sample");
     }
 }

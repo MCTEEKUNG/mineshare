@@ -39,6 +39,9 @@ enum Command {
         /// Don't inject events received from peers (capture-only diagnostic).
         #[arg(long)]
         no_inject: bool,
+        /// Disable every audio capture/playback pipeline (input-only diagnostic).
+        #[arg(long)]
+        no_audio: bool,
     },
     /// Bundle recent log files + system info for sharing.
     Collect {
@@ -54,14 +57,17 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run {
         no_capture: false,
         no_inject: false,
+        no_audio: false,
     }) {
         Command::Run {
             no_capture,
             no_inject,
+            no_audio,
         } => {
             runtime::run(runtime::RunOpts {
                 capture: !no_capture,
                 inject: !no_inject,
+                audio: !no_audio,
             })
             .await
         }

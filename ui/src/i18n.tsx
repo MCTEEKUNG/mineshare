@@ -38,6 +38,7 @@ const en: Strings = {
   nav_settings: "Settings",
 
   // Section headers (composed pages)
+  home_status_section: "Status & Features",
   section_appearance: "Appearance",
   section_audio: "Audio",
   section_devices: "Devices",
@@ -145,6 +146,7 @@ const th: Strings = {
   nav_audio_devices: "เสียงและอุปกรณ์",
   nav_settings: "ตั้งค่า",
 
+  home_status_section: "สถานะและฟีเจอร์",
   section_appearance: "ลักษณะ",
   section_audio: "เสียง",
   section_devices: "อุปกรณ์",

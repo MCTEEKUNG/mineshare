@@ -110,7 +110,7 @@ function PerformanceSection() {
         value={settings.mouse_rate_hz}
         onChange={(e) => update({ ...settings, mouse_rate_hz: parseInt(e.target.value, 10) })}
         list="mouse-rate-ticks"
-        className="w-full accent-emerald-500"
+        className="w-full [accent-color:var(--ds-accent)]"
       />
       <datalist id="mouse-rate-ticks">
         <option value="125" /><option value="250" /><option value="500" /><option value="1000" />

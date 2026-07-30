@@ -19,6 +19,7 @@
 //! Windows) instead of mixing them into the sysout speaker path.
 
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver as WakeReceiver, SyncSender as WakeSender};
 use std::thread;
 use std::time::Duration;
 
@@ -28,13 +29,12 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::codec::OpusEncoder;
 use crate::{
-    AudioCapture, AudioFrame, CHANNELS, FRAME_SAMPLES_INTERLEAVED, FRAME_SAMPLES_PER_CHANNEL,
-    SAMPLE_RATE, StreamKind,
+    AudioCapture, AudioFrame, CHANNELS, CaptureSink, FRAME_SAMPLES_INTERLEAVED,
+    FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE, StreamKind,
 };
 
 /// Capture-side ring sized for 96 kHz stereo × 5 frames = covers any
@@ -56,7 +56,7 @@ impl CpalMic {
 }
 
 impl AudioCapture for CpalMic {
-    fn start(&mut self, sink: UnboundedSender<AudioFrame>) -> Result<()> {
+    fn start(&mut self, sink: CaptureSink) -> Result<()> {
         if self.started {
             return Ok(());
         }
@@ -74,7 +74,7 @@ impl AudioCapture for CpalMic {
     }
 }
 
-fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
+fn run_capture_thread(sink: CaptureSink) -> Result<()> {
     // Stage 8.4: outer loop rebuilds the cpal stream when the user
     // picks a different mic on the Devices tab. The encode-loop
     // exits cleanly when the version bumps, then we re-enter and
@@ -109,6 +109,8 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
         let (producer, consumer) = rb.split();
         let producer = Arc::new(Mutex::new(producer));
         let producer_cb = producer.clone();
+        let (samples_ready_tx, samples_ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let samples_ready_cb = samples_ready_tx.clone();
         let err_fn = |e| warn!(error = %e, "mic stream error");
 
         let stream = match cfg.sample_format() {
@@ -123,6 +125,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
                             "mic ring full — dropping samples"
                         );
                     }
+                    notify_samples_ready(&samples_ready_cb);
                 },
                 err_fn,
                 None,
@@ -137,6 +140,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
                             break;
                         }
                     }
+                    notify_samples_ready(&samples_ready_cb);
                 },
                 err_fn,
                 None,
@@ -151,6 +155,7 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
                             break;
                         }
                     }
+                    notify_samples_ready(&samples_ready_cb);
                 },
                 err_fn,
                 None,
@@ -158,17 +163,19 @@ fn run_capture_thread(sink: UnboundedSender<AudioFrame>) -> Result<()> {
             other => anyhow::bail!("unsupported mic sample format: {other:?}"),
         }
         .context("build mic input stream")?;
+        // Only the live cpal callback should keep the notifier connected.
+        drop(samples_ready_tx);
         stream.play().context("cpal play (mic)")?;
         info!("mic stream started");
 
         let outcome = drive_encode_loop(
             consumer,
             sink.clone(),
-            in_rate,
-            in_channels,
+            (in_rate, in_channels),
             &mut encoder,
             &mut seq,
             last_version,
+            samples_ready_rx,
         );
         drop(stream);
         match outcome {
@@ -197,13 +204,14 @@ enum EncodeLoopExit {
 
 fn drive_encode_loop(
     mut consumer: ringbuf::HeapCons<f32>,
-    sink: UnboundedSender<AudioFrame>,
-    in_rate: u32,
-    in_channels: u16,
+    sink: CaptureSink,
+    input_format: (u32, u16),
     encoder: &mut OpusEncoder,
     seq: &mut u32,
     last_version: u64,
+    samples_ready: WakeReceiver<()>,
 ) -> EncodeLoopExit {
+    let (in_rate, in_channels) = input_format;
     let in_frames_per_out = ((in_rate as u64 * FRAME_SAMPLES_PER_CHANNEL as u64
         + SAMPLE_RATE as u64 / 2)
         / SAMPLE_RATE as u64) as usize
@@ -232,10 +240,20 @@ fn drive_encode_loop(
             if crate::input_device_version() != last_version {
                 return EncodeLoopExit::DeviceChanged;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            // A bounded timeout preserves prompt device-switch handling
+            // without the previous 2 ms busy poll.
+            match samples_ready.recv_timeout(Duration::from_millis(250)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return EncodeLoopExit::SinkClosed;
+                }
+            }
         }
         let n = consumer.pop_slice(&mut in_buf);
         if n < in_samples_per_out {
+            continue;
+        }
+        if !sink.is_active() {
             continue;
         }
 
@@ -262,9 +280,15 @@ fn drive_encode_loop(
         };
         *seq = seq.wrapping_add(1);
 
-        if sink.send(frame).is_err() {
+        if !sink.send_lossy(frame) {
             info!("mic sink closed — stopping mic capture");
             return EncodeLoopExit::SinkClosed;
         }
     }
+}
+
+fn notify_samples_ready(tx: &WakeSender<()>) {
+    // Full means a wake token is already pending; disconnected means the
+    // encode thread has exited.
+    let _ = tx.try_send(());
 }

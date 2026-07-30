@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.9"
+version = "0.0.12"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -72,6 +72,11 @@ ringbuf = "0.4"
 # real GNOME/KDE Wayland session, including over SSH where DISPLAY
 # / xauth aren't inherited from the active login.
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+[patch.crates-io]
+# wayland-scanner 0.31.10 pins vulnerable quick-xml 0.39. Upstream's
+# advisory fix is not released yet, so pin the exact compatibility commit.
+wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "d07c4f91f28b42e5a485823ffd9d8d5a210b1053" }
 
 [profile.release]
 lto = "thin"

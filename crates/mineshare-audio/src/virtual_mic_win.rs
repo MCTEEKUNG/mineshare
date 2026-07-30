@@ -216,14 +216,14 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
             && target_rate <= c.max_sample_rate()
             && c.sample_format() == SampleFormat::F32
     }) {
-        return Ok(matched.clone().with_sample_rate(target_rate));
+        return Ok((*matched).with_sample_rate(target_rate));
     }
     if let Some(matched) = supported.iter().find(|c| {
         c.channels() == CHANNELS
             && c.min_sample_rate() <= target_rate
             && target_rate <= c.max_sample_rate()
     }) {
-        return Ok(matched.clone().with_sample_rate(target_rate));
+        return Ok((*matched).with_sample_rate(target_rate));
     }
     let default = device
         .default_output_config()
