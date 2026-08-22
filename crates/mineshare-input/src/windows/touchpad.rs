@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::c_void;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -30,7 +31,8 @@ use windows::Win32::UI::Controls::{
     POINTER_TYPE_INFO_0,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SetActiveWindow, SetFocus, VK_MENU, VK_TAB,
+    GetAsyncKeyState, GetKeyboardState, SetActiveWindow, SetFocus, SetKeyboardState, VK_LSHIFT,
+    VK_MENU, VK_RSHIFT, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::Input::Pointer::{
     GetPointerDeviceRects, GetPointerInfo, InjectSyntheticPointerInput, POINTER_FLAG_CONFIDENCE,
@@ -42,10 +44,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetWindowThreadProcessId, KillTimer, LWA_ALPHA, MSG, PT_TOUCHPAD, PostMessageW,
     RegisterClassExW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, SwitchToThisWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_POINTERDOWN,
-    WM_POINTERUP, WM_POINTERUPDATE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
+    SetWindowPos, ShowWindow, SwitchToThisWindow, TranslateMessage, WM_APP, WM_KEYDOWN, WM_KEYUP,
+    WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, PCSTR, PCWSTR, w};
 
@@ -59,6 +60,8 @@ const DEVICE_WIDTH: u32 = 10_000;
 const DEVICE_HEIGHT: u32 = 6_000;
 const TERMINAL_REPEAT_COUNT: usize = 3;
 const WM_TOUCHPAD_CAPTURE_ROUTE: u32 = WM_APP + 0x341;
+const WM_TOUCHPAD_KEYBOARD_SUSPEND: u32 = WM_APP + 0x342;
+const WM_TOUCHPAD_KEYBOARD_RESUME: u32 = WM_APP + 0x343;
 const CAPTURE_FOCUS_TIMER_ID: usize = 0x4d53_5450;
 // SetTimer clamps intervals below USER_TIMER_MINIMUM to 10 ms. Polling at
 // that documented floor keeps shell-reserved shortcuts inside one display
@@ -69,13 +72,19 @@ const CAPTURE_WINDOW_SIZE: i32 = 5;
 static CAPABILITIES: AtomicU32 = AtomicU32::new(0);
 static CAPTURE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_CAPTURE_SUSPENDED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_FOCUS_PENDING_LOGGED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_SETUP_COMPLETE: AtomicBool = AtomicBool::new(false);
 static LEGACY_ALT_HELD: AtomicBool = AtomicBool::new(false);
 static ASYNC_TAB_FORWARDED: AtomicBool = AtomicBool::new(false);
 static RAW_ALT_HELD: AtomicBool = AtomicBool::new(false);
+static LEGACY_SHIFT_HELD: AtomicU8 = AtomicU8::new(0);
+static LEGACY_META_HELD: AtomicU8 = AtomicU8::new(0);
+static ASYNC_META_FORWARDED: AtomicU8 = AtomicU8::new(0);
+static ASYNC_S_FORWARDED: AtomicBool = AtomicBool::new(false);
 static RAW_KEYBOARD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static CAPTURE_HWND: AtomicIsize = AtomicIsize::new(0);
+static LEGACY_PASSTHROUGH_KEYS: OnceLock<Mutex<LegacyPassthroughTracker>> = OnceLock::new();
 static CAPTURE_ANCHOR_X: AtomicI32 = AtomicI32::new(0);
 static CAPTURE_ANCHOR_Y: AtomicI32 = AtomicI32::new(0);
 static PREVIOUS_FOREGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -94,6 +103,69 @@ struct CaptureApi {
 }
 
 static CAPTURE_API: OnceLock<std::result::Result<CaptureApi, String>> = OnceLock::new();
+
+#[derive(Default)]
+struct LegacyPassthroughTracker {
+    held: HashSet<(u32, bool)>,
+}
+
+impl LegacyPassthroughTracker {
+    fn identity(scan: u32, extended: bool) -> (u32, bool) {
+        // The scan code already distinguishes L/R Shift. On the affected
+        // Windows hardware WM_KEYDOWN reports Right Shift as non-extended,
+        // while WH_KEYBOARD_LL reports the matching up as extended.
+        (
+            scan,
+            if matches!(scan, 0x2a | 0x36) {
+                false
+            } else {
+                extended
+            },
+        )
+    }
+
+    fn note_legacy_edge(&mut self, scan: u32, extended: bool, down: bool) {
+        let identity = Self::identity(scan, extended);
+        if down {
+            self.held.insert(identity);
+        } else {
+            self.held.remove(&identity);
+        }
+    }
+
+    fn take_hook_release(&mut self, scan: u32, extended: bool) -> bool {
+        self.held.remove(&Self::identity(scan, extended))
+    }
+}
+
+fn legacy_passthrough_keys() -> &'static Mutex<LegacyPassthroughTracker> {
+    LEGACY_PASSTHROUGH_KEYS.get_or_init(|| Mutex::new(LegacyPassthroughTracker::default()))
+}
+
+fn note_legacy_passthrough_edge(scan: u32, extended: bool, down: bool) {
+    legacy_passthrough_keys()
+        .lock()
+        .note_legacy_edge(scan, extended, down);
+}
+
+fn should_neutralize_routed_legacy_shift(scan: u32, down: bool, routed: bool) -> bool {
+    routed && down && matches!(scan, 0x2a | 0x36)
+}
+
+fn neutralize_capture_thread_shift_state() -> Result<()> {
+    let mut state = [0u8; 256];
+    unsafe { GetKeyboardState(&mut state) }.context("GetKeyboardState capture thread")?;
+    for key in [VK_SHIFT, VK_LSHIFT, VK_RSHIFT] {
+        state[key.0 as usize] = 0;
+    }
+    unsafe { SetKeyboardState(&state) }.context("SetKeyboardState capture thread")
+}
+
+pub(super) fn take_legacy_passthrough_release(scan: u32, extended: bool) -> bool {
+    legacy_passthrough_keys()
+        .lock()
+        .take_hook_release(scan, extended)
+}
 
 #[repr(C)]
 struct SyntheticDeviceCreationParams {
@@ -232,26 +304,6 @@ pub(super) fn run_capture_loop() -> Result<()> {
     let _ = unsafe { RoInitialize(RO_INIT_SINGLETHREADED) };
     setup_capture()?;
 
-    // Windows Shell intercepts Alt+Tab before posting Tab's key-down to the
-    // foreground window. Give the foreground capture thread its own hook so
-    // system shortcuts take the same routing path as ordinary keys. This hook
-    // is newer than the isolated hook and consumes a remotely routed key
-    // before the older hook sees it, so the peer receives exactly one event.
-    let shortcut_hook =
-        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(super::low_kb_hook), None, 0) } {
-            Ok(handle) if !handle.0.is_null() => {
-                info!("foreground touchpad system-shortcut hook installed");
-                Some(handle)
-            }
-            result => {
-                warn!(
-                    ?result,
-                    "foreground touchpad system-shortcut hook unavailable; legacy recovery active"
-                );
-                None
-            }
-        };
-
     let mut msg = MSG::default();
     loop {
         let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -263,9 +315,6 @@ pub(super) fn run_capture_loop() -> Result<()> {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-    }
-    if let Some(shortcut_hook) = shortcut_hook {
-        let _ = unsafe { UnhookWindowsHookEx(shortcut_hook) };
     }
     Ok(())
 }
@@ -284,6 +333,9 @@ pub(super) fn set_capture_anchor(x: i32, y: i32) {
 
 pub(super) fn set_capture_active(requested: bool) {
     CAPTURE_REQUESTED.store(requested, Ordering::Release);
+    if !requested {
+        KEYBOARD_CAPTURE_SUSPENDED.store(false, Ordering::Release);
+    }
     let raw = CAPTURE_HWND.load(Ordering::Acquire);
     if raw == 0 {
         // The frame-capture window is also our cross-thread control window.
@@ -326,6 +378,23 @@ pub(super) fn set_capture_active(requested: bool) {
         } {
             warn!(error = %e, requested, "failed to queue touchpad capture route change");
         }
+    }
+}
+
+pub(super) fn reset_forwarded_keyboard_latches() {
+    LEGACY_ALT_HELD.store(false, Ordering::Release);
+    RAW_ALT_HELD.store(false, Ordering::Release);
+    ASYNC_TAB_FORWARDED.store(false, Ordering::Release);
+    LEGACY_SHIFT_HELD.store(0, Ordering::Release);
+    LEGACY_META_HELD.store(0, Ordering::Release);
+    ASYNC_META_FORWARDED.store(0, Ordering::Release);
+    ASYNC_S_FORWARDED.store(false, Ordering::Release);
+    if let Some(keys) = LEGACY_PASSTHROUGH_KEYS.get() {
+        keys.lock().held.clear();
+    }
+    let was_suspended = KEYBOARD_CAPTURE_SUSPENDED.swap(false, Ordering::AcqRel);
+    if was_suspended && CAPTURE_REQUESTED.load(Ordering::Acquire) {
+        post_capture_control(WM_TOUCHPAD_KEYBOARD_RESUME);
     }
 }
 
@@ -428,6 +497,35 @@ fn apply_capture_active(requested: bool) {
     }
 }
 
+fn post_capture_control(message: u32) {
+    let raw = CAPTURE_HWND.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    if let Err(error) = unsafe {
+        PostMessageW(
+            Some(HWND(raw as *mut c_void)),
+            message,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    } {
+        warn!(%error, message, "failed to queue touchpad keyboard capture control");
+    }
+}
+
+fn suspend_capture_for_keyboard() {
+    if !KEYBOARD_CAPTURE_SUSPENDED.swap(true, Ordering::AcqRel) {
+        post_capture_control(WM_TOUCHPAD_KEYBOARD_SUSPEND);
+    }
+}
+
+fn resume_capture_after_keyboard() {
+    if KEYBOARD_CAPTURE_SUSPENDED.swap(false, Ordering::AcqRel) {
+        post_capture_control(WM_TOUCHPAD_KEYBOARD_RESUME);
+    }
+}
+
 fn should_enable_native_capture(
     requested: bool,
     frames: bool,
@@ -446,6 +544,7 @@ fn should_enable_native_capture(
 /// hit target under the anchored source cursor, so Windows routes two-finger
 /// WM_POINTER frames to it without flashing MineShare UI.
 fn claim_foreground(capture: HWND) -> bool {
+    let started = Instant::now();
     position_capture_window(capture);
     if unsafe { GetForegroundWindow() } == capture {
         return true;
@@ -482,6 +581,11 @@ fn claim_foreground(capture: HWND) -> bool {
     if attached {
         let _ = unsafe { AttachThreadInput(current_thread, foreground_thread, false) };
     }
+    info!(
+        owned,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "touchpad capture foreground claim"
+    );
     owned
 }
 
@@ -522,6 +626,7 @@ fn position_capture_window(capture: HWND) {
 }
 
 fn restore_foreground() {
+    let started = Instant::now();
     let previous_raw = PREVIOUS_FOREGROUND_HWND.swap(0, Ordering::AcqRel);
     if previous_raw == 0 {
         return;
@@ -537,8 +642,9 @@ fn restore_foreground() {
     if attached {
         let _ = unsafe { AttachThreadInput(current_thread, target_thread, false) };
     }
-    debug!(
+    info!(
         restored,
+        elapsed_us = started.elapsed().as_micros() as u64,
         "restored local foreground after peer touchpad focus"
     );
 }
@@ -590,12 +696,24 @@ unsafe extern "system" fn touchpad_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TOUCHPAD_CAPTURE_ROUTE {
-        let requested = wparam.0 != 0 && CAPTURE_REQUESTED.load(Ordering::Acquire);
+        let requested = wparam.0 != 0
+            && CAPTURE_REQUESTED.load(Ordering::Acquire)
+            && !KEYBOARD_CAPTURE_SUSPENDED.load(Ordering::Acquire);
         apply_capture_active(requested);
         return LRESULT(1);
     }
+    if msg == WM_TOUCHPAD_KEYBOARD_SUSPEND {
+        apply_capture_active(false);
+        return LRESULT(1);
+    }
+    if msg == WM_TOUCHPAD_KEYBOARD_RESUME {
+        apply_capture_active(CAPTURE_REQUESTED.load(Ordering::Acquire));
+        return LRESULT(1);
+    }
     if msg == WM_TIMER && wparam.0 == CAPTURE_FOCUS_TIMER_ID {
-        if CAPTURE_REQUESTED.load(Ordering::Acquire) {
+        if CAPTURE_REQUESTED.load(Ordering::Acquire)
+            && !KEYBOARD_CAPTURE_SUSPENDED.load(Ordering::Acquire)
+        {
             if unsafe { GetForegroundWindow() } != hwnd || !CAPTURE_ENABLED.load(Ordering::Acquire)
             {
                 apply_capture_active(true);
@@ -618,7 +736,41 @@ unsafe extern "system" fn touchpad_wnd_proc(
             // app switcher twice.
             return LRESULT(0);
         }
+        if !legacy_capture_may_forward(scan) {
+            // The Shell sees Win/Meta before this foreground fallback window.
+            // Forwarding it here would open Start locally and remotely. The
+            // consumable low-level hook owns standalone Win; Raw Input only
+            // tracks it for reserved-chord recovery.
+            return LRESULT(0);
+        }
         let mut routed = super::route_touchpad_capture_key(scan, vk, extended, down);
+        if should_neutralize_routed_legacy_shift(scan, down, routed)
+            && let Err(error) = neutralize_capture_thread_shift_state()
+        {
+            warn!(
+                ?error,
+                scan, "failed to neutralize routed fallback Shift-down"
+            );
+        }
+        if matches!(scan, 0x2a | 0x36) {
+            info!(
+                scan,
+                extended, down, routed, "source Shift foreground fallback edge"
+            );
+        }
+        if matches!(scan, 0x0f | 0x38) {
+            info!(
+                scan,
+                extended, down, routed, "source Alt+Tab foreground fallback edge"
+            );
+        }
+        if routed {
+            // This edge already entered Windows' local key-state machine
+            // before reaching the foreground fallback window. Remember its
+            // down edge so a matching up that is later recovered by the
+            // low-level hook is forwarded to both the peer and local Windows.
+            note_legacy_passthrough_edge(scan, extended, down);
+        }
         if should_recover_reserved_alt_tab(
             scan,
             down,
@@ -662,11 +814,77 @@ fn should_recover_reserved_alt_tab(scan: u32, down: bool, routed: bool, alt_held
     scan == 0x0f && !down && !routed && alt_held
 }
 
+fn legacy_capture_may_forward(scan: u32) -> bool {
+    !matches!(scan, 0x5b | 0x5c)
+}
+
 pub(super) fn note_forwarded_key(code: u16, down: bool) {
     match code {
         15 => ASYNC_TAB_FORWARDED.store(down, Ordering::Release),
+        31 => ASYNC_S_FORWARDED.store(down, Ordering::Release),
+        42 => set_modifier_bit(&LEGACY_SHIFT_HELD, 0x01, down),
+        54 => set_modifier_bit(&LEGACY_SHIFT_HELD, 0x02, down),
         56 | 100 => LEGACY_ALT_HELD.store(down, Ordering::Release),
+        125 => {
+            set_modifier_bit(&LEGACY_META_HELD, 0x01, down);
+            set_modifier_bit(&ASYNC_META_FORWARDED, 0x01, down);
+        }
+        126 => {
+            set_modifier_bit(&LEGACY_META_HELD, 0x02, down);
+            set_modifier_bit(&ASYNC_META_FORWARDED, 0x02, down);
+        }
         _ => {}
+    }
+
+    match keyboard_capture_action(code, down, no_keyboard_capture_modifiers_held()) {
+        KeyboardCaptureAction::Suspend => {
+            // A foreground Precision Touchpad window changes how Windows
+            // dispatches Shell shortcuts. Temporarily restore the user's real
+            // foreground as soon as the first modifier arrives; this makes the
+            // cursor-crossing path identical to Smart routing, where
+            // Win+Shift+S already works reliably.
+            suspend_capture_for_keyboard();
+        }
+        KeyboardCaptureAction::Resume => resume_capture_after_keyboard(),
+        KeyboardCaptureAction::None => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardCaptureAction {
+    None,
+    Suspend,
+    Resume,
+}
+
+fn keyboard_capture_action(
+    code: u16,
+    down: bool,
+    no_modifiers_held: bool,
+) -> KeyboardCaptureAction {
+    if !matches!(code, 42 | 54 | 56 | 100 | 125 | 126) {
+        return KeyboardCaptureAction::None;
+    }
+    if down {
+        KeyboardCaptureAction::Suspend
+    } else if no_modifiers_held {
+        KeyboardCaptureAction::Resume
+    } else {
+        KeyboardCaptureAction::None
+    }
+}
+
+fn no_keyboard_capture_modifiers_held() -> bool {
+    LEGACY_SHIFT_HELD.load(Ordering::Acquire) == 0
+        && LEGACY_META_HELD.load(Ordering::Acquire) == 0
+        && !LEGACY_ALT_HELD.load(Ordering::Acquire)
+}
+
+fn set_modifier_bit(state: &AtomicU8, bit: u8, down: bool) {
+    if down {
+        state.fetch_or(bit, Ordering::AcqRel);
+    } else {
+        state.fetch_and(!bit, Ordering::AcqRel);
     }
 }
 
@@ -687,9 +905,85 @@ fn raw_alt_tab_edge(
     (down != tab_forwarded).then_some(down)
 }
 
+fn raw_snipping_edge(
+    capture_requested: bool,
+    shift_down: bool,
+    meta_down: bool,
+    scan: u32,
+    down: bool,
+    s_forwarded: bool,
+) -> Option<bool> {
+    let _ = (capture_requested, shift_down, meta_down);
+    if scan != 0x1f || down {
+        return None;
+    }
+    s_forwarded.then_some(false)
+}
+
+fn raw_meta_edge(_capture_requested: bool, down: bool, forwarded: bool) -> Option<bool> {
+    (!down && forwarded).then_some(false)
+}
+
 pub(super) fn handle_raw_keyboard(scan: u32, vk: u32, extended: bool, down: bool) -> bool {
+    match scan {
+        0x2a => {
+            let forwarded = LEGACY_SHIFT_HELD.load(Ordering::Acquire) & 0x01 != 0;
+            if !down && forwarded {
+                return super::route_touchpad_capture_key(scan, VK_LSHIFT.0 as u32, false, false);
+            }
+            return false;
+        }
+        0x36 => {
+            let forwarded = LEGACY_SHIFT_HELD.load(Ordering::Acquire) & 0x02 != 0;
+            if !down && forwarded {
+                return super::route_touchpad_capture_key(scan, VK_RSHIFT.0 as u32, false, false);
+            }
+            return false;
+        }
+        0x5b | 0x5c => {
+            let bit = if scan == 0x5b { 0x01 } else { 0x02 };
+            let forwarded = ASYNC_META_FORWARDED.load(Ordering::Acquire) & bit != 0;
+            let Some(edge) =
+                raw_meta_edge(CAPTURE_REQUESTED.load(Ordering::Acquire), down, forwarded)
+            else {
+                return false;
+            };
+            let routed = super::route_touchpad_capture_key(scan, vk, extended, edge);
+            if routed || !edge {
+                set_modifier_bit(&ASYNC_META_FORWARDED, bit, edge && routed);
+            }
+            return routed;
+        }
+        _ => {}
+    }
+
+    if scan == 0x1f {
+        let shift_down = LEGACY_SHIFT_HELD.load(Ordering::Acquire) != 0;
+        let meta_down = LEGACY_META_HELD.load(Ordering::Acquire) != 0;
+        let s_forwarded = ASYNC_S_FORWARDED.load(Ordering::Acquire);
+        let Some(edge) = raw_snipping_edge(
+            CAPTURE_REQUESTED.load(Ordering::Acquire),
+            shift_down,
+            meta_down,
+            scan,
+            down,
+            s_forwarded,
+        ) else {
+            return false;
+        };
+        let routed = super::route_touchpad_capture_key(scan, vk, extended, edge);
+        if routed || !edge {
+            ASYNC_S_FORWARDED.store(edge && routed, Ordering::Release);
+        }
+        if routed && !edge {
+            info!("recovered shell-reserved S release for peer");
+        }
+        return routed;
+    }
+
     if scan == 0x38 {
         RAW_ALT_HELD.store(down, Ordering::Release);
+        info!(down, "source Alt raw-input edge");
         return false;
     }
     if scan != 0x0f {
@@ -700,16 +994,25 @@ pub(super) fn handle_raw_keyboard(scan: u32, vk: u32, extended: bool, down: bool
     let alt_down = RAW_ALT_HELD.load(Ordering::Acquire)
         || LEGACY_ALT_HELD.load(Ordering::Acquire)
         || unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
-    let Some(edge) = raw_alt_tab_edge(
+    let edge = raw_alt_tab_edge(
         CAPTURE_REQUESTED.load(Ordering::Acquire),
         alt_down,
         scan,
         down,
         tab_forwarded,
-    ) else {
+    );
+    let Some(edge) = edge else {
+        info!(
+            down,
+            alt_down, tab_forwarded, "source Tab raw-input edge ignored"
+        );
         return false;
     };
     let routed = super::route_touchpad_capture_key(scan, vk, extended, edge);
+    info!(
+        down,
+        edge, routed, alt_down, tab_forwarded, "source Alt+Tab raw-input edge"
+    );
     if routed || !edge {
         ASYNC_TAB_FORWARDED.store(edge && routed, Ordering::Release);
     }
@@ -748,6 +1051,7 @@ fn poll_reserved_alt_tab() {
     };
 
     let routed = super::route_touchpad_capture_key(0x0f, VK_TAB.0 as u32, false, down);
+    info!(down, routed, "source Alt+Tab polling fallback edge");
     if routed || !down {
         // `route_touchpad_capture_key` synchronises successful edges through
         // `note_forwarded_key`. A failed release means another capture path
@@ -1159,6 +1463,17 @@ impl CaptureState {
             .collect();
         if contacts.is_empty() {
             return self.cancel();
+        }
+        // One-finger pointer, tap, physical click and drag deliberately stay
+        // on the low-latency mouse hook path. Starting a synthetic touchpad
+        // stream for that same contact makes Windows emit a second click on
+        // the peer when the source driver also produces WM_LBUTTON*. Once a
+        // real multi-contact stream has started, however, a trailing single
+        // contact must still be published so the peer can release the other
+        // finger without leaving the gesture stuck.
+        if self.stream_id.is_none() && contacts.len() < 2 {
+            self.scroll_transform.reset();
+            return Vec::new();
         }
         let stream_id = *self.stream_id.get_or_insert_with(|| {
             let id = self.next_stream_id;
@@ -1591,17 +1906,55 @@ mod tests {
     }
 
     #[test]
-    fn capture_lifecycle_repeats_terminal() {
+    fn native_capture_does_not_start_from_a_single_contact() {
         let mut state = CaptureState::new();
-        let contact = TouchpadContact {
+        let first = TouchpadContact {
             id: 7,
             x: 10,
             y: 20,
         };
-        let begin = state.snapshot(&[contact]);
+        let second = TouchpadContact {
+            id: 8,
+            x: 30,
+            y: 40,
+        };
+
+        assert!(
+            state.snapshot(&[first]).is_empty(),
+            "one-finger pointer/click must remain on the low-latency mouse path"
+        );
+        assert!(
+            state.snapshot(&[]).is_empty(),
+            "an ignored one-finger contact must not create a terminal stream"
+        );
+
+        let begin = state.snapshot(&[first, second]);
+        assert_eq!(begin.len(), 1, "two contacts start native gesture capture");
+        assert_eq!(
+            state.snapshot(&[first]).len(),
+            1,
+            "after a two-finger stream starts, trailing releases remain observable"
+        );
+        assert_eq!(state.snapshot(&[]).len(), TERMINAL_REPEAT_COUNT);
+    }
+
+    #[test]
+    fn capture_lifecycle_repeats_terminal() {
+        let mut state = CaptureState::new();
+        let first = TouchpadContact {
+            id: 7,
+            x: 10,
+            y: 20,
+        };
+        let second = TouchpadContact {
+            id: 8,
+            x: 30,
+            y: 40,
+        };
+        let begin = state.snapshot(&[first, second]);
         let stream = begin[0].coalescible_stream().unwrap();
         assert_eq!(begin.len(), 1);
-        assert_eq!(state.snapshot(&[contact]).len(), 1);
+        assert_eq!(state.snapshot(&[first, second]).len(), 1);
         let terminal = state.snapshot(&[]);
         assert_eq!(
             terminal,
@@ -1613,10 +1966,13 @@ mod tests {
     #[test]
     fn new_capture_stream_gets_new_id_after_cancel() {
         let mut state = CaptureState::new();
-        let contact = TouchpadContact { id: 1, x: 2, y: 3 };
-        let first = state.snapshot(&[contact])[0].coalescible_stream().unwrap();
+        let contacts = [
+            TouchpadContact { id: 1, x: 2, y: 3 },
+            TouchpadContact { id: 2, x: 4, y: 5 },
+        ];
+        let first = state.snapshot(&contacts)[0].coalescible_stream().unwrap();
         state.cancel();
-        let second = state.snapshot(&[contact])[0].coalescible_stream().unwrap();
+        let second = state.snapshot(&contacts)[0].coalescible_stream().unwrap();
         assert_ne!(first, second);
     }
 
@@ -1742,6 +2098,157 @@ mod tests {
         assert_eq!(raw_alt_tab_edge(true, false, 0x0f, true, false), None);
         assert_eq!(raw_alt_tab_edge(false, true, 0x0f, true, false), None);
         assert_eq!(raw_alt_tab_edge(true, true, 0x1c, true, false), None);
+    }
+
+    #[test]
+    fn raw_snipping_router_recovers_release_only() {
+        assert_eq!(raw_snipping_edge(true, true, true, 0x1f, true, false), None);
+        assert_eq!(raw_snipping_edge(true, true, true, 0x1f, true, true), None);
+        assert_eq!(
+            raw_snipping_edge(true, false, false, 0x1f, false, true),
+            Some(false)
+        );
+        assert_eq!(
+            raw_snipping_edge(false, true, true, 0x1f, true, false),
+            None
+        );
+        assert_eq!(
+            raw_snipping_edge(true, true, false, 0x1f, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn delayed_raw_snipping_down_cannot_replay_completed_hook_chord() {
+        assert_eq!(
+            raw_snipping_edge(true, true, true, 0x1f, true, false),
+            None,
+            "Raw Input is observational and may arrive after hook S-up cleared the current-state latch"
+        );
+    }
+
+    #[test]
+    fn raw_meta_router_recovers_only_missing_edges() {
+        assert_eq!(raw_meta_edge(true, true, false), None);
+        assert_eq!(raw_meta_edge(true, true, true), None);
+        assert_eq!(raw_meta_edge(true, false, true), Some(false));
+        assert_eq!(raw_meta_edge(false, false, true), Some(false));
+        assert_eq!(raw_meta_edge(false, true, false), None);
+    }
+
+    #[test]
+    fn raw_recovery_never_forwards_a_bare_win_down() {
+        assert_eq!(
+            raw_meta_edge(true, true, false),
+            None,
+            "Raw Input cannot consume the source Shell action, so forwarding bare Win here opens Start on both PCs"
+        );
+    }
+
+    #[test]
+    fn foreground_fallback_never_forwards_bare_shell_meta() {
+        assert!(!legacy_capture_may_forward(0x5b));
+        assert!(!legacy_capture_may_forward(0x5c));
+        assert!(legacy_capture_may_forward(0x1e));
+    }
+
+    #[test]
+    fn session_reset_clears_forwarded_modifier_latches() {
+        LEGACY_SHIFT_HELD.store(0x03, Ordering::Release);
+        LEGACY_META_HELD.store(0x03, Ordering::Release);
+        ASYNC_META_FORWARDED.store(0x03, Ordering::Release);
+        ASYNC_S_FORWARDED.store(true, Ordering::Release);
+        LEGACY_ALT_HELD.store(true, Ordering::Release);
+        ASYNC_TAB_FORWARDED.store(true, Ordering::Release);
+        KEYBOARD_CAPTURE_SUSPENDED.store(true, Ordering::Release);
+
+        reset_forwarded_keyboard_latches();
+
+        assert_eq!(LEGACY_SHIFT_HELD.load(Ordering::Acquire), 0);
+        assert_eq!(LEGACY_META_HELD.load(Ordering::Acquire), 0);
+        assert_eq!(ASYNC_META_FORWARDED.load(Ordering::Acquire), 0);
+        assert!(!ASYNC_S_FORWARDED.load(Ordering::Acquire));
+        assert!(!LEGACY_ALT_HELD.load(Ordering::Acquire));
+        assert!(!ASYNC_TAB_FORWARDED.load(Ordering::Acquire));
+        assert!(!KEYBOARD_CAPTURE_SUSPENDED.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn capture_disable_preserves_owned_release_latches() {
+        LEGACY_SHIFT_HELD.store(0x01, Ordering::Release);
+        LEGACY_META_HELD.store(0x01, Ordering::Release);
+        ASYNC_META_FORWARDED.store(0x01, Ordering::Release);
+        ASYNC_S_FORWARDED.store(true, Ordering::Release);
+        KEYBOARD_CAPTURE_SUSPENDED.store(true, Ordering::Release);
+
+        set_capture_active(false);
+
+        assert_eq!(LEGACY_SHIFT_HELD.load(Ordering::Acquire), 0x01);
+        assert_eq!(LEGACY_META_HELD.load(Ordering::Acquire), 0x01);
+        assert_eq!(ASYNC_META_FORWARDED.load(Ordering::Acquire), 0x01);
+        assert!(ASYNC_S_FORWARDED.load(Ordering::Acquire));
+        assert!(!KEYBOARD_CAPTURE_SUSPENDED.load(Ordering::Acquire));
+        reset_forwarded_keyboard_latches();
+    }
+
+    #[test]
+    fn modifier_chord_suspends_foreground_capture_until_last_release() {
+        assert_eq!(
+            keyboard_capture_action(42, true, false),
+            KeyboardCaptureAction::Suspend
+        );
+        assert_eq!(
+            keyboard_capture_action(125, true, false),
+            KeyboardCaptureAction::Suspend
+        );
+        assert_eq!(
+            keyboard_capture_action(125, false, false),
+            KeyboardCaptureAction::None
+        );
+        assert_eq!(
+            keyboard_capture_action(42, false, true),
+            KeyboardCaptureAction::Resume
+        );
+        assert_eq!(
+            keyboard_capture_action(31, true, false),
+            KeyboardCaptureAction::None
+        );
+    }
+
+    #[test]
+    fn routed_legacy_shift_down_is_neutralized_in_the_capture_thread() {
+        for scan in [0x2a, 0x36] {
+            assert!(should_neutralize_routed_legacy_shift(scan, true, true));
+            assert!(!should_neutralize_routed_legacy_shift(scan, false, true));
+            assert!(!should_neutralize_routed_legacy_shift(scan, true, false));
+        }
+        assert!(!should_neutralize_routed_legacy_shift(0x1e, true, true));
+    }
+
+    #[test]
+    fn legacy_down_requires_matching_hook_release_to_pass_locally() {
+        let mut tracker = LegacyPassthroughTracker::default();
+
+        // The down edge already reached Windows through the foreground
+        // fallback window. If the low-level hook later captures the up edge,
+        // it must still let that up continue locally or Windows keeps the
+        // physical modifier logically pressed on the source machine.
+        tracker.note_legacy_edge(0x2a, false, true);
+        assert!(tracker.take_hook_release(0x2a, false));
+        assert!(
+            !tracker.take_hook_release(0x2a, false),
+            "one escaped down edge permits exactly one local release"
+        );
+
+        // Windows reports Right Shift's legacy WM_KEYDOWN without the
+        // extended bit, while this hardware's low-level hook reports the
+        // matching WM_KEYUP with LLKHF_EXTENDED. Scan 0x36 already identifies
+        // Right Shift uniquely, so the identity must tolerate that mismatch.
+        tracker.note_legacy_edge(0x36, false, true);
+        assert!(
+            tracker.take_hook_release(0x36, true),
+            "Right Shift release must match across legacy/hook extended-bit disagreement"
+        );
     }
 
     #[test]

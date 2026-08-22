@@ -745,6 +745,8 @@ pub fn reset_smart_decision() {
     // as "never", local may still read as recent).
     clear_held_forwarded();
     clear_held_buttons();
+    #[cfg(target_os = "windows")]
+    windows::reset_forwarded_keyboard_latches();
 }
 
 /// Held-key tracker for "key currently held down whose press was
@@ -925,15 +927,21 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
 
     match keyboard_target() {
         KeyboardTarget::Smart => {
-            let to_peer = if peer_in_remote() {
+            let to_peer = if cursor_in_remote {
+                // The physical cursor owned by this machine has already
+                // crossed to the peer. Treat that direct capture-side fact as
+                // authoritative even if a delayed TakeControl temporarily
+                // leaves PEER_IN_REMOTE set during collision resolution.
+                // Giving the stale inbound flag priority here leaked the
+                // first physical key (commonly K) into the source PC.
+                true
+            } else if peer_in_remote() {
                 // The peer has crossed onto this screen, so this screen is
                 // the active keyboard destination. Keep this machine's
                 // physical keyboard local; otherwise the peer-activity
                 // heuristic reflects it back to the peer and consumes it
                 // from the window the user is looking at.
                 false
-            } else if cursor_in_remote {
-                true
             } else {
                 let la = local_activity_age();
                 let pa = peer_activity_age();
@@ -1601,6 +1609,26 @@ mod tests {
         // peer screen — that wins.
         LOCAL_MOUSE_AT.store(now - 5, Relaxed);
         assert!(should_forward_keys(true));
+    }
+
+    #[test]
+    fn physical_pc_key_follows_its_remote_cursor_during_stale_inbound_overlap() {
+        let _g = TEST_LOCK.lock();
+        reset();
+
+        // A delayed TakeControl can briefly leave both ownership flags set
+        // while collision resolution crosses the TCP control link. The real
+        // PC cursor is already on the Laptop, so its physical K key must not
+        // leak into the PC's foreground window during that overlap.
+        set_peer_in_remote(true);
+        assert!(
+            route_keystroke(37, true, true),
+            "physical PC K-down must follow the PC cursor to the Laptop"
+        );
+        assert!(
+            route_keystroke(37, false, true),
+            "physical PC K-up must follow the same routed press"
+        );
     }
 
     #[test]
