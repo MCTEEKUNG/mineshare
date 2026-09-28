@@ -347,7 +347,9 @@ pub fn local_screen_geometry() -> (u32, u32) {
 pub enum RemoteEvent {
     /// Local capture has just entered Remote mode. Translates to
     /// `ControlMsg::TakeControl`.
-    Entered,
+    Entered {
+        epoch: u64,
+    },
     /// Local capture has just left Remote mode. Translates to
     /// `ControlMsg::ReleaseControl`.
     Exited,
@@ -357,13 +359,33 @@ pub enum RemoteEvent {
     RequestPeerExit,
     /// User toggled Game Drive ON locally → ask the peer to start receiving.
     /// Translates to `ControlMsg::GameDrive { active: true }`.
-    GameDriveStart,
+    GameDriveStart {
+        epoch: u64,
+    },
     /// User toggled Game Drive OFF → ask the peer to stop receiving.
     /// Translates to `ControlMsg::GameDrive { active: false }`.
     GameDriveStop,
+    InputLockRequest(LockRequest),
+    InputLockReply(LockReply),
 }
 
+mod lock_control;
+pub use lock_control::{
+    LockReply, LockRequest, end_peer_control, note_peer_control, receive_lock_reply,
+    receive_lock_request, remote_input_locked, set_input_locked, toggle_focused_input_lock,
+};
+pub(crate) use lock_control::{end_local_control, publish_local_control};
+
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
+static PEER_SESSION_READY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn peer_session_ready() -> bool {
+    PEER_SESSION_READY.load(Ordering::Acquire)
+}
+
+pub(crate) fn can_enter_remote() -> bool {
+    peer_session_ready() && !peer_in_remote() && !is_input_locked()
+}
 static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 
 /// "Game mode" — when on, edge detection / press gestures / auto
@@ -372,17 +394,87 @@ static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 /// deliberate escape hatch (the user can ALWAYS leave or enter
 /// Remote with the keyboard) and peer-driven auto-release on
 /// real local HW also still fires. Persisted via the daemon's
-/// AppData config, toggled via the Ctrl+Alt+L hotkey or the
+/// AppData config, toggled via the Ctrl+Shift+L hotkey or the
 /// Status tab in the GUI.
 static INPUT_LOCKED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockAnimation {
+    Flow,
+    Pulse,
+    Fade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LockEffect {
+    pub rainbow: bool,
+    pub color: [u8; 3],
+    pub animation: LockAnimation,
+    pub duration_ms: u32,
+    pub thickness: u32,
+}
+impl Default for LockEffect {
+    fn default() -> Self {
+        Self {
+            rainbow: true,
+            color: [40, 210, 190],
+            animation: LockAnimation::Flow,
+            duration_ms: 1150,
+            thickness: 6,
+        }
+    }
+}
+impl LockEffect {
+    pub fn clamped(self) -> Self {
+        Self {
+            duration_ms: self.duration_ms.clamp(300, 3000),
+            thickness: self.thickness.clamp(2, 16),
+            ..self
+        }
+    }
+}
+fn game_lock_chord(ctrl: bool, shift: bool, alt: bool) -> bool {
+    ctrl && shift && !alt
+}
+
+#[test]
+fn game_lock_requires_ctrl_shift_not_alt() {
+    for ctrl in [false, true] {
+        for shift in [false, true] {
+            for alt in [false, true] {
+                assert_eq!(
+                    game_lock_chord(ctrl, shift, alt),
+                    (ctrl, shift, alt) == (true, true, false)
+                );
+            }
+        }
+    }
+}
+
+static LOCK_EFFECT: parking_lot::Mutex<LockEffect> = parking_lot::Mutex::new(LockEffect {
+    rainbow: true,
+    color: [40, 210, 190],
+    animation: LockAnimation::Flow,
+    duration_ms: 1150,
+    thickness: 6,
+});
+pub fn set_lock_effect(effect: LockEffect) {
+    *LOCK_EFFECT.lock() = effect.clamped();
+}
+pub fn preview_lock_effect(locked: bool, effect: LockEffect) {
+    #[cfg(target_os = "windows")]
+    windows::lock_feedback::show_configured(locked, effect.clamped());
+    #[cfg(not(target_os = "windows"))]
+    let _ = (locked, effect);
+}
 
 /// Name of the foreground anti-cheat-protected game when the
 /// Win-side game-detect thread has flagged one. `None` when no
 /// risky title is in the foreground. The GUI surfaces this as a
-/// red banner on the Status tab so the user knows *why* the
-/// input lock auto-engaged. Anti-cheat engines like BattlEye /
-/// EAC / Vanguard / RICOCHET ban accounts for using injected
-/// input — flagging matters more than just cursor capture.
+/// advisory banner on the Status tab. Detection never changes the user's
+/// input lock; injected input may still be subject to a game's anti-cheat rules.
 static ANTICHEAT_WARNING: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
 pub fn anticheat_warning() -> Option<String> {
@@ -395,7 +487,7 @@ pub(crate) fn set_anticheat_warning(name: Option<String>) {
     *g = name.clone();
     if changed {
         if let Some(ref n) = name {
-            tracing::warn!(game = %n, "anti-cheat-protected game in foreground — input locked");
+            tracing::warn!(game = %n, "anti-cheat-protected game in foreground — manual lock available");
         } else {
             tracing::info!("anti-cheat foreground cleared");
         }
@@ -745,6 +837,8 @@ pub fn reset_smart_decision() {
     // as "never", local may still read as recent).
     clear_held_forwarded();
     clear_held_buttons();
+    #[cfg(target_os = "windows")]
+    windows::reset_forwarded_keyboard_latches();
 }
 
 /// Held-key tracker for "key currently held down whose press was
@@ -790,6 +884,12 @@ fn clear_held_forwarded() {
 pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
     let mut held = HELD_FORWARDED.lock();
     let i = code as usize;
+    if !peer_session_ready() {
+        if let Some(key) = held.get_mut(i) {
+            *key = false;
+        }
+        return false;
+    }
     let was_held = i < 1024 && held[i];
     let forward = if was_held {
         // Continuation — must follow through.
@@ -837,6 +937,10 @@ fn btn_index(btn: Button) -> usize {
 pub fn route_mouse_button(btn: Button, down: bool, cursor_in_remote: bool) -> bool {
     let i = btn_index(btn);
     let mut held = MOUSE_BTNS_FORWARDED.lock();
+    if !peer_session_ready() {
+        held[i] = false;
+        return false;
+    }
     let was_held = held[i];
     let forward = if was_held {
         if !down {
@@ -912,6 +1016,15 @@ pub fn forwarded_input_state() -> ForwardedInputState {
 /// so without it a minute of mutual idle would let the capped peer age
 /// "win" the race and silently flip the keyboard across.
 pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
+    if !peer_session_ready() {
+        return false;
+    }
+    if is_input_locked() {
+        return false;
+    }
+    if remote_input_locked() && cursor_in_remote {
+        return true;
+    }
     // Game Drive: while we are driving the peer's game, every key goes to
     // the peer regardless of cursor position or Smart routing.
     if is_game_driving() {
@@ -925,26 +1038,20 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
 
     match keyboard_target() {
         KeyboardTarget::Smart => {
-            let to_peer = if peer_in_remote() {
-                // The peer has crossed onto this screen, so this screen is
-                // the active keyboard destination. Keep this machine's
-                // physical keyboard local; otherwise the peer-activity
-                // heuristic reflects it back to the peer and consumes it
-                // from the window the user is looking at.
-                false
-            } else if cursor_in_remote {
-                true
-            } else {
-                let la = local_activity_age();
-                let pa = peer_activity_age();
-                if la >= ACTIVITY_FRESH_MS && pa >= ACTIVITY_FRESH_MS {
-                    // Both idle (or never active) — hold the last call.
-                    LAST_SMART_TO_PEER.load(Ordering::Relaxed)
+            let to_peer =
+                if let Some(to_peer) = cursor_focus_is_peer(cursor_in_remote, peer_in_remote()) {
+                    to_peer
                 } else {
-                    // Smaller age = more recent. A tie falls to local.
-                    pa < la
-                }
-            };
+                    let la = local_activity_age();
+                    let pa = peer_activity_age();
+                    if la >= ACTIVITY_FRESH_MS && pa >= ACTIVITY_FRESH_MS {
+                        // Both idle (or never active) — hold the last call.
+                        LAST_SMART_TO_PEER.load(Ordering::Relaxed)
+                    } else {
+                        // Smaller age = more recent. A tie falls to local.
+                        pa < la
+                    }
+                };
             LAST_SMART_TO_PEER.store(to_peer, Ordering::Relaxed);
             to_peer
         }
@@ -952,6 +1059,22 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
         KeyboardTarget::ForcePeer => true,
         KeyboardTarget::ForceLocal => false,
     }
+}
+
+/// Shared concrete ownership rule for Smart keys and desktop commands.
+/// Outbound capture wins over a stale inbound flag during collision resolution.
+pub(crate) fn cursor_focus_is_peer(outbound: bool, inbound: bool) -> Option<bool> {
+    if outbound {
+        Some(true)
+    } else if inbound {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn clamp_remote_depth(depth: i32, max: i32, exit_buffer: i32, locked: bool) -> i32 {
+    depth.clamp(if locked { 0 } else { -exit_buffer }, max.max(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,19 +1228,6 @@ pub fn scale_delta(d: i32, residue: &mut f32) -> i32 {
     whole as i32
 }
 
-pub fn set_input_locked(v: bool) {
-    let prev = INPUT_LOCKED.swap(v, Ordering::AcqRel);
-    if prev != v {
-        tracing::info!(locked = v, "input lock toggled");
-        if v {
-            // Engaging the lock while in Remote drops us back to
-            // local immediately so the user isn't stuck driving
-            // the peer with no edge-crossing way back.
-            force_local_exit_remote();
-        }
-    }
-}
-
 /// Which side of the local screen the peer monitor is "stuck to"
 /// in the user's physical desk arrangement. The platform-specific
 /// capture modules read this to decide which edge of our display
@@ -1171,10 +1281,13 @@ pub fn set_peer_side(side: PeerSide) {
 /// up. Capture modules call `fire_remote_event` on each transition.
 pub fn set_remote_event_sender(tx: UnboundedSender<RemoteEvent>) {
     *REMOTE_EVT_TX.lock() = Some(tx);
+    PEER_SESSION_READY.store(true, Ordering::Release);
 }
 
 pub fn clear_remote_event_sender() {
+    PEER_SESSION_READY.store(false, Ordering::Release);
     *REMOTE_EVT_TX.lock() = None;
+    lock_control::reset();
 }
 
 /// Returns true if the peer has signalled it is currently driving Remote
@@ -1206,6 +1319,9 @@ pub fn peer_in_remote() -> bool {
 }
 
 pub fn set_peer_in_remote(v: bool) {
+    if !v {
+        end_peer_control();
+    }
     PEER_IN_REMOTE.store(v, Ordering::Release);
     if v {
         // A peer crossing onto this screen makes this screen the concrete
@@ -1226,9 +1342,7 @@ pub fn set_peer_in_remote(v: bool) {
 /// burst of low-level-hook callbacks emits one control request, not one per
 /// hardware sample.
 pub(crate) fn reclaim_from_peer_hardware() -> bool {
-    PEER_IN_REMOTE
-        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+    lock_control::reclaim_from_peer_hardware()
 }
 
 pub(crate) fn fire_remote_event(ev: RemoteEvent) {
@@ -1239,22 +1353,27 @@ pub(crate) fn fire_remote_event(ev: RemoteEvent) {
 
 /// Toggle Game Drive from this machine. When turning ON we become `Driving`
 /// and signal the peer to `Receiving`; when turning OFF we reset and signal
-/// stop. No-op semantics if there is no peer are handled by the daemon
-/// (the RemoteEvent simply isn't delivered).
+/// stop. Starting while disconnected must be a no-op: silently dropping the
+/// RemoteEvent would still grab the local mouse/keyboard with no destination.
 pub fn toggle_game_drive() {
     // Either role (Driving or Receiving) turns OFF on toggle so the person at
     // EITHER machine — including the one running the anti-cheat game — can
     // abort the session. Firing Stop makes the peer exit too.
     if is_game_driving() || is_game_receiving() {
         set_game_drive(GameDrive::Off);
+        end_local_control();
+        end_peer_control();
         fire_remote_event(RemoteEvent::GameDriveStop);
-    } else {
+    } else if peer_session_ready() {
         // Start from a clean LOCAL state: if the cursor had crossed into
         // REMOTE, the REMOTE motion branch would run virt_x + the anchor
         // warp and re-introduce the in-game camera fling. Force LOCAL first.
         force_local_exit_remote();
-        set_game_drive(GameDrive::Driving);
-        fire_remote_event(RemoteEvent::GameDriveStart);
+        set_input_locked(false);
+        publish_local_control(true, || set_game_drive(GameDrive::Driving));
+        if !peer_session_ready() {
+            set_game_drive(GameDrive::Off);
+        }
     }
 }
 
@@ -1355,6 +1474,7 @@ mod tests {
     static TEST_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
 
     fn reset() {
+        PEER_SESSION_READY.store(true, Ordering::Release);
         LOCAL_MOUSE_AT.store(0, Relaxed);
         LOCAL_CLICK_AT.store(0, Relaxed);
         PEER_ACTIVITY_AT.store(0, Relaxed);
@@ -1366,6 +1486,36 @@ mod tests {
         set_game_drive(GameDrive::Off);
         clear_held_forwarded();
         clear_held_buttons();
+    }
+
+    #[test]
+    fn disconnected_peer_cannot_consume_local_input_in_any_routing_mode() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        set_remote_event_sender(tx);
+        assert!(can_enter_remote());
+        assert!(route_keystroke(37, true, true));
+        assert!(route_mouse_button(Button::Left, true, true));
+        clear_remote_event_sender();
+        assert!(!can_enter_remote());
+        assert!(!route_keystroke(37, true, true));
+        assert!(!route_keystroke(37, false, true));
+        assert!(!route_mouse_button(Button::Left, false, true));
+        assert!(!route_mouse_button(Button::Left, true, true));
+        for target in [
+            KeyboardTarget::Smart,
+            KeyboardTarget::Auto,
+            KeyboardTarget::ForcePeer,
+            KeyboardTarget::ForceLocal,
+        ] {
+            set_keyboard_target(target);
+            assert!(!should_forward_keys(false));
+            assert!(!should_forward_keys(true));
+        }
+        toggle_game_drive();
+        assert_eq!(game_drive(), GameDrive::Off);
+        reset();
     }
 
     #[test]
@@ -1452,7 +1602,7 @@ mod tests {
     #[test]
     fn game_drive_remote_events_exist() {
         // Compile-time proof the toggle signal variants exist and are distinct.
-        let a = RemoteEvent::GameDriveStart;
+        let a = RemoteEvent::GameDriveStart { epoch: 1 };
         let b = RemoteEvent::GameDriveStop;
         assert_ne!(format!("{a:?}"), format!("{b:?}"));
     }
@@ -1601,6 +1751,26 @@ mod tests {
         // peer screen — that wins.
         LOCAL_MOUSE_AT.store(now - 5, Relaxed);
         assert!(should_forward_keys(true));
+    }
+
+    #[test]
+    fn physical_pc_key_follows_its_remote_cursor_during_stale_inbound_overlap() {
+        let _g = TEST_LOCK.lock();
+        reset();
+
+        // A delayed TakeControl can briefly leave both ownership flags set
+        // while collision resolution crosses the TCP control link. The real
+        // PC cursor is already on the Laptop, so its physical K key must not
+        // leak into the PC's foreground window during that overlap.
+        set_peer_in_remote(true);
+        assert!(
+            route_keystroke(37, true, true),
+            "physical PC K-down must follow the PC cursor to the Laptop"
+        );
+        assert!(
+            route_keystroke(37, false, true),
+            "physical PC K-up must follow the same routed press"
+        );
     }
 
     #[test]

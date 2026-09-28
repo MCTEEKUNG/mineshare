@@ -2,10 +2,10 @@
 //!
 //! Stage 8.5 adds a periodic Ping/Pong heartbeat on top of the
 //! existing TLS-style ControlMsg pipe — every ~500 ms each side
-//! sends a `Ping { ts_ms }` carrying its own monotonic timestamp,
-//! the peer echoes it back as `Pong { ts_ms }` verbatim, and the
-//! original sender computes `now - ts_ms` to learn the
-//! round-trip-time. Because the Pong's `ts_ms` came from *our*
+//! sends a `Ping { ts_us }` carrying its own monotonic timestamp,
+//! the peer echoes it back as `Pong { ts_us }` verbatim, and the
+//! original sender computes `now - ts_us` to learn the
+//! round-trip-time. Because the Pong's `ts_us` came from *our*
 //! clock, RTT calculation needs no clock sync between peers.
 //!
 //! Samples are kept in a fixed-size ring buffer (last 128 RTTs ≈
@@ -16,7 +16,8 @@
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 /// Number of RTT samples retained for histogram + percentile
 /// stats. 128 × 500 ms ≈ 64 s; long enough to smooth network
@@ -42,15 +43,15 @@ static STATE: Mutex<State> = Mutex::new(State {
     len: 0,
 });
 
-/// Wall-clock millisecond timestamp used as the `ts_ms` payload of
-/// a Ping. Monotonicity isn't required since we never compare two
-/// peers' clocks; we only ever subtract our own past timestamp
-/// from our own current one.
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Monotonic microseconds: NTP/time changes cannot corrupt RTT, and LAN
+/// samples below one millisecond no longer round down to a misleading zero.
+pub fn now_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+pub fn elapsed_ms(start_us: u64, end_us: u64) -> f32 {
+    end_us.saturating_sub(start_us) as f32 / 1000.0
 }
 
 /// Called when a Pong arrives carrying the timestamp we put on the
@@ -66,12 +67,12 @@ pub fn record_rtt_ms(rtt_ms: f32) {
     if s.len < RING {
         s.len += 1;
     }
-    // Sample the recorded RTT once every ~10 seconds (every 20th
-    // 500ms-spaced ping) so users / debuggers can see live values
+    // Sample every 20 ring positions (also on wrap) so users can see live values
     // in the daemon log without flooding it. Cheap proxy for "is
     // NODELAY working" — a healthy LAN should be < 5 ms here.
-    if s.len.is_multiple_of(20) {
-        tracing::info!(rtt_ms = %format!("{:.1}", rtt_ms), "RTT sample");
+    // Use the advancing head, not len: len stops changing when the ring fills.
+    if s.head.is_multiple_of(20) {
+        tracing::info!(rtt_ms = %format!("{:.3}", rtt_ms), "RTT sample");
     }
 }
 
@@ -173,4 +174,15 @@ fn percentile(sorted: &[f32], p: f32) -> f32 {
     let hi = (lo + 1).min(sorted.len() - 1);
     let frac = pos - lo as f32;
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sub_millisecond_measurements_and_percentiles_keep_precision() {
+        assert_eq!(super::elapsed_ms(1000, 1250), 0.25);
+        assert_eq!(super::elapsed_ms(2000, 1000), 0.0);
+        assert!((super::percentile(&[0.1, 0.2, 0.3, 0.4], 0.95) - 0.385).abs() < 0.0001);
+        assert!(super::now_us() <= super::now_us());
+    }
 }

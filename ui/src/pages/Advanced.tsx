@@ -19,6 +19,7 @@ type Settings = {
   invert_scroll_y: boolean;
   invert_scroll_x: boolean;
   auto_focus_on_take_control: boolean;
+  mouse_rate_hz: number;
 };
 
 /**
@@ -122,10 +123,25 @@ function InputPrefsCard() {
   }, []);
 
   async function update(next: Settings) {
+    const previous = settings;
+    if (!previous) return;
     setErr(null);
     setSettings(next);
     try {
-      const applied = await invoke<Settings>("set_settings", { settings: next });
+      const patch: Partial<Settings> = {};
+      if (next.mouse_sensitivity !== previous.mouse_sensitivity)
+        patch.mouse_sensitivity = next.mouse_sensitivity;
+      if (next.touchpad_scroll_speed !== previous.touchpad_scroll_speed)
+        patch.touchpad_scroll_speed = next.touchpad_scroll_speed;
+      if (next.invert_scroll_y !== previous.invert_scroll_y)
+        patch.invert_scroll_y = next.invert_scroll_y;
+      if (next.invert_scroll_x !== previous.invert_scroll_x)
+        patch.invert_scroll_x = next.invert_scroll_x;
+      if (next.auto_focus_on_take_control !== previous.auto_focus_on_take_control)
+        patch.auto_focus_on_take_control = next.auto_focus_on_take_control;
+      if (next.mouse_rate_hz !== previous.mouse_rate_hz)
+        patch.mouse_rate_hz = next.mouse_rate_hz;
+      const applied = await invoke<Settings>("patch_settings", { patch });
       setSettings(applied);
     } catch (e) {
       setErr(String(e));

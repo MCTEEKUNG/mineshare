@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use enigo::{Button as EButton, Direction, Enigo, Key as EKey, Keyboard, Mouse, Settings};
@@ -49,18 +50,20 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW,
     GA_ROOT, GetAncestor, GetClipCursor, GetCursorInfo, GetCursorPos, GetMessageW,
-    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, RI_KEY_BREAK,
-    RI_KEY_E0, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowCursor,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WindowFromPoint,
+    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+    PostThreadMessageW, RI_KEY_BREAK, RI_KEY_E0, RegisterClassExW, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow,
+    SetWindowsHookExW, ShowCursor, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, WNDCLASSEXW, WindowFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode, TouchpadEvent};
 
+pub(crate) mod lock_feedback;
 mod touchpad;
 
 /// RAII guard that releases the raised system timer resolution
@@ -88,6 +91,11 @@ fn forwarding_active() -> bool {
 
 type EventSink = std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>;
 static EVENT_SINK: OnceLock<Mutex<Option<EventSink>>> = OnceLock::new();
+/// The isolated keyboard dispatch thread owns the low-level hook. Each remote
+/// focus handoff asks that thread to replace its hook because Windows can
+/// silently remove a timed-out hook while leaving the old handle looking valid.
+static KEYBOARD_HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+const WM_REFRESH_KEYBOARD_HOOK: u32 = WM_APP + 0x32;
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static CURSOR_MODE: AtomicU8 = AtomicU8::new(MODE_LOCAL);
@@ -140,10 +148,11 @@ const SCAN_ALT: u32 = 0x38;
 /// Hotkey: Ctrl+Alt+R forces exit_remote regardless of cursor position.
 /// Useful when remote-mode gets stuck (e.g. peer disconnected mid-session).
 const SCAN_HOTKEY: u32 = 0x13; // R
-/// Hotkey: Ctrl+Alt+L toggles game-mode lock — pins all input to
+/// Hotkey: Ctrl+Shift+L toggles game-mode lock — pins all input to
 /// this PC so accidental edge crosses during fullscreen gameplay
 /// don't yank focus.
 const SCAN_HOTKEY_LOCK: u32 = 0x26; // L
+static LOCK_HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 /// Hotkey: Ctrl+Alt+K cycles the keyboard target through
 /// Auto → ForcePeer → ForceLocal → Auto. Lets the user pin
 /// keys to the peer (or back to local) without moving the mouse
@@ -156,6 +165,8 @@ const SCAN_G: u32 = 0x22; // G (set-1 make code)
 
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_LEFT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_RIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Set to `true` once `WM_INPUT` raw-mouse registration succeeds in
 /// `hook_thread`.  When true, `low_mouse_hook` skips motion forwarding
@@ -356,10 +367,12 @@ fn advance_remote_virtual_cursor(dx: i32, dy: i32) -> i32 {
     let side = super::peer_side();
     let (depth_delta, lateral_delta) = remote_motion_axes(side, dx, dy);
     let peer_extent = peer_depth_extent(side);
-    let next_depth = VIRT_X
-        .load(Ordering::Relaxed)
-        .saturating_add(depth_delta)
-        .clamp(-EXIT_BUFFER_PX, peer_extent - 1);
+    let next_depth = super::clamp_remote_depth(
+        VIRT_X.load(Ordering::Relaxed).saturating_add(depth_delta),
+        peer_extent - 1,
+        EXIT_BUFFER_PX,
+        super::remote_input_locked(),
+    );
     VIRT_X.store(next_depth, Ordering::Relaxed);
     VIRT_Y.fetch_add(lateral_delta, Ordering::Relaxed);
     next_depth
@@ -544,8 +557,8 @@ fn enter_remote(entry_lateral: i32) {
     // Refuse if the peer signalled it's already driving Remote — otherwise
     // both ends forward each other's HW input simultaneously and we end
     // up with cursors fighting on both screens.
-    if super::peer_in_remote() {
-        debug!("enter_remote refused — peer holds Remote");
+    if !super::can_enter_remote() {
+        debug!("enter_remote refused — peer unavailable or already driving");
         return;
     }
     let (ax, ay) = anchor();
@@ -556,7 +569,8 @@ fn enter_remote(entry_lateral: i32) {
     }
     LAST_X.store(ax, Ordering::Relaxed);
     LAST_Y.store(ay, Ordering::Relaxed);
-    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+    super::publish_local_control(false, || CURSOR_MODE.store(MODE_REMOTE, Ordering::Release));
+    request_keyboard_hook_refresh();
     touchpad::set_capture_anchor(ax, ay);
     set_touchpad_gesture_capture(true);
     hide_source_cursor();
@@ -567,22 +581,33 @@ fn enter_remote(entry_lateral: i32) {
         source_cursor_hide_calls = REMOTE_CURSOR_HIDE_CALLS.load(Ordering::Acquire),
         "cursor → remote"
     );
-    super::fire_remote_event(super::RemoteEvent::Entered);
+    // Teardown may have raced the native cursor/foreground calls above.
+    if !super::peer_session_ready() || super::is_input_locked() {
+        force_exit_remote();
+    }
+}
+
+fn local_restore_position(
+    side: super::PeerSide,
+    (left, top, right, bottom): (i32, i32, i32, i32),
+    restore_lateral: i32,
+) -> (i32, i32) {
+    // Restore one pixel inside the edge that faces the peer
+    // (per the configured layout). User came back across that
+    // edge to leave Remote. The inset re-arms edge detection even when a
+    // fullscreen surface hides the cursor: the next outward hardware report
+    // can still produce an inside→edge transition instead of a dead 0→0.
+    match side {
+        super::PeerSide::Right => (right - 1, restore_lateral.clamp(top, bottom)),
+        super::PeerSide::Left => (left + 1, restore_lateral.clamp(top, bottom)),
+        super::PeerSide::Top => (restore_lateral.clamp(left, right), top + 1),
+        super::PeerSide::Bottom => (restore_lateral.clamp(left, right), bottom - 1),
+    }
 }
 
 fn exit_remote(restore_lateral: i32) {
-    let (left, top, right, bottom) = bounds();
-    // Restore the local cursor to the edge that faces the peer
-    // (per the configured layout). User came back across that
-    // edge to leave Remote, so dropping the OS cursor there
-    // matches their hand position on the desk. For top/bottom
-    // we keep their horizontal anchor, just snap Y to the edge.
-    let (restore_x, restore_y) = match super::peer_side() {
-        super::PeerSide::Right => (right, restore_lateral.clamp(top, bottom)),
-        super::PeerSide::Left => (left, restore_lateral.clamp(top, bottom)),
-        super::PeerSide::Top => (restore_lateral.clamp(left, right), top),
-        super::PeerSide::Bottom => (restore_lateral.clamp(left, right), bottom),
-    };
+    let (restore_x, restore_y) =
+        local_restore_position(super::peer_side(), bounds(), restore_lateral);
     unsafe {
         let _ = SetCursorPos(restore_x, restore_y);
     }
@@ -593,6 +618,7 @@ fn exit_remote(restore_lateral: i32) {
     restore_source_cursor();
     wake_motion_flush_watchdog();
     info!(restore = ?(restore_x, restore_y), "cursor → local");
+    super::end_local_control();
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -653,6 +679,10 @@ pub fn local_in_remote() -> bool {
     CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
 }
 
+pub(super) fn reset_forwarded_keyboard_latches() {
+    touchpad::reset_forwarded_keyboard_latches();
+}
+
 pub fn force_exit_remote() {
     if CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE {
         let (left, top, right, bottom) = bounds();
@@ -675,31 +705,30 @@ pub fn force_exit_remote() {
 /// cursor-confine / anti-cheat title currently owns the cursor.
 static GAME_FOREGROUND: AtomicBool = AtomicBool::new(false);
 
-/// A peer handoff also transfers Windows' foreground window. The transition
-/// starts synchronously with TakeControl; mouse motion and the first key are
-/// retries only when Windows temporarily rejects that first activation.
+/// Optional keyboard focus assist. Passive cursor travel must never activate
+/// a background window or dismiss the user's existing foreground surface.
 struct FocusHandoff {
-    pending: AtomicBool,
+    key_pending: AtomicBool,
 }
 
 impl FocusHandoff {
     const fn new() -> Self {
         Self {
-            pending: AtomicBool::new(false),
+            key_pending: AtomicBool::new(false),
         }
     }
 
-    fn arm(&self) {
-        self.pending.store(true, Ordering::Release);
+    fn arm(&self, enabled: bool) {
+        self.key_pending.store(enabled, Ordering::Release);
     }
 
-    fn try_begin(&self) -> bool {
-        self.pending.swap(false, Ordering::AcqRel)
+    fn try_begin_key(&self) -> bool {
+        self.key_pending.swap(false, Ordering::AcqRel)
     }
 
-    fn finish(&self, activated: bool) {
+    fn finish_key(&self, activated: bool) {
         if !activated {
-            self.pending.store(true, Ordering::Release);
+            self.key_pending.store(true, Ordering::Release);
         }
     }
 }
@@ -745,28 +774,43 @@ fn activate_window_under_cursor() -> Result<bool> {
     Ok(activated || target == unsafe { GetForegroundWindow() })
 }
 
-fn attempt_remote_focus(reason: &'static str) {
-    if !REMOTE_FOCUS_HANDOFF.try_begin() {
-        return;
-    }
-    let activated = match activate_window_under_cursor() {
+fn activate_remote_focus_checkpoint(reason: &'static str) -> bool {
+    let started = Instant::now();
+    match activate_window_under_cursor() {
         Ok(true) => {
             info!(
                 reason,
+                elapsed_us = started.elapsed().as_micros() as u64,
                 "remote focus activated window under cursor without click"
             );
             true
         }
         Ok(false) => {
-            debug!(reason, "remote focus handoff found no activatable window");
+            debug!(
+                reason,
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "remote focus handoff found no activatable window"
+            );
             false
         }
         Err(error) => {
-            debug!(%error, reason, "remote focus handoff failed");
+            debug!(
+                %error,
+                reason,
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "remote focus handoff failed"
+            );
             false
         }
-    };
-    REMOTE_FOCUS_HANDOFF.finish(activated);
+    }
+}
+
+fn attempt_remote_key_focus() {
+    if !REMOTE_FOCUS_HANDOFF.try_begin_key() {
+        return;
+    }
+    let activated = activate_remote_focus_checkpoint("first-key-checkpoint");
+    REMOTE_FOCUS_HANDOFF.finish_key(activated);
 }
 
 pub(crate) fn game_foreground() -> bool {
@@ -817,7 +861,7 @@ fn take_control_action(
 }
 
 pub fn on_peer_take_control() {
-    REMOTE_FOCUS_HANDOFF.arm();
+    REMOTE_FOCUS_HANDOFF.arm(super::auto_focus_on_take_control());
     let mut cur = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cur);
@@ -842,10 +886,10 @@ pub fn on_peer_take_control() {
             info!(at = ?(x, y), "peer take-control: cursor-locked game foreground — skipping edge warp");
         }
     }
-    // Foreground ownership is part of the control handoff, not a side effect
-    // of later mouse travel. This makes shortcuts and typing valid as soon as
-    // the peer observes TakeControl.
-    attempt_remote_focus("take-control");
+    // Crossing only transfers input ownership, not the foreground window.
+    // Activating the desktop/background here dismisses floating UI or raises
+    // a background application over it. Ordinary keys target the existing
+    // foreground; the optional focus assist runs only on an actual key-down.
 }
 
 pub struct HookCapture {
@@ -934,15 +978,8 @@ impl InputCapture for HookCapture {
         // advertise basic fallback for an available native touchpad.
         touchpad::wait_for_capture_setup(std::time::Duration::from_millis(500));
 
-        // Game auto-detect: a separate poll thread watches the
-        // visible-cursor flag + the clip-cursor rect. When a
-        // foreground app hides or confines the cursor (the
-        // signature of fullscreen FPS / GTA / Minecraft mouse
-        // capture), we auto-engage the input lock so an
-        // accidental edge cross during gameplay can't yank focus
-        // to the peer. We deliberately only set/clear an
-        // *auto* flag, separate from the manual lock — the user's
-        // explicit Ctrl+Alt+L override always wins.
+        // Detection supplies warnings and camera-warp protection only.
+        // It never changes the user's manual input lock.
         thread::Builder::new()
             .name("win-game-detect".into())
             .spawn(game_detect_thread)
@@ -951,19 +988,7 @@ impl InputCapture for HookCapture {
     }
 }
 
-/// Anti-cheat-protected executables. Foreground match → auto-lock
-/// the bridge regardless of cursor state, and surface a red
-/// banner on the GUI Status tab so the user *knows* why their
-/// keyboard isn't crossing. These games' kernel-level anti-cheat
-/// (BattlEye / EAC / Vanguard / RICOCHET / Hyperion) routinely
-/// bans accounts for SendInput-style injected events — silently
-/// dropping the bridge is the safer default than letting an
-/// accidental edge cross arrive as suspect input on the peer.
-///
-/// Match is case-insensitive on the basename. Add new entries
-/// freely — false positives just engage a lock the user can
-/// override with Ctrl+Alt+R, false negatives are the dangerous
-/// direction.
+/// Foreground matches show an advisory only. They never engage the lock.
 const RISKY_GAMES: &[&str] = &[
     // Riot Vanguard
     "VALORANT.exe",
@@ -1029,7 +1054,7 @@ fn current_foreground_exe_basename() -> Option<String> {
     }
 }
 
-fn should_auto_lock_game(
+fn should_avoid_game_cursor_warp(
     _cursor_hidden: bool,
     cursor_clipped: bool,
     anticheat_match: bool,
@@ -1042,22 +1067,8 @@ fn should_auto_lock_game(
     (cursor_clipped || anticheat_match) && game_drive_off
 }
 
-/// Polls cursor visibility + clip-rect + foreground-process state
-/// every 250 ms. Auto-engages the input lock when:
-///   * the cursor clip rect is smaller than the screen (FPS
-///     mouse-confine)
-///   * OR the foreground process matches the anti-cheat-protected
-///     `RISKY_GAMES` list — even if cursor is visible (main menu)
-///
-/// Cursor visibility is retained for diagnostics, but is deliberately not a
-/// lock signal: Windows hides the pointer during ordinary keyboard input.
-///
-/// Manual user-engaged locks survive auto-detect releases (user
-/// always wins) so alt-tabbing out of a game momentarily doesn't
-/// drop a user-set lock.
+/// Polls advisory and camera-warp state without modifying the manual lock.
 fn game_detect_thread() {
-    use std::sync::atomic::AtomicBool;
-    static AUTO_ENGAGED: AtomicBool = AtomicBool::new(false);
     let poll_ms = std::time::Duration::from_millis(250);
     loop {
         std::thread::sleep(poll_ms);
@@ -1093,7 +1104,7 @@ fn game_detect_thread() {
         });
         super::set_anticheat_warning(anticheat_match.clone());
 
-        let should_lock = should_auto_lock_game(
+        let avoid_warp = should_avoid_game_cursor_warp(
             cursor_hidden,
             cursor_clipped,
             anticheat_match.is_some(),
@@ -1101,25 +1112,9 @@ fn game_detect_thread() {
         );
         // Publish for `on_peer_take_control`: when a cursor-locked game owns
         // the cursor we must NOT warp it to the edge (camera fling).
-        GAME_FOREGROUND.store(should_lock, Ordering::Relaxed);
-        let was_engaged = AUTO_ENGAGED.load(Ordering::Acquire);
-        if should_lock != was_engaged {
-            AUTO_ENGAGED.store(should_lock, Ordering::Release);
-            if should_lock {
-                if !super::is_input_locked() {
-                    info!(
-                        cursor_hidden,
-                        cursor_clipped,
-                        anticheat = ?anticheat_match,
-                        "game auto-detect — engaging lock"
-                    );
-                    super::set_input_locked(true);
-                }
-            } else if super::is_input_locked() && was_engaged {
-                info!("game auto-detect — releasing lock");
-                super::set_input_locked(false);
-            }
-        }
+        GAME_FOREGROUND.store(avoid_warp, Ordering::Relaxed);
+        // Detection only protects against camera warps and supplies a warning.
+        // Lock ownership belongs exclusively to the user's hotkey/UI action.
     }
 }
 
@@ -1165,19 +1160,57 @@ unsafe fn pump_hook_messages() {
 }
 
 unsafe fn keyboard_hook_thread() {
-    let keyboard = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) } {
-        Ok(handle) if !handle.0.is_null() => handle,
-        result => {
-            warn!(
-                ?result,
-                "WH_KEYBOARD_LL installation failed (need GUI session)"
-            );
-            return;
-        }
-    };
+    let mut keyboard =
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) } {
+            Ok(handle) if !handle.0.is_null() => handle,
+            result => {
+                warn!(
+                    ?result,
+                    "WH_KEYBOARD_LL installation failed (need GUI session)"
+                );
+                return;
+            }
+        };
+    KEYBOARD_HOOK_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
     info!("Windows keyboard hook installed on isolated dispatch thread");
-    unsafe { pump_hook_messages() };
+
+    let mut msg = MSG::default();
+    loop {
+        let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if result.0 == 0 || result.0 == -1 {
+            break;
+        }
+        if msg.message == WM_REFRESH_KEYBOARD_HOOK {
+            match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_kb_hook), None, 0) } {
+                Ok(replacement) if !replacement.0.is_null() => {
+                    let previous = std::mem::replace(&mut keyboard, replacement);
+                    let _ = unsafe { UnhookWindowsHookEx(previous) };
+                    info!("keyboard shortcut hook refreshed for remote focus handoff");
+                }
+                result => warn!(?result, "keyboard shortcut hook refresh failed"),
+            }
+            continue;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    KEYBOARD_HOOK_THREAD_ID.store(0, Ordering::Release);
     let _ = unsafe { UnhookWindowsHookEx(keyboard) };
+}
+
+fn request_keyboard_hook_refresh() {
+    let thread_id = KEYBOARD_HOOK_THREAD_ID.load(Ordering::Acquire);
+    if thread_id == 0 {
+        warn!("keyboard hook thread unavailable during remote focus handoff");
+        return;
+    }
+    if let Err(error) =
+        unsafe { PostThreadMessageW(thread_id, WM_REFRESH_KEYBOARD_HOOK, WPARAM(0), LPARAM(0)) }
+    {
+        warn!(%error, "could not queue keyboard shortcut hook refresh");
+    }
 }
 
 unsafe fn mouse_hook_thread() {
@@ -1613,6 +1646,13 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         let scan = info.scanCode;
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
         let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+        // A held shortcut is one toggle, not a stream of lock/unlock flashes.
+        if scan == SCAN_HOTKEY_LOCK && LOCK_HOTKEY_HELD.load(Ordering::Relaxed) {
+            if up {
+                LOCK_HOTKEY_HELD.store(false, Ordering::Relaxed);
+            }
+            return LRESULT(1);
+        }
 
         // Track modifier state regardless of mode so the hotkey works
         // even after a half-pressed transition.
@@ -1621,6 +1661,13 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         }
         if scan == SCAN_ALT && (down || up) {
             MOD_ALT.store(down, Ordering::Relaxed);
+        }
+        if down || up {
+            match scan {
+                0x2A => MOD_SHIFT_LEFT.store(down, Ordering::Relaxed),
+                0x36 => MOD_SHIFT_RIGHT.store(down, Ordering::Relaxed),
+                _ => {}
+            }
         }
 
         let mode = CURSOR_MODE.load(Ordering::Acquire);
@@ -1632,6 +1679,7 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             && MOD_CTRL.load(Ordering::Relaxed)
             && MOD_ALT.load(Ordering::Relaxed)
         {
+            super::set_input_locked(false);
             if mode == MODE_REMOTE {
                 info!("hotkey Ctrl+Alt+R — forcing exit_remote");
                 let (_, top, _, bottom) = bounds();
@@ -1659,15 +1707,18 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             return LRESULT(1);
         }
 
-        // Hotkey: Ctrl+Alt+L toggles game-mode lock.
+        // Hotkey: Ctrl+Shift+L toggles game-mode lock.
         if down
             && scan == SCAN_HOTKEY_LOCK
-            && MOD_CTRL.load(Ordering::Relaxed)
-            && MOD_ALT.load(Ordering::Relaxed)
+            && super::game_lock_chord(
+                MOD_CTRL.load(Ordering::Relaxed),
+                MOD_SHIFT_LEFT.load(Ordering::Relaxed) || MOD_SHIFT_RIGHT.load(Ordering::Relaxed),
+                MOD_ALT.load(Ordering::Relaxed),
+            )
         {
-            let next = !super::is_input_locked();
-            info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
-            super::set_input_locked(next);
+            info!("hotkey Ctrl+Shift+L — focused desktop lock");
+            LOCK_HOTKEY_HELD.store(true, Ordering::Relaxed);
+            super::toggle_focused_input_lock();
             return LRESULT(1);
         }
 
@@ -1705,17 +1756,42 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
         // every letter forced uppercase" Caps-Lock bug when Smart
         // flips mid-keypress.
 
-        if (down || up)
-            && route_physical_key(
-                scan,
-                info.vkCode,
-                info.flags.0 & LLKHF_EXTENDED != 0,
-                down,
-                mode == MODE_REMOTE,
-            )
-        {
-            // Consume so Windows doesn't also act on the keystroke.
-            return LRESULT(1);
+        if down || up {
+            let extended = info.flags.0 & LLKHF_EXTENDED != 0;
+            let pass_local_release =
+                up && touchpad::take_legacy_passthrough_release(scan, extended);
+            let routed = route_physical_key(scan, info.vkCode, extended, down, mode == MODE_REMOTE);
+            if matches!(scan, 0x2a | 0x36) {
+                info!(
+                    scan,
+                    extended,
+                    down,
+                    up,
+                    cursor_in_remote = mode == MODE_REMOTE,
+                    pass_local_release,
+                    routed,
+                    "source Shift low-level hook edge"
+                );
+            }
+            if matches!(scan, 0x0f | 0x38) {
+                info!(
+                    scan,
+                    extended,
+                    down,
+                    up,
+                    cursor_in_remote = mode == MODE_REMOTE,
+                    pass_local_release,
+                    routed,
+                    "source Alt+Tab low-level hook edge"
+                );
+            }
+            // Normally a routed edge is consumed. The one exception is an up
+            // whose down already passed through the foreground fallback
+            // window: route it to the peer but also let it continue locally,
+            // otherwise Windows retains a stuck physical modifier here.
+            if routed && !pass_local_release {
+                return LRESULT(1);
+            }
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -1739,11 +1815,15 @@ fn route_physical_key(
         code: KeyCode(linux_code),
         down,
     });
-    if cursor_in_remote {
+    if should_sync_forwarded_key_latch(down, cursor_in_remote) {
         touchpad::note_forwarded_key(linux_code, down);
     }
     super::note_key_forwarded_with_code(linux_code, down);
     true
+}
+
+fn should_sync_forwarded_key_latch(down: bool, cursor_in_remote: bool) -> bool {
+    cursor_in_remote || !down
 }
 
 /// Keyboard fallback for the foreground Precision Touchpad capture window.
@@ -1760,6 +1840,24 @@ pub(super) fn route_touchpad_capture_key(scan: u32, vk: u32, extended: bool, dow
 enum HeldKey {
     MouseBtn(Button),
     Key(u16),
+}
+
+fn should_inject_owned_edge(
+    held: &std::collections::HashSet<HeldKey>,
+    edge: HeldKey,
+    down: bool,
+) -> bool {
+    down || held.contains(&edge)
+}
+
+fn record_owned_release_result(
+    held: &mut std::collections::HashSet<HeldKey>,
+    edge: HeldKey,
+    succeeded: bool,
+) {
+    if !succeeded {
+        held.insert(edge);
+    }
 }
 
 pub struct EnigoInject {
@@ -1911,13 +2009,14 @@ impl InputInject for EnigoInject {
             // and preserves the existing desktop-relative semantics.
             move_desktop_cursor_rel(dx, dy)?;
         }
-        if dx != 0 || dy != 0 {
-            attempt_remote_focus("first-motion-retry");
-        }
         Ok(())
     }
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
+        if down {
+            // A real click chooses its own target; never override it later.
+            REMOTE_FOCUS_HANDOFF.arm(false);
+        }
         let b = match btn {
             Button::Left => EButton::Left,
             Button::Right => EButton::Right,
@@ -1930,34 +2029,58 @@ impl InputInject for EnigoInject {
         } else {
             Direction::Release
         };
-        self.inner.lock().button(b, dir).context("enigo button")?;
+        let edge = HeldKey::MouseBtn(btn);
         let mut held = self.held.lock();
+        if !should_inject_owned_edge(&held, edge, down) {
+            debug!(?btn, "ignored unowned injected mouse-button release");
+            return Ok(());
+        }
+        self.inner.lock().button(b, dir).context("enigo button")?;
         if down {
-            held.insert(HeldKey::MouseBtn(btn));
+            held.insert(edge);
         } else {
-            held.remove(&HeldKey::MouseBtn(btn));
+            held.remove(&edge);
         }
         Ok(())
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
+        let trace_alt_tab = matches!(code.0, 15 | 56 | 100);
+        let started = trace_alt_tab.then(Instant::now);
         if down {
-            attempt_remote_focus("first-key-retry");
+            attempt_remote_key_focus();
+        }
+        let edge = HeldKey::Key(code.0);
+        let mut held = self.held.lock();
+        if !should_inject_owned_edge(&held, edge, down) {
+            debug!(scancode = code.0, "ignored unowned injected key release");
+            return Ok(());
         }
         self.inject_key(code, down)?;
+        if let Some(started) = started {
+            info!(
+                code = code.0,
+                down,
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "target Alt+Tab injection edge"
+            );
+        }
         super::note_key_injected_with_code(code.0, down);
-        let mut held = self.held.lock();
         if down {
-            held.insert(HeldKey::Key(code.0));
+            held.insert(edge);
         } else {
-            held.remove(&HeldKey::Key(code.0));
+            held.remove(&edge);
         }
         Ok(())
     }
 
     fn release_all_held(&self) -> Result<()> {
-        let drained: Vec<HeldKey> = self.held.lock().drain().collect();
-        let count = drained.len();
+        // Serialize cleanup with in-flight SendInput calls so a successful
+        // down cannot land between draining the ownership set and releasing
+        // it, leaving a modifier stuck after handback.
+        let mut held = self.held.lock();
+        let drained: Vec<HeldKey> = held.drain().collect();
+        let mut released = 0usize;
         for h in drained {
             let res = match h {
                 HeldKey::MouseBtn(btn) => {
@@ -1975,16 +2098,21 @@ impl InputInject for EnigoInject {
                 }
                 HeldKey::Key(code) => self.inject_key(KeyCode(code), false),
             };
-            if let Err(e) = res {
-                warn!(error = %e, "failed to release held key on session end");
+            match res {
+                Ok(()) => released += 1,
+                Err(e) => {
+                    record_owned_release_result(&mut held, h, false);
+                    warn!(error = %e, "failed to release held key; ownership retained for retry");
+                }
             }
         }
-        if count > 0 {
+        if released > 0 {
             info!(
-                count,
+                count = released,
                 "released stale held keys at session end (preventing stuck-key after peer disconnect)"
             );
         }
+        drop(held);
         touchpad::release_all()
     }
 
@@ -2121,8 +2249,12 @@ struct KeyInjectionSpec {
 /// Windows layouts, notably the logo keys and the keypad cluster.
 fn key_injection_spec(KeyCode(code): KeyCode) -> Option<KeyInjectionSpec> {
     let (scan, extended) = match code {
-        // Numpad digits and operators that are non-extended set-1 codes.
-        55 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 | 83 => (code, false),
+        // Linux evdev intentionally retains the original PC/AT set-1 values
+        // for the standard keyboard block. Keep those as physical scan-code
+        // events instead of converting them to virtual keys. In particular,
+        // Windows Shell only recognises Win+Shift+S reliably when all three
+        // members of the chord arrive through one physical-key path.
+        1..=68 | 70..=83 | 86..=88 => (code, false),
         69 => (0x45, true),  // KEY_NUMLOCK
         96 => (0x1C, true),  // KEY_KPENTER
         97 => (0x1D, true),  // KEY_RIGHTCTRL
@@ -2163,7 +2295,7 @@ fn send_scancode_key_input(spec: KeyInjectionSpec, down: bool) -> Result<()> {
                 wScan: spec.scan,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MINESHARE_INPUT_TAG,
             },
         },
     };
@@ -2191,6 +2323,95 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "isolated end-to-end lock state probe; briefly displays native target feedback"]
+    fn focused_lock_routes_to_target_and_disconnect_releases() {
+        use crate::RemoteEvent;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::set_remote_event_sender(tx);
+        crate::publish_local_control(false, || CURSOR_MODE.store(MODE_REMOTE, Ordering::Release));
+        let RemoteEvent::Entered { epoch } = rx.try_recv().unwrap() else {
+            panic!("missing handoff");
+        };
+        MOD_CTRL.store(true, Ordering::Relaxed);
+        MOD_ALT.store(true, Ordering::Relaxed);
+        let key = KBDLLHOOKSTRUCT {
+            scanCode: SCAN_HOTKEY_LOCK,
+            ..Default::default()
+        };
+        let press_lock = || unsafe {
+            let ptr = LPARAM(&key as *const KBDLLHOOKSTRUCT as isize);
+            assert_eq!(
+                low_kb_hook(HC_ACTION as i32, WPARAM(WM_KEYDOWN as usize), ptr),
+                LRESULT(1)
+            );
+            // Auto-repeat must not toggle twice or leak L to the foreground app.
+            assert_eq!(
+                low_kb_hook(HC_ACTION as i32, WPARAM(WM_KEYDOWN as usize), ptr),
+                LRESULT(1)
+            );
+            assert_eq!(
+                low_kb_hook(HC_ACTION as i32, WPARAM(WM_KEYUP as usize), ptr),
+                LRESULT(1)
+            );
+        };
+        press_lock();
+        let RemoteEvent::InputLockRequest(request) = rx.try_recv().unwrap() else {
+            panic!("hotkey did not address peer");
+        };
+        assert_eq!(request.epoch, epoch);
+        assert!(crate::remote_input_locked());
+        assert!(
+            !crate::is_input_locked(),
+            "source desktop must not lock or show feedback"
+        );
+        crate::set_keyboard_target(crate::KeyboardTarget::ForceLocal);
+        assert!(
+            crate::should_forward_keys(true),
+            "lock pins keyboard to the actual target"
+        );
+        VIRT_X.store(0, Ordering::Relaxed);
+        assert!(
+            !track_raw_remote_motion(-10000, 0),
+            "locked pointer escaped the peer"
+        );
+        assert!(VIRT_X.load(Ordering::Relaxed) >= 0);
+        press_lock();
+        assert!(matches!(rx.try_recv().unwrap(), RemoteEvent::InputLockRequest(r) if !r.locked));
+        assert!(!crate::remote_input_locked());
+
+        // Target half: replay the captured request on a receiving desktop.
+        CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+        crate::set_peer_in_remote(true);
+        crate::note_peer_control(epoch);
+        let reply = crate::receive_lock_request(request);
+        assert!(reply.locked);
+        assert!(crate::is_input_locked());
+        crate::set_keyboard_target(crate::KeyboardTarget::ForcePeer);
+        assert!(!crate::should_forward_keys(false));
+        assert!(
+            !crate::reclaim_from_peer_hardware(),
+            "local touch must not kick the locked source out"
+        );
+        let old = crate::receive_lock_request(crate::LockRequest {
+            epoch: epoch + 1,
+            ..request
+        });
+        assert!(!old.locked);
+        assert!(
+            crate::is_input_locked(),
+            "stale request changed the current lock"
+        );
+        crate::clear_remote_event_sender();
+        assert!(!crate::is_input_locked());
+        assert!(!crate::remote_input_locked());
+        assert!(!crate::should_forward_keys(false));
+        assert!(
+            !crate::route_keystroke(37, true, false),
+            "offline K must stay local"
+        );
+        crate::set_peer_in_remote(false);
+    }
     use super::*;
 
     #[test]
@@ -2274,14 +2495,24 @@ mod tests {
     }
 
     #[test]
-    fn focus_handoff_starts_immediately_and_retries_only_after_failure() {
+    fn passive_handoff_preserves_foreground_and_focus_assist_is_opt_in() {
         let handoff = FocusHandoff::new();
-        handoff.arm();
-        assert!(handoff.try_begin());
-        handoff.finish(false);
-        assert!(handoff.try_begin());
-        handoff.finish(true);
-        assert!(!handoff.try_begin());
+        handoff.arm(false);
+        assert!(!handoff.try_begin_key());
+        handoff.arm(true);
+        assert!(handoff.try_begin_key());
+        handoff.finish_key(false);
+        assert!(handoff.try_begin_key());
+        handoff.finish_key(true);
+        assert!(!handoff.try_begin_key());
+    }
+
+    #[test]
+    fn real_click_cancels_pending_keyboard_focus_assist() {
+        let handoff = FocusHandoff::new();
+        handoff.arm(true);
+        handoff.arm(false);
+        assert!(!handoff.try_begin_key());
     }
 
     #[test]
@@ -2365,6 +2596,78 @@ mod tests {
     }
 
     #[test]
+    fn snipping_shortcut_preserves_win_shift_s_identity() {
+        assert_eq!(captured_keycode(0x5B, 0x5B, true), 125);
+        assert_eq!(captured_keycode(0x2A, 0xA0, false), 42);
+        assert_eq!(captured_keycode(0x1F, 0x53, false), 31);
+        assert_eq!(
+            key_injection_spec(KeyCode(125)),
+            Some(KeyInjectionSpec {
+                scan: 0x5B,
+                extended: true,
+            })
+        );
+        assert_eq!(
+            key_injection_spec(KeyCode(42)),
+            Some(KeyInjectionSpec {
+                scan: 0x2A,
+                extended: false,
+            })
+        );
+        assert_eq!(
+            key_injection_spec(KeyCode(31)),
+            Some(KeyInjectionSpec {
+                scan: 0x1F,
+                extended: false,
+            })
+        );
+    }
+
+    #[test]
+    fn forwarded_modifier_release_clears_latch_after_cursor_returns_local() {
+        assert!(should_sync_forwarded_key_latch(true, true));
+        assert!(
+            should_sync_forwarded_key_latch(false, false),
+            "a routed Shift-up must clear the remote-down latch even after cursor handback"
+        );
+    }
+
+    #[test]
+    fn injected_shift_release_requires_a_mineshare_owned_down() {
+        let mut held = std::collections::HashSet::new();
+        for code in [42, 54] {
+            let shift = HeldKey::Key(code);
+            assert!(should_inject_owned_edge(&held, shift, true));
+            assert!(
+                !should_inject_owned_edge(&held, shift, false),
+                "unowned Shift-up code {code} could disturb the physical keyboard"
+            );
+            held.insert(shift);
+            assert!(should_inject_owned_edge(&held, shift, false));
+            held.remove(&shift);
+        }
+    }
+
+    #[test]
+    fn failed_shift_cleanup_retains_ownership_for_retry() {
+        let shift = HeldKey::Key(42);
+        let mut held = std::collections::HashSet::new();
+
+        record_owned_release_result(&mut held, shift, false);
+        assert!(
+            held.contains(&shift),
+            "a failed cleanup must let the next heartbeat retry Shift-up"
+        );
+
+        held.clear();
+        record_owned_release_result(&mut held, shift, true);
+        assert!(
+            held.is_empty(),
+            "successful cleanup must not restore ownership"
+        );
+    }
+
+    #[test]
     fn anchor_cursor_only_when_game_foreground() {
         // Skip the edge warp only when a cursor-locked game owns the cursor.
         // The game-drive path no longer relies on this, so a peer-driven
@@ -2395,14 +2698,28 @@ mod tests {
     }
 
     #[test]
+    fn local_restore_rearms_the_peer_edge_while_cursor_is_hidden() {
+        let bounds = (0, 0, 1920, 1080);
+        assert_eq!(
+            local_restore_position(crate::PeerSide::Left, bounds, 106),
+            (1, 106),
+            "restoring on x=0 leaves no local-to-peer edge transition to detect"
+        );
+        assert_eq!(
+            local_restore_position(crate::PeerSide::Right, bounds, 106),
+            (1919, 106),
+        );
+    }
+
+    #[test]
     fn hidden_cursor_alone_does_not_trigger_game_lock() {
         assert!(
-            !should_auto_lock_game(true, false, false, true),
+            !should_avoid_game_cursor_warp(true, false, false, true),
             "Windows hides the pointer while typing; that alone is not evidence of a game"
         );
-        assert!(should_auto_lock_game(false, true, false, true));
-        assert!(should_auto_lock_game(false, false, true, true));
-        assert!(!should_auto_lock_game(false, true, false, false));
+        assert!(should_avoid_game_cursor_warp(false, true, false, true));
+        assert!(should_avoid_game_cursor_warp(false, false, true, true));
+        assert!(!should_avoid_game_cursor_warp(false, true, false, false));
     }
 
     #[test]

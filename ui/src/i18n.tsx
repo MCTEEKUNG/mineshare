@@ -85,7 +85,7 @@ const en: Strings = {
   // Anti-cheat banner
   ac_title: "⚠ Anti-cheat-protected game detected:",
   ac_desc:
-    "Input is auto-locked to this PC for safety. Kernel-level anti-cheat (BattlEye / EAC / Vanguard / RICOCHET / Hyperion) can flag SendInput-style injected events as cheating and ban accounts. The bridge will resume normally once the game is no longer in the foreground.",
+    "Input is not locked automatically. Press Ctrl+Shift+L to lock or unlock this PC yourself. Anti-cheat software may flag injected input; use cross-PC input at your discretion.",
 
   // Layout page
   layout_intro:
@@ -188,7 +188,7 @@ const th: Strings = {
 
   ac_title: "⚠ ตรวจพบเกมที่มีระบบ anti-cheat:",
   ac_desc:
-    "Input ถูก auto-lock ไว้ที่ PC นี้เพื่อความปลอดภัย ระบบ anti-cheat ระดับ kernel (BattlEye / EAC / Vanguard / RICOCHET / Hyperion) อาจตรวจจับ injected events ว่าเป็นการโกงและแบนบัญชี bridge จะกลับมาทำงานปกติเมื่อเกมไม่ได้อยู่หน้าจอแล้ว",
+    "ไม่มีการล็อกอัตโนมัติ กด Ctrl+Shift+L เพื่อล็อกหรือปลดล็อกเครื่องนี้ด้วยตัวเอง ระบบ anti-cheat อาจตรวจจับ injected input โปรดพิจารณาก่อนใช้อินพุตข้ามเครื่องในเกม",
 
   layout_intro:
     "ลาก peer monitor ไปขอบใดขอบหนึ่งของจอนี้เพื่อตั้งทิศ edge-detection, cursor warp, และ sign convention ของ Remote mode จะ flip ตามฝั่งที่เลือก บันทึกอัตโนมัติเมื่อปล่อย",

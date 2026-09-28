@@ -34,7 +34,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config libasound2-dev libudev-dev libopus-dev cmake
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
@@ -80,13 +80,21 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libasound2-dev \
+            libudev-dev \
+            libopus-dev \
+            cmake \
             pkg-config \
             build-essential \
             file
 
       - name: npm install
         working-directory: ui
-        run: npm install
+        run: npm ci
+
+      - name: Frontend tests
+        working-directory: ui
+        run: npm test -- --run
 
       - name: Type-check + build frontend
         working-directory: ui

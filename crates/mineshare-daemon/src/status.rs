@@ -51,6 +51,7 @@ pub struct StatusSnapshot {
     /// auto-handover are paused; only the Ctrl+Alt+R hotkey can
     /// move between machines.
     pub input_locked: bool,
+    pub remote_input_locked: bool,
     /// "off" | "driving" | "receiving" — Game Drive state for the GUI.
     pub game_drive: &'static str,
     /// Set when the foreground process matches the anti-cheat-
@@ -98,6 +99,7 @@ pub fn snapshot() -> StatusSnapshot {
         local_in_remote: mineshare_input::local_in_remote(),
         peer_in_remote: mineshare_input::peer_in_remote(),
         input_locked: mineshare_input::is_input_locked(),
+        remote_input_locked: mineshare_input::remote_input_locked(),
         game_drive: match mineshare_input::game_drive() {
             mineshare_input::GameDrive::Driving => "driving",
             mineshare_input::GameDrive::Receiving => "receiving",
@@ -125,9 +127,65 @@ pub(crate) fn clear_peer_connected() {
     *PEER_ADDR.lock() = None;
     *PEER_NAME.lock() = None;
     *PEER_VERSION.lock() = None;
+    publish_counters(0, 0, 0, 0, 0, 0);
+}
+
+pub(crate) fn publish_counters(
+    sent: u64,
+    received: u64,
+    injected: u64,
+    audio: u64,
+    inject_errors: u64,
+    decrypt_errors: u64,
+) {
+    SENT_PKTS.store(sent, Ordering::Relaxed);
+    RECV_PKTS.store(received, Ordering::Relaxed);
+    INJECTED.store(injected, Ordering::Relaxed);
+    AUDIO_RECV.store(audio, Ordering::Relaxed);
+    INJECT_ERRS.store(inject_errors, Ordering::Relaxed);
+    DECRYPT_ERRS.store(decrypt_errors, Ordering::Relaxed);
+}
+
+pub(crate) fn peer_connected() -> bool {
+    PEER_CONNECTED.load(Ordering::Relaxed)
 }
 
 /// Record the peer's `build_id()` learned from the PortAnnounce handshake.
 pub(crate) fn set_peer_version(v: Option<String>) {
     *PEER_VERSION.lock() = v;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traffic_counters_reach_ui_and_clear_after_disconnect() {
+        publish_counters(11, 12, 13, 14, 2, 3);
+        let s = snapshot();
+        assert_eq!(
+            (
+                s.sent_pkts,
+                s.recv_pkts,
+                s.injected,
+                s.audio_recv,
+                s.inject_errs,
+                s.decrypt_errs
+            ),
+            (11, 12, 13, 14, 2, 3)
+        );
+        clear_peer_connected();
+        let s = snapshot();
+        assert_eq!(
+            (
+                s.sent_pkts,
+                s.recv_pkts,
+                s.injected,
+                s.audio_recv,
+                s.inject_errs,
+                s.decrypt_errs
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+    }
 }

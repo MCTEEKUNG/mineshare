@@ -8,6 +8,8 @@
 //!                        both machines for the same commit, unlike a
 //!                        per-machine wall-clock build date.
 
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -24,6 +26,7 @@ fn main() {
     println!("cargo:rustc-env=MINESHARE_GIT_HASH={hash}");
     println!("cargo:rustc-env=MINESHARE_GIT_DIRTY={dirty}");
     println!("cargo:rustc-env=MINESHARE_BUILD_DATE={date}");
+    println!("cargo:rustc-env=MINESHARE_SOURCE_ID={}", source_id());
 
     // Best-effort: re-run when the commit (or staged content) changes. The
     // release flow bumps the workspace version → full recompile → this
@@ -32,6 +35,66 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/index");
     if let Some(refp) = head_ref_path() {
         println!("cargo:rerun-if-changed={refp}");
+    }
+}
+
+fn source_id() -> String {
+    let root = Path::new("../..");
+    let mut files = Vec::new();
+    for relative in [
+        "crates",
+        "ui/src",
+        "ui/public",
+        "ui/src-tauri/src",
+        "ui/src-tauri/icons",
+        "Cargo.toml",
+        "Cargo.lock",
+        "ui/package.json",
+        "ui/package-lock.json",
+        "ui/src-tauri/Cargo.toml",
+        "ui/src-tauri/Cargo.lock",
+        "ui/src-tauri/build.rs",
+        "ui/src-tauri/tauri.conf.json",
+    ] {
+        let path = root.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        if path.exists() {
+            collect_files(&path, &mut files);
+        }
+    }
+    files.sort();
+    let mut hash = Sha256::new();
+    for path in files {
+        let name = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = std::fs::read(&path).expect("read build fingerprint input");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let id = format!("{:x}", hash.finalize());
+    assert_eq!(id.len(), 64);
+    id[..12].to_string()
+}
+
+fn collect_files(path: &Path, out: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        out.push(path.to_owned());
+        return;
+    }
+    for entry in std::fs::read_dir(path).expect("read source directory") {
+        let entry = entry.expect("read source entry");
+        if entry.file_type().unwrap().is_symlink() {
+            continue;
+        }
+        if entry.file_name() == "target" || entry.file_name() == "node_modules" {
+            continue;
+        }
+        collect_files(&entry.path(), out);
     }
 }
 

@@ -113,6 +113,8 @@ const RESTORE_MARGIN_PX: i32 = 120;
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_LEFT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_RIGHT: AtomicBool = AtomicBool::new(false);
 
 // --- shared cursor / grab state across all evdev pump threads ---------
 
@@ -232,8 +234,8 @@ pub fn set_peer_screen(w: u32, _h: u32) {
 
 fn enter_remote() {
     // Refuse if the peer signalled it's already driving Remote.
-    if super::peer_in_remote() {
-        debug!("enter_remote refused — peer holds Remote");
+    if !super::can_enter_remote() {
+        debug!("enter_remote refused — peer unavailable or already driving");
         return;
     }
     // virt_x is "distance dragged INTO the peer from the edge we crossed".
@@ -248,10 +250,12 @@ fn enter_remote() {
     PENDING_DX.store(0, Ordering::Release);
     PENDING_DY.store(0, Ordering::Release);
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
-    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+    super::publish_local_control(false, || CURSOR_MODE.store(MODE_REMOTE, Ordering::Release));
     wake_flush_watchdog();
     info!("cursor → remote (linux)");
-    super::fire_remote_event(super::RemoteEvent::Entered);
+    if !super::peer_session_ready() || super::is_input_locked() {
+        exit_remote();
+    }
 }
 
 fn exit_remote() {
@@ -275,6 +279,7 @@ fn exit_remote() {
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
     wake_flush_watchdog();
     info!(restore = ?(rx, ry), "cursor → local (linux)");
+    super::end_local_control();
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -712,6 +717,13 @@ fn pump_device(
                         }
                     }
 
+                    if down || up {
+                        match key {
+                            EvKey::KEY_LEFTSHIFT => MOD_SHIFT_LEFT.store(down, Ordering::Relaxed),
+                            EvKey::KEY_RIGHTSHIFT => MOD_SHIFT_RIGHT.store(down, Ordering::Relaxed),
+                            _ => {}
+                        }
+                    }
                     // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks
                     // the peer to release if the peer holds Remote.
                     if down
@@ -720,6 +732,7 @@ fn pump_device(
                         && MOD_ALT.load(Ordering::Relaxed)
                     {
                         let mode = CURSOR_MODE.load(Ordering::Acquire);
+                        super::set_input_locked(false);
                         if mode == MODE_REMOTE {
                             info!("hotkey Ctrl+Alt+R — forcing exit_remote");
                             exit_remote();
@@ -733,17 +746,20 @@ fn pump_device(
                         continue;
                     }
 
-                    // Hotkey: Ctrl+Alt+L toggles game-mode lock —
+                    // Hotkey: Ctrl+Shift+L toggles game-mode lock —
                     // pins input to this PC so accidental edge
                     // crosses during gameplay don't yank focus.
                     if down
                         && key == EvKey::KEY_L
-                        && MOD_CTRL.load(Ordering::Relaxed)
-                        && MOD_ALT.load(Ordering::Relaxed)
+                        && super::game_lock_chord(
+                            MOD_CTRL.load(Ordering::Relaxed),
+                            MOD_SHIFT_LEFT.load(Ordering::Relaxed)
+                                || MOD_SHIFT_RIGHT.load(Ordering::Relaxed),
+                            MOD_ALT.load(Ordering::Relaxed),
+                        )
                     {
-                        let next = !super::is_input_locked();
-                        info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
-                        super::set_input_locked(next);
+                        info!("hotkey Ctrl+Shift+L — focused desktop lock");
+                        super::toggle_focused_input_lock();
                         continue;
                     }
 
@@ -960,7 +976,8 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             super::PeerSide::Bottom => dy,
         };
         let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
-        let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
+        let new_virt_x =
+            super::clamp_remote_depth(raw, peer_w, EXIT_BUFFER_PX, super::remote_input_locked());
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
         if new_virt_x <= -EXIT_BUFFER_PX {

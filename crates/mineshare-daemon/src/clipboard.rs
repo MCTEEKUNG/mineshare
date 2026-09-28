@@ -24,6 +24,7 @@
 //! known limitation we'll revisit if a user reports it.
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -37,7 +38,9 @@ use tracing::{debug, info, warn};
 const POLL_MS: u64 = 400;
 /// Cap forwarded clipboard size — pasting a 50 MB log into the
 /// clipboard shouldn't accidentally flood the control channel.
-const MAX_BYTES: usize = 64 * 1024;
+// Leave room for ControlMsg/bincode framing and Noise's 16-byte tag inside
+// its 65,535-byte ciphertext limit. A 64 KiB text used to kill the session.
+const MAX_BYTES: usize = 60 * 1024;
 pub const IMAGE_CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const CLIPBOARD_QUEUE_CAPACITY: usize = 8;
@@ -45,6 +48,7 @@ const CLIPBOARD_QUEUE_CAPACITY: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClipboardFingerprint {
     Text(String),
+    Files(Vec<(PathBuf, u64, Option<std::time::SystemTime>)>),
     Image {
         width: usize,
         height: usize,
@@ -93,7 +97,25 @@ static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
 /// the GUI ~60–90% of the time on a simultaneous launch. Confirmed by
 /// bisection: disabling clipboard sync took the crash rate to 0/12.
 /// Funnelling every clipboard touch onto one thread removes the race.
-static APPLY_TX: Mutex<Option<std::sync::mpsc::Sender<ClipboardEvent>>> = Mutex::new(None);
+enum ApplyEvent {
+    Text(String),
+    Image(arboard::ImageData<'static>),
+    Files(Vec<PathBuf>),
+}
+
+static APPLY_TX: Mutex<Option<std::sync::mpsc::SyncSender<()>>> = Mutex::new(None);
+static PENDING_APPLY: Mutex<Option<ApplyEvent>> = Mutex::new(None);
+static INCOMING_IMAGE: Mutex<Option<IncomingImage>> = Mutex::new(None);
+const APPLY_QUEUE_CAPACITY: usize = 1;
+
+struct WatcherRunning;
+
+impl Drop for WatcherRunning {
+    fn drop(&mut self) {
+        *APPLY_TX.lock() = None;
+        WATCHER_RUNNING.store(false, Ordering::Release);
+    }
+}
 
 struct IncomingImage {
     id: u64,
@@ -233,6 +255,7 @@ fn send_image(tx: &Sender<ClipboardEvent>, image: arboard::ImageData<'static>) -
 /// call actually starts the OS-side thread; subsequent calls are
 /// no-ops, so it's safe to invoke this from every peer session.
 pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
+    *INCOMING_IMAGE.lock() = None;
     // DIAGNOSTIC GATE (crash hunt): MINESHARE_NO_CLIPBOARD=1 disables
     // all clipboard sync, to test whether Win32 clipboard / OLE access
     // from the watcher thread + apply_from_peer racing with WebView2
@@ -253,12 +276,14 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
     // Channel for inbound peer clipboard payloads. The watcher thread
     // is the *only* thread that ever touches `arboard`; everything
     // else (apply_from_peer) hands work to it through here.
-    let (apply_tx, apply_rx) = std::sync::mpsc::channel::<ClipboardEvent>();
+    let (apply_tx, apply_rx) = std::sync::mpsc::sync_channel::<()>(APPLY_QUEUE_CAPACITY);
     *APPLY_TX.lock() = Some(apply_tx);
+    let runtime = tokio::runtime::Handle::current();
 
-    thread::Builder::new()
+    let started = thread::Builder::new()
         .name("clipboard-watcher".into())
         .spawn(move || {
+            let _running = WatcherRunning;
             let mut clipboard = match arboard::Clipboard::new() {
                 Ok(c) => c,
                 Err(e) => {
@@ -267,7 +292,6 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                 }
             };
             info!(poll_ms = POLL_MS, "clipboard watcher started");
-            let mut incoming_image: Option<IncomingImage> = None;
 
             loop {
                 // Block up to POLL_MS for an inbound peer payload. A
@@ -275,11 +299,25 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                 // is the cue to poll the local clipboard for changes.
                 // Either way, all `arboard` calls stay on this thread.
                 match apply_rx.recv_timeout(Duration::from_millis(POLL_MS)) {
-                    Ok(event) => {
+                    Ok(()) => {
+                        let Some(event) = PENDING_APPLY.lock().take() else {
+                            continue;
+                        };
                         match event {
-                            ClipboardEvent::Text(text) => {
+                            ApplyEvent::Files(paths) => {
+                                let fingerprint = file_fingerprint(&paths);
+                                match clipboard.set().file_list(&paths) {
+                                    Ok(()) => {
+                                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                        info!(count = paths.len(), "applied peer clipboard files");
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to apply peer clipboard files")
+                                    }
+                                }
+                            }
+                            ApplyEvent::Text(text) => {
                                 let fingerprint = ClipboardFingerprint::Text(text.clone());
-                                incoming_image = None;
                                 if let Err(e) = clipboard.set_text(text) {
                                     debug!(error = %e, "failed to apply peer clipboard text");
                                 } else {
@@ -287,52 +325,18 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                                     debug!("applied peer clipboard text (on watcher thread)");
                                 }
                             }
-                            ClipboardEvent::ImageStart {
-                                id,
-                                width,
-                                height,
-                                total_bytes,
-                            } => match IncomingImage::new(id, width, height, total_bytes) {
-                                Ok(image) => incoming_image = Some(image),
-                                Err(e) => {
-                                    incoming_image = None;
-                                    warn!(error = %e, "rejected peer clipboard image");
-                                }
-                            },
-                            ClipboardEvent::ImageChunk { id, offset, data } => {
-                                let accepted = incoming_image
-                                    .as_mut()
-                                    .is_some_and(|image| image.push(id, offset, &data).is_ok());
-                                if !accepted {
-                                    incoming_image = None;
-                                    warn!("rejected invalid peer clipboard image chunk");
-                                }
-                            }
-                            ClipboardEvent::ImageEnd { id } => {
-                                if let Some(image) = incoming_image.take() {
-                                    match image.finish(id) {
-                                        Ok(image) => {
-                                            let fingerprint = image_fingerprint(&image);
-                                            let width = image.width;
-                                            let height = image.height;
-                                            if let Err(e) = clipboard.set_image(image) {
-                                                debug!(
-                                                    error = %e,
-                                                    "failed to apply peer clipboard image"
-                                                );
-                                            } else {
-                                                *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                                                info!(
-                                                    width,
-                                                    height,
-                                                    "applied peer clipboard image"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!(error = %e, "rejected incomplete peer clipboard image");
-                                        }
-                                    }
+                            ApplyEvent::Image(image) => {
+                                let fingerprint = image_fingerprint(&image);
+                                let width = image.width;
+                                let height = image.height;
+                                if let Err(e) = clipboard.set_image(image) {
+                                    debug!(
+                                        error = %e,
+                                        "failed to apply peer clipboard image"
+                                    );
+                                } else {
+                                    *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                    info!(width, height, "applied peer clipboard image");
                                 }
                             }
                         }
@@ -345,6 +349,39 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         // The static holds the Sender for the process
                         // lifetime, so this is unreachable in practice;
                         // keep polling rather than killing the thread.
+                    }
+                }
+                // Explorer's native file list must not degrade to filename text.
+                if let Ok(paths) = clipboard.get().file_list()
+                    && !paths.is_empty()
+                {
+                    let fingerprint = file_fingerprint(&paths);
+                    if LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                        match crate::files::send_clipboard(paths, &runtime) {
+                            Ok(()) => *LAST_CLIPBOARD.lock() = Some(fingerprint),
+                            Err(e) => debug!(error = %e, "clipboard files not forwarded"),
+                        }
+                    }
+                    continue;
+                }
+                // Rich content wins over alternate text (e.g. an image's name).
+                match clipboard.get_image() {
+                    Ok(image) => {
+                        let fingerprint = image_fingerprint(&image);
+                        if LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                            let tx = REPLACE_TX_GUARD.lock().clone();
+                            if let Some(tx) = tx
+                                && send_image(&tx, image)
+                            {
+                                *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                            }
+                        }
+                        continue;
+                    }
+                    Err(arboard::Error::ContentNotAvailable) => {}
+                    Err(e) => {
+                        debug!(error = %e, "clipboard image poll error — continuing");
+                        continue;
                     }
                 }
                 let current_text = match clipboard.get_text() {
@@ -372,10 +409,7 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                     }
                     let tx = REPLACE_TX_GUARD.lock().clone();
                     if let Some(tx) = tx {
-                        if tx
-                            .blocking_send(ClipboardEvent::Text(current))
-                            .is_err()
-                        {
+                        if tx.blocking_send(ClipboardEvent::Text(current)).is_err() {
                             debug!("clipboard sink closed — waiting for next session");
                         } else {
                             *LAST_CLIPBOARD.lock() = Some(fingerprint);
@@ -383,30 +417,12 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                     }
                     continue;
                 }
-
-                let image = match clipboard.get_image() {
-                    Ok(image) => image,
-                    Err(arboard::Error::ContentNotAvailable) => continue,
-                    Err(e) => {
-                        debug!(error = %e, "clipboard image poll error — continuing");
-                        continue;
-                    }
-                };
-                let fingerprint = image_fingerprint(&image);
-                if LAST_CLIPBOARD.lock().as_ref() == Some(&fingerprint) {
-                    continue;
-                }
-                let tx = REPLACE_TX_GUARD.lock().clone();
-                if let Some(tx) = tx {
-                    if !send_image(&tx, image) {
-                        debug!("clipboard image sink closed — waiting for next session");
-                    } else {
-                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                    }
-                }
             }
-        })
-        .expect("spawn clipboard-watcher thread");
+        });
+    if let Err(e) = started {
+        drop(WatcherRunning);
+        warn!(error = %e, "clipboard watcher failed to start; will retry next session");
+    }
 }
 
 /// Apply a clipboard payload that arrived from the peer.
@@ -421,12 +437,49 @@ pub fn apply_from_peer(event: ClipboardEvent) -> Result<()> {
     if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
         return Ok(());
     }
+    // Assemble reliable TCP chunks before the bounded OS queue. A burst of
+    // chunks must never lose its tail merely because the watcher is busy.
+    let Some(event) = assemble_event(&mut INCOMING_IMAGE.lock(), event)? else {
+        return Ok(());
+    };
+    enqueue_apply(event)
+}
+
+fn file_fingerprint(paths: &[PathBuf]) -> ClipboardFingerprint {
+    ClipboardFingerprint::Files(
+        paths
+            .iter()
+            .map(|path| {
+                let metadata = std::fs::metadata(path).ok();
+                (
+                    path.clone(),
+                    metadata.as_ref().map_or(0, |m| m.len()),
+                    metadata.and_then(|m| m.modified().ok()),
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn apply_files_from_peer(paths: Vec<PathBuf>) -> Result<()> {
+    if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
+        return Ok(());
+    }
+    *INCOMING_IMAGE.lock() = None;
+    enqueue_apply(ApplyEvent::Files(paths))
+}
+
+fn enqueue_apply(event: ApplyEvent) -> Result<()> {
     let guard = APPLY_TX.lock();
     match guard.as_ref() {
         Some(tx) => {
-            // Unbounded std channel; send only fails if the watcher
-            // thread is gone, which doesn't happen in practice.
-            let _ = tx.send(event);
+            // Clipboard is a snapshot: retain only the newest COMPLETE payload.
+            // A full wake-up queue cannot discard any image chunks.
+            *PENDING_APPLY.lock() = Some(event);
+            match tx.try_send(()) {
+                Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
+                Err(e) => return Err(anyhow::anyhow!("clipboard apply queue unavailable: {e}")),
+            }
             debug!("queued peer clipboard event for watcher thread");
         }
         None => {
@@ -436,6 +489,46 @@ pub fn apply_from_peer(event: ClipboardEvent) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn assemble_event(
+    incoming: &mut Option<IncomingImage>,
+    event: ClipboardEvent,
+) -> Result<Option<ApplyEvent>> {
+    match event {
+        ClipboardEvent::Text(text) => {
+            *incoming = None;
+            Ok(Some(ApplyEvent::Text(text)))
+        }
+        ClipboardEvent::ImageStart {
+            id,
+            width,
+            height,
+            total_bytes,
+        } => {
+            *incoming = None;
+            *incoming = Some(IncomingImage::new(id, width, height, total_bytes)?);
+            Ok(None)
+        }
+        ClipboardEvent::ImageChunk { id, offset, data } => {
+            let result = incoming
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("image chunk without start"))?
+                .push(id, offset, &data);
+            if result.is_err() {
+                *incoming = None;
+            }
+            result?;
+            Ok(None)
+        }
+        ClipboardEvent::ImageEnd { id } => {
+            let image = incoming
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("image end without start"))?
+                .finish(id)?;
+            Ok(Some(ApplyEvent::Image(image)))
+        }
+    }
 }
 
 /// Holds the currently-active mpsc sender so the watcher can hand
@@ -449,6 +542,78 @@ pub const fn queue_capacity() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_burst_larger_than_old_queue_publishes_only_when_complete() {
+        let size = 1024 * 768 * 4;
+        let mut incoming = None;
+        assert!(
+            assemble_event(
+                &mut incoming,
+                ClipboardEvent::ImageStart {
+                    id: 41,
+                    width: 1024,
+                    height: 768,
+                    total_bytes: size as u64,
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        for offset in (0..size).step_by(IMAGE_CHUNK_BYTES) {
+            assert!(
+                assemble_event(
+                    &mut incoming,
+                    ClipboardEvent::ImageChunk {
+                        id: 41,
+                        offset: offset as u64,
+                        data: vec![123; IMAGE_CHUNK_BYTES.min(size - offset)],
+                    }
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let Some(ApplyEvent::Image(image)) =
+            assemble_event(&mut incoming, ClipboardEvent::ImageEnd { id: 41 }).unwrap()
+        else {
+            panic!("complete screenshot not published");
+        };
+        assert_eq!(image.bytes.len(), size);
+        assert!(image.bytes.iter().all(|v| *v == 123));
+        assert!(incoming.is_none());
+    }
+
+    #[test]
+    fn invalid_chunk_and_replacement_cancel_previous_image() {
+        let mut incoming = Some(IncomingImage::new(1, 1, 1, 4).unwrap());
+        assert!(
+            assemble_event(
+                &mut incoming,
+                ClipboardEvent::ImageChunk {
+                    id: 2,
+                    offset: 0,
+                    data: vec![0; 4]
+                }
+            )
+            .is_err()
+        );
+        assert!(incoming.is_none());
+        assert!(assemble_event(&mut incoming, ClipboardEvent::ImageEnd { id: 1 }).is_err());
+        incoming = Some(IncomingImage::new(1, 1, 1, 4).unwrap());
+        assert!(matches!(
+            assemble_event(&mut incoming, ClipboardEvent::Text("replacement".into())).unwrap(),
+            Some(ApplyEvent::Text(_))
+        ));
+        assert!(incoming.is_none());
+    }
+
+    #[test]
+    fn largest_clipboard_text_fits_noise_control_frame() {
+        let msg = crate::runtime::ControlMsg::ClipboardText("x".repeat(MAX_BYTES));
+        let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap();
+        assert!(payload.len() + 16 <= 65_535);
+    }
 
     #[test]
     fn image_transfer_reassembles_rgba_exactly() {

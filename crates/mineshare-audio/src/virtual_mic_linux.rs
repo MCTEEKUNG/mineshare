@@ -23,15 +23,22 @@
 //! `pulseaudio-utils` package we already require for `parec`.
 
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use tracing::{info, warn};
 
 use crate::codec::OpusDecoder;
-use crate::{AudioFrame, AudioPlayback, FRAME_SAMPLES_INTERLEAVED};
+use crate::{
+    AudioFrame, AudioPlayback, BackendState, BackendStatus, FRAME_SAMPLES_INTERLEAVED,
+    PlaybackSession,
+};
 
 /// PipeWire sink-name used both for `pactl load-module` and for
 /// pacat's `--device=` flag.
@@ -43,19 +50,67 @@ const SINK_NAME: &str = "mineshare_mic";
 /// `"foo bar"` and `foo\040bar`; both truncate). Hyphenated reads
 /// cleanly and survives the round trip intact.
 const SINK_DESCRIPTION: &str = "MineShare-Mic";
+const PIPEWIRE_PCM_QUEUE_CAPACITY: usize = 8;
+const PACAT_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
+fn pacat_rebuild_due(now: Instant, next_attempt: Instant) -> bool {
+    now >= next_attempt
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipewireQueueResult {
+    Queued,
+    Dropped,
+    Disconnected,
+}
+
+fn try_enqueue_pipewire<T>(tx: &std::sync::mpsc::SyncSender<T>, value: T) -> PipewireQueueResult {
+    match tx.try_send(value) {
+        Ok(()) => PipewireQueueResult::Queued,
+        Err(std::sync::mpsc::TrySendError::Full(_)) => PipewireQueueResult::Dropped,
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => PipewireQueueResult::Disconnected,
+    }
+}
 
 pub struct PipewireVirtualMic {
     /// Module index returned by `pactl load-module` — needed for
     /// the matching `pactl unload-module` on shutdown.
     module_index: Option<String>,
-    /// pacat subprocess we pipe decoded PCM into.
-    pacat: Mutex<Option<Child>>,
-    decoder: Mutex<OpusDecoder>,
-    /// Reused per-frame scratch buffer.
-    scratch: Mutex<Vec<f32>>,
-    /// Flips to true after the first failed write so we stop
-    /// spamming logs if pacat dies.
-    pacat_dead: AtomicBool,
+    writer_tx: Option<mpsc::SyncSender<QueuedPipewirePcm>>,
+    writer: Option<thread::JoinHandle<()>>,
+    pacat: Arc<Mutex<Option<Child>>>,
+    session: Arc<Mutex<PipewireSessionState>>,
+    stop: Arc<AtomicBool>,
+    status: BackendStatus,
+}
+
+struct QueuedPipewirePcm {
+    session: PlaybackSession,
+    bytes: Vec<u8>,
+}
+
+struct PipewireSessionState {
+    next_epoch: u64,
+    current: Option<PlaybackSession>,
+    decoder: Option<OpusDecoder>,
+    scratch: Vec<f32>,
+}
+
+fn pipewire_session_is_current(current: &PlaybackSession, candidate: &PlaybackSession) -> bool {
+    current.same_identity(candidate)
+}
+
+fn retire_pipewire_session(state: &mut PipewireSessionState, session: &PlaybackSession) -> bool {
+    if !state
+        .current
+        .as_ref()
+        .is_some_and(|current| pipewire_session_is_current(current, session))
+    {
+        return false;
+    }
+    state.current = None;
+    state.decoder = None;
+    true
 }
 
 impl PipewireVirtualMic {
@@ -100,39 +155,57 @@ impl PipewireVirtualMic {
             "PipeWire null-sink loaded for virtual mic"
         );
 
-        // Step 2: spawn pacat targeting the new sink. We feed it
-        // raw f32 LE 48 kHz stereo and it forwards into PipeWire.
-        let pacat = Command::new("pacat")
-            .args([
-                &format!("--device={SINK_NAME}"),
-                "--format=float32le",
-                "--rate=48000",
-                "--channels=2",
-                "--latency-msec=20",
-                "--raw",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn `pacat` for virtual-mic playback")?;
-        info!(sink = SINK_NAME, "pacat playback into virtual mic started");
+        let (writer_tx, writer_rx) = mpsc::sync_channel(PIPEWIRE_PCM_QUEUE_CAPACITY);
+        let pacat = Arc::new(Mutex::new(None));
+        let session = Arc::new(Mutex::new(PipewireSessionState {
+            next_epoch: 0,
+            current: None,
+            decoder: Some(OpusDecoder::new()?),
+            scratch: vec![0f32; FRAME_SAMPLES_INTERLEAVED],
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let status = BackendStatus::new(BackendState::Idle);
+        let writer = thread::Builder::new()
+            .name("pipewire-virtual-mic-writer".into())
+            .spawn({
+                let pacat = pacat.clone();
+                let session = session.clone();
+                let stop = stop.clone();
+                let status = status.clone();
+                move || run_pacat_writer(writer_rx, pacat, session, stop, status)
+            });
+        let writer = match writer {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = Command::new("pactl")
+                    .args(["unload-module", &module_index])
+                    .status();
+                return Err(error).context("spawn PipeWire virtual-mic writer");
+            }
+        };
 
         Ok(Self {
             module_index: Some(module_index),
-            pacat: Mutex::new(Some(pacat)),
-            decoder: Mutex::new(OpusDecoder::new()?),
-            scratch: Mutex::new(vec![0f32; FRAME_SAMPLES_INTERLEAVED]),
-            pacat_dead: AtomicBool::new(false),
+            writer_tx: Some(writer_tx),
+            writer: Some(writer),
+            pacat,
+            session,
+            stop,
+            status,
         })
     }
 }
 
 impl Drop for PipewireVirtualMic {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.writer_tx.take();
         if let Some(mut child) = self.pacat.lock().take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
         }
         if let Some(idx) = self.module_index.take() {
             let _ = Command::new("pactl").args(["unload-module", &idx]).status();
@@ -142,35 +215,179 @@ impl Drop for PipewireVirtualMic {
 }
 
 impl AudioPlayback for PipewireVirtualMic {
-    fn enqueue(&self, frame: AudioFrame) -> Result<()> {
-        if self.pacat_dead.load(Ordering::Relaxed) {
-            // pacat already terminated; silently drop further frames
-            // rather than log-flooding.
+    fn backend_status(&self) -> BackendStatus {
+        self.status.clone()
+    }
+
+    fn begin_session(&self) -> PlaybackSession {
+        let mut state = self.session.lock();
+        state.next_epoch = state.next_epoch.wrapping_add(1);
+        let session = PlaybackSession::new(state.next_epoch);
+        state.current = Some(session.clone());
+        state.decoder = None;
+        session
+    }
+
+    fn end_session(&self, session: &PlaybackSession) {
+        retire_pipewire_session(&mut self.session.lock(), session);
+    }
+
+    fn enqueue(&self, session: &PlaybackSession, frame: AudioFrame) -> Result<()> {
+        let mut state = self.session.lock();
+        if !state
+            .current
+            .as_ref()
+            .is_some_and(|current| pipewire_session_is_current(current, session))
+        {
             return Ok(());
         }
-        let mut scratch = self.scratch.lock();
-        let n = self.decoder.lock().decode(&frame.opus, &mut scratch)?;
+        if state.decoder.is_none() {
+            state.decoder = Some(OpusDecoder::new()?);
+        }
+        let PipewireSessionState {
+            decoder, scratch, ..
+        } = &mut *state;
+        let n = decoder
+            .as_mut()
+            .expect("session decoder initialized above")
+            .decode(&frame.opus, scratch)?;
         let pcm = &scratch[..n];
 
         // Reinterpret f32 slice as little-endian bytes for pacat's
         // `--format=float32le`. f32 is LE on every platform we ship.
-        let bytes: &[u8] = bytemuck_le_f32(pcm);
+        let bytes = bytemuck_le_f32(pcm).to_vec();
+        drop(state);
 
-        let mut pacat_guard = self.pacat.lock();
-        let Some(pacat) = pacat_guard.as_mut() else {
-            return Ok(());
+        let Some(writer_tx) = self.writer_tx.as_ref() else {
+            self.status.set(BackendState::Degraded);
+            anyhow::bail!("PipeWire virtual-mic writer is unavailable");
         };
-        let stdin = pacat
-            .stdin
-            .as_mut()
-            .context("pacat stdin missing — child terminated")?;
-        if let Err(e) = stdin.write_all(bytes) {
-            warn!(error = %e, "pacat stdin write failed — virtual mic disabled until restart");
-            self.pacat_dead.store(true, Ordering::Relaxed);
-            return Err(e.into());
+        match try_enqueue_pipewire(
+            writer_tx,
+            QueuedPipewirePcm {
+                session: session.clone(),
+                bytes,
+            },
+        ) {
+            PipewireQueueResult::Queued | PipewireQueueResult::Dropped => Ok(()),
+            PipewireQueueResult::Disconnected => {
+                self.status.set(BackendState::Degraded);
+                anyhow::bail!("PipeWire virtual-mic writer terminated")
+            }
         }
-        Ok(())
     }
+}
+
+fn spawn_pacat() -> Result<(Child, ChildStdin)> {
+    let mut child = Command::new("pacat")
+        .args([
+            &format!("--device={SINK_NAME}"),
+            "--format=float32le",
+            "--rate=48000",
+            "--channels=2",
+            "--latency-msec=20",
+            "--raw",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn `pacat` for virtual-mic playback")?;
+    let stdin = child.stdin.take().context("pacat stdin pipe missing")?;
+    Ok((child, stdin))
+}
+
+fn stop_shared_pacat(pacat: &Mutex<Option<Child>>) {
+    if let Some(mut child) = pacat.lock().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn run_pacat_writer(
+    rx: mpsc::Receiver<QueuedPipewirePcm>,
+    pacat: Arc<Mutex<Option<Child>>>,
+    session: Arc<Mutex<PipewireSessionState>>,
+    stop: Arc<AtomicBool>,
+    status: BackendStatus,
+) {
+    let mut stdin: Option<ChildStdin> = None;
+    let mut next_build_attempt = Instant::now();
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let queued = match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(queued) => queued,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if session.lock().current.is_none() && stdin.is_some() {
+                    stdin = None;
+                    stop_shared_pacat(&pacat);
+                    status.set(BackendState::Idle);
+                    info!("idle PipeWire virtual-mic writer released pacat");
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let is_current = session
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|current| pipewire_session_is_current(current, &queued.session));
+        if !is_current {
+            continue;
+        }
+
+        if stdin.is_none() {
+            if !pacat_rebuild_due(Instant::now(), next_build_attempt) {
+                continue;
+            }
+            status.set(BackendState::Starting);
+            match spawn_pacat() {
+                Ok((mut child, next_stdin)) => {
+                    if stop.load(Ordering::Acquire) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    *pacat.lock() = Some(child);
+                    stdin = Some(next_stdin);
+                    status.set(BackendState::Active);
+                    info!(sink = SINK_NAME, "pacat playback into virtual mic started");
+                }
+                Err(error) => {
+                    status.set(BackendState::Degraded);
+                    next_build_attempt = Instant::now() + PACAT_RETRY_BACKOFF;
+                    warn!(%error, "pacat build failed — retrying after bounded backoff");
+                    continue;
+                }
+            }
+        }
+
+        let still_current = session
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|current| pipewire_session_is_current(current, &queued.session));
+        if !still_current {
+            continue;
+        }
+        if let Some(writer) = stdin.as_mut()
+            && let Err(error) = writer.write_all(&queued.bytes)
+        {
+            warn!(%error, "pacat stdin write failed — rebuilding after bounded backoff");
+            status.set(BackendState::Degraded);
+            stdin = None;
+            stop_shared_pacat(&pacat);
+            next_build_attempt = Instant::now() + PACAT_RETRY_BACKOFF;
+        }
+    }
+
+    drop(stdin);
+    stop_shared_pacat(&pacat);
+    status.set(BackendState::Stopped);
 }
 
 /// Find any leftover `module-null-sink sink_name=mineshare_mic` from
@@ -210,5 +427,54 @@ fn bytemuck_le_f32(samples: &[f32]) -> &[u8] {
             samples.as_ptr() as *const u8,
             std::mem::size_of_val(samples),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const _: () = assert!(PIPEWIRE_PCM_QUEUE_CAPACITY <= 8);
+
+    #[test]
+    fn pacat_rebuild_waits_for_bounded_backoff() {
+        let now = std::time::Instant::now();
+        assert!(!pacat_rebuild_due(now, now + PACAT_RETRY_BACKOFF));
+        assert!(pacat_rebuild_due(
+            now + PACAT_RETRY_BACKOFF,
+            now + PACAT_RETRY_BACKOFF
+        ));
+    }
+
+    #[test]
+    fn pipewire_writer_queue_is_bounded_and_nonblocking() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        assert_eq!(try_enqueue_pipewire(&tx, 1), PipewireQueueResult::Queued);
+        assert_eq!(try_enqueue_pipewire(&tx, 2), PipewireQueueResult::Dropped);
+    }
+
+    #[test]
+    fn equal_epoch_from_another_pipewire_backend_is_not_current() {
+        let current = PlaybackSession::new(4);
+        let foreign = PlaybackSession::new(4);
+
+        assert!(!pipewire_session_is_current(&current, &foreign));
+    }
+
+    #[test]
+    fn ending_current_pipewire_session_resets_decoder_only_once() {
+        let session = PlaybackSession::new(8);
+        let mut state = PipewireSessionState {
+            next_epoch: 8,
+            current: Some(session.clone()),
+            decoder: Some(OpusDecoder::new().expect("create test decoder")),
+            scratch: vec![0.0; FRAME_SAMPLES_INTERLEAVED],
+        };
+
+        assert!(retire_pipewire_session(&mut state, &session));
+        assert!(state.current.is_none());
+        assert!(state.decoder.is_none());
+        assert!(!retire_pipewire_session(&mut state, &session));
+        assert_eq!(state.next_epoch, 8);
     }
 }

@@ -34,7 +34,19 @@ use crate::identity::Identity;
 use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
+const STANDBY_RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+static SESSIONS: crate::session::Sessions = crate::session::Sessions::new();
 static LOCAL_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
+
+fn reconnect_initial_delay(local_id: DeviceId, peer_id: DeviceId) -> Duration {
+    if local_id.0 < peer_id.0 {
+        Duration::ZERO
+    } else {
+        STANDBY_RECONNECT_DELAY
+    }
+}
 
 /// Echo-loop guard: the peer's *sysout* coming out of our speakers
 /// is what our own loopback re-captures and would forward back as a
@@ -56,6 +68,41 @@ const ECHO_TRIGGER_MIN_BYTES: usize = 12;
 const DTX_COMFORT_NOISE_MAX_BYTES: usize = 3;
 static LAST_PEER_SYSOUT_AT_MS: AtomicU64 = AtomicU64::new(0);
 
+fn legacy_echo_guard_policy(
+    is_windows: bool,
+    stream: mineshare_audio::StreamKind,
+    opus_bytes: usize,
+    route_enabled: bool,
+    enqueue_accepted: bool,
+) -> bool {
+    !is_windows
+        && matches!(stream, mineshare_audio::StreamKind::SysOut)
+        && opus_bytes >= ECHO_TRIGGER_MIN_BYTES
+        && route_enabled
+        && enqueue_accepted
+}
+
+fn should_arm_sysout_echo_guard(
+    stream: mineshare_audio::StreamKind,
+    opus_bytes: usize,
+    route_enabled: bool,
+    enqueue_accepted: bool,
+) -> bool {
+    legacy_echo_guard_policy(
+        cfg!(target_os = "windows"),
+        stream,
+        opus_bytes,
+        route_enabled,
+        enqueue_accepted,
+    )
+}
+
+fn should_suppress_outbound_sysout(last_peer_sysout_ms: u64, current_ms: u64) -> bool {
+    !cfg!(target_os = "windows")
+        && last_peer_sysout_ms != 0
+        && current_ms.saturating_sub(last_peer_sysout_ms) < ECHO_GUARD_MS
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,9 +114,10 @@ fn now_ms() -> u64 {
 ///
 /// Windows input injection can briefly block while low-level hooks process a
 /// `SendInput` call. Keeping that work in the socket reader turns a normal
-/// network delivery burst into a long queue of stale mouse moves, with key
+/// network delivery burst into a long queue of stale pointer updates, with key
 /// events trapped behind them. The dedicated worker keeps draining UDP at
-/// network speed and merges only adjacent mouse deltas before dispatch.
+/// network speed and coalesces each continuous pointer lane until the next
+/// discrete input barrier.
 struct InjectDispatcher {
     queue: Arc<InjectQueue>,
     worker: Option<thread::JoinHandle<()>>,
@@ -137,6 +185,32 @@ fn can_merge_wire_motion(merged_samples: usize) -> bool {
     merged_samples < MAX_WIRE_MOTION_MERGE
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointerLane {
+    Mouse,
+    Touchpad(u32),
+}
+
+fn pointer_lane(event: InputEvent) -> Option<PointerLane> {
+    match event {
+        InputEvent::MouseMove { .. } => Some(PointerLane::Mouse),
+        InputEvent::Touchpad(event) => event.coalescible_stream().map(PointerLane::Touchpad),
+        InputEvent::MouseButton { .. } | InputEvent::Key { .. } | InputEvent::Scroll { .. } => None,
+    }
+}
+
+fn trailing_pointer_lane_index(
+    pending: &VecDeque<PendingInject>,
+    wanted: PointerLane,
+) -> Option<usize> {
+    pending
+        .iter()
+        .enumerate()
+        .rev()
+        .take_while(|(_, entry)| pointer_lane(entry.event).is_some())
+        .find_map(|(index, entry)| (pointer_lane(entry.event) == Some(wanted)).then_some(index))
+}
+
 impl InjectSender {
     fn send(&self, event: InputEvent) -> std::result::Result<(), &'static str> {
         if self.queue.stopped.load(Ordering::Acquire) {
@@ -147,37 +221,37 @@ impl InjectSender {
             return Err("input inject queue stopped");
         }
         let was_empty = pending.is_empty();
-        match (pending.back_mut(), event) {
-            (
-                Some(PendingInject {
-                    event: InputEvent::MouseMove { dx, dy },
-                    merged_motion,
-                }),
-                InputEvent::MouseMove {
-                    dx: next_dx,
-                    dy: next_dy,
-                },
-            ) => {
-                *dx = dx.saturating_add(next_dx);
-                *dy = dy.saturating_add(next_dy);
-                *merged_motion = true;
+        let mut coalesced = false;
+        if let Some(lane) = pointer_lane(event)
+            && let Some(index) = trailing_pointer_lane_index(&pending, lane)
+        {
+            let entry = &mut pending[index];
+            match (&mut entry.event, event) {
+                (
+                    InputEvent::MouseMove { dx, dy },
+                    InputEvent::MouseMove {
+                        dx: next_dx,
+                        dy: next_dy,
+                    },
+                ) => {
+                    *dx = dx.saturating_add(next_dx);
+                    *dy = dy.saturating_add(next_dy);
+                    entry.merged_motion = true;
+                    coalesced = true;
+                }
+                (InputEvent::Touchpad(current), InputEvent::Touchpad(next)) => {
+                    *current = next;
+                    entry.merged_motion = false;
+                    coalesced = true;
+                }
+                _ => {}
             }
-            (
-                Some(PendingInject {
-                    event: InputEvent::Touchpad(current),
-                    merged_motion,
-                }),
-                InputEvent::Touchpad(next),
-            ) if current.coalescible_stream().is_some()
-                && current.coalescible_stream() == next.coalescible_stream() =>
-            {
-                *current = next;
-                *merged_motion = false;
-            }
-            (_, event) => pending.push_back(PendingInject {
+        }
+        if !coalesced {
+            pending.push_back(PendingInject {
                 event,
                 merged_motion: false,
-            }),
+            });
         }
         drop(pending);
         if was_empty {
@@ -240,10 +314,10 @@ impl InjectDispatcher {
         self.queue.stopped.store(true, Ordering::Release);
         self.queue.wake.notify_all();
         drop(pending);
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                warn!("input inject worker panicked during shutdown");
-            }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            warn!("input inject worker panicked during shutdown");
         }
     }
 }
@@ -314,7 +388,9 @@ struct PortAnnounce {
 /// cursor).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMsg {
-    TakeControl,
+    TakeControl {
+        epoch: u64,
+    },
     ReleaseControl,
     /// Peer is requesting that *we* leave Remote (their hotkey was
     /// pressed while we held Remote). We should call
@@ -370,10 +446,10 @@ pub enum ControlMsg {
     /// timestamp on both legs avoids any need for clock sync
     /// between peers.
     Ping {
-        ts_ms: u64,
+        ts_us: u64,
     },
     Pong {
-        ts_ms: u64,
+        ts_us: u64,
     },
     /// Activity beacon driving the Smart keyboard target. Each side
     /// periodically advertises `last_input_ago_ms` — ms since its
@@ -423,7 +499,12 @@ pub enum ControlMsg {
     /// inject our pure-relative input and suppress its own cursor-crossing.
     GameDrive {
         active: bool,
+        epoch: u64,
     },
+    /// IDs of verified FileEnd transfers to publish as a native file clipboard.
+    ClipboardFiles(Vec<u64>),
+    InputLockRequest(mineshare_input::LockRequest),
+    InputLockReply(mineshare_input::LockReply),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,16 +556,26 @@ enum WireFrame {
 #[derive(Default)]
 struct InputReceiveOrdering {
     last_event_seq: Option<u64>,
+    last_held_state_event_seq: Option<u64>,
     last_snapshot_seq: Option<u64>,
-    event_floor: u64,
+    held_state_event_floor: u64,
 }
 
 impl InputReceiveOrdering {
-    fn accept_event(&mut self, seq: u64) -> bool {
-        if seq < self.event_floor || self.last_event_seq.is_some_and(|last| seq <= last) {
+    fn accept_event(&mut self, seq: u64, event: InputEvent) -> bool {
+        let changes_held_state = matches!(
+            event,
+            InputEvent::Key { .. } | InputEvent::MouseButton { .. }
+        );
+        if self.last_event_seq.is_some_and(|last| seq <= last)
+            || (changes_held_state && seq < self.held_state_event_floor)
+        {
             return false;
         }
         self.last_event_seq = Some(seq);
+        if changes_held_state {
+            self.last_held_state_event_seq = Some(seq);
+        }
         true
     }
 
@@ -493,15 +584,30 @@ impl InputReceiveOrdering {
             return false;
         }
         self.last_snapshot_seq = Some(seq);
-        self.event_floor = self.event_floor.max(after_input_seq);
+        self.held_state_event_floor = self.held_state_event_floor.max(after_input_seq);
 
-        // A snapshot only describes events below `after_input_seq`. If a
-        // newer event already arrived, applying this older state could undo a
-        // key-up and briefly re-stick the key. A later snapshot will heal any
-        // edge that was genuinely lost.
-        self.last_event_seq
+        // Held-input snapshots do not describe pointer motion, touchpad
+        // contacts, or scroll. Those high-rate packets must not invalidate a
+        // Shift/button repair merely because they arrived first. Only a newer
+        // key/button edge can make the snapshot stale for held-state purposes.
+        self.last_held_state_event_seq
             .is_none_or(|last| last < after_input_seq)
     }
+}
+
+const INPUT_STATE_HEARTBEAT_TICKS: u8 = 20;
+
+fn should_send_input_state(
+    changed: bool,
+    any_held: bool,
+    repeats_remaining: u8,
+    heartbeat_due: bool,
+) -> bool {
+    changed || any_held || repeats_remaining > 0 || heartbeat_due
+}
+
+fn retry_stale_owned_input(inject: &dyn InputInject) -> Result<()> {
+    inject.release_all_held()
 }
 
 /// A snapshot can observe a freshly-held key just before the sender's input
@@ -704,6 +810,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         info!("audio sysout capture disabled");
         None
     };
+    let sysout_capture_status = audio_cap_started
+        .as_ref()
+        .map(|capture| capture.backend_status())
+        .unwrap_or_default();
     let _audio_cap_alive = audio_cap_started;
 
     // --- Mic capture (M3 Slice 3) --------------------------------------
@@ -736,6 +846,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     } else {
         None
     };
+    let mic_capture_status = mic_cap_started
+        .as_ref()
+        .map(|capture| capture.backend_status())
+        .unwrap_or_default();
     let _mic_cap_alive = mic_cap_started;
 
     let bcast_for_audio_drain = wire_bcast.clone();
@@ -774,7 +888,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
             // forward them unconditionally.
             if matches!(frame.stream, mineshare_audio::StreamKind::SysOut) {
                 let last = LAST_PEER_SYSOUT_AT_MS.load(Ordering::Relaxed);
-                if last != 0 && now_ms().saturating_sub(last) < ECHO_GUARD_MS {
+                if should_suppress_outbound_sysout(last, now_ms()) {
                     continue;
                 }
             }
@@ -877,6 +991,13 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         Arc::new(NullPlayback)
     };
 
+    crate::audio_status::install_backend_statuses(
+        sysout_capture_status,
+        playback.backend_status(),
+        mic_capture_status,
+        mic_playback.backend_status(),
+    );
+
     // --- Control listener -------------------------------------------------
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -978,7 +1099,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     );
                 }
 
-                if local_id.0 < peer.device_id.0 {
+                {
                     // in_flight guard does double duty:
                     //   * dedupes concurrent spawns (duplicate mDNS events), and
                     //   * lets a re-announce RE-ARM the dial when the previous
@@ -1005,11 +1126,16 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     let known_for_loop = known.clone();
                     let in_flight_for_loop = in_flight.clone();
                     let peer_id = peer.device_id;
+                    let initial_delay = reconnect_initial_delay(local_id, peer_id);
                     // Reconnect loop: redial after each session ends as long
                     // as the peer is still in `known_peers` (mDNS hasn't
                     // observed it dropping). This is what keeps us
                     // reconnecting after the peer's daemon restarts.
                     tokio::spawn(async move {
+                        if !initial_delay.is_zero() {
+                            debug!(peer = %peer_id, ?initial_delay, "standby reconnect armed");
+                            tokio::time::sleep(initial_delay).await;
+                        }
                         loop {
                             let peer_now = {
                                 let k = known_for_loop.lock();
@@ -1022,6 +1148,13 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                     }
                                 }
                             };
+                            // The lower device id normally dials first. The
+                            // other side is a failover for one-sided mDNS and
+                            // must stay idle while either session is healthy.
+                            if crate::status::peer_connected() {
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                continue;
+                            }
                             match dial_and_run(
                                 &peer_now,
                                 &init_static,
@@ -1042,8 +1175,6 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     });
-                } else {
-                    debug!(peer = %peer.device_id, "deferring handshake — peer will initiate");
                 }
             }
             DiscoveryEvent::PeerOffline(id) => {
@@ -1067,9 +1198,14 @@ async fn accept_loop(
     input_bcast: broadcast::Sender<InputEvent>,
     bcast: broadcast::Sender<WireFrame>,
 ) {
+    let handshakes = Arc::new(tokio::sync::Semaphore::new(8));
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+                    debug!(%addr, "too many pending peer connections");
+                    continue;
+                };
                 debug!(%addr, "incoming connection");
                 let key = static_priv.clone();
                 let identity = identity.clone();
@@ -1079,6 +1215,7 @@ async fn accept_loop(
                 let input_bcast = input_bcast.clone();
                 let bcast = bcast.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_inbound(
                         stream,
                         &key,
@@ -1115,8 +1252,11 @@ async fn handle_inbound(
     bcast: broadcast::Sender<WireFrame>,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
+    stream.set_nodelay(true)?;
     let mut resp = Responder::new(static_priv)?;
-    let session = resp.handshake(&mut stream).await?;
+    let session = tokio::time::timeout(SETUP_TIMEOUT, resp.handshake(&mut stream))
+        .await
+        .context("inbound Noise handshake timed out")??;
     info!(
         %peer_addr,
         peer_pub = %hex_short(&session.remote_static),
@@ -1182,8 +1322,11 @@ async fn dial_and_run(
             )
         })?
     };
+    stream.set_nodelay(true)?;
     let mut init = Initiator::new(static_priv)?;
-    let session = init.handshake(&mut stream).await?;
+    let session = tokio::time::timeout(SETUP_TIMEOUT, init.handshake(&mut stream))
+        .await
+        .context("outbound Noise handshake timed out")??;
     info!(
         peer = %peer.device_id,
         peer_pub = %hex_short(&session.remote_static),
@@ -1224,6 +1367,12 @@ async fn run_peer_session(
     let peer_static = session.remote_static;
     let local_wins_control_collision =
         identity.noise_static_pub.as_slice() < peer_static.as_slice();
+    let mut claim = SESSIONS.claim(&peer_static, is_initiator == local_wins_control_collision)?;
+    let _lifetime = tokio::select! {
+        biased;
+        _ = claim.cancelled() => anyhow::bail!("duplicate session superseded"),
+        guard = SESSIONS.lifetime.lock() => guard,
+    };
     let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
@@ -1257,16 +1406,20 @@ async fn run_peer_session(
     // we let them past the handshake.
     if !crate::trust::is_trusted(&peer_static) {
         info!(%peer_addr, "peer not in trust list — running PIN pairing");
-        match pair_peer(
+        let pairing = pair_peer(
             &mut stream,
             &aead,
             &peer_static,
             peer_addr,
             is_initiator,
             &identity,
-        )
-        .await
-        {
+        );
+        let pairing_result = tokio::select! {
+            biased;
+            _ = claim.cancelled() => anyhow::bail!("pairing superseded by preferred connection"),
+            result = pairing => result,
+        };
+        match pairing_result {
             Ok(peer_id) => {
                 info!(peer_device = %peer_id.0, "pairing succeeded");
                 crate::pairing::set_phase(crate::pairing::PairingPhase::Trusted {
@@ -1311,8 +1464,6 @@ async fn run_peer_session(
         }
     }
 
-    crate::status::set_peer_connected(peer_addr.to_string(), None);
-
     let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
     let local_udp_port = udp.local_addr()?.port();
     debug!(local_udp_port, "local UDP socket bound for peer");
@@ -1325,8 +1476,29 @@ async fn run_peer_session(
         screen_h: local_h,
         touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire),
     };
-    write_encrypted(&mut stream, &aead, &announce).await?;
-    let peer_announce: PortAnnounce = read_encrypted(&mut stream, &aead).await?;
+    let exchange = async {
+        write_encrypted(&mut stream, &aead, &announce).await?;
+        read_encrypted::<_, PortAnnounce>(&mut stream, &aead).await
+    };
+    let peer_announce = tokio::select! {
+        biased;
+        _ = claim.cancelled() => anyhow::bail!("session setup superseded"),
+        result = tokio::time::timeout(SETUP_TIMEOUT, exchange) =>
+            result.context("peer port exchange timed out")??,
+    };
+    anyhow::ensure!(
+        peer_announce.udp_port != 0,
+        "peer announced an invalid UDP port"
+    );
+    let stats = Arc::new(SessionStats::default());
+    anyhow::ensure!(
+        crate::compatible_control_build(&peer_announce.daemon_version),
+        "incompatible control protocol: update MineShare on both PCs before reconnecting"
+    );
+    // Complete all fallible setup before publishing shared session state or
+    // spawning workers. Otherwise a `?` skips teardown and strands the bridge.
+    let inject_dispatcher = InjectDispatcher::start(inject.clone(), stats.clone())?;
+    crate::status::set_peer_connected(peer_addr.to_string(), None);
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
     mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
     mineshare_input::set_peer_touchpad_capabilities(peer_announce.touchpad_capabilities);
@@ -1353,11 +1525,12 @@ async fn run_peer_session(
         "input UDP channel established"
     );
 
-    // Playback workers outlive individual peer connections. A restarted peer
-    // begins its audio sequence counters at zero, so explicitly establish a
-    // new receive epoch before this session can enqueue its first frame.
-    playback.reset_session();
-    mic_playback.reset_session();
+    // A failed cleanup from the previous connection intentionally retains
+    // MineShare ownership for retry. Do that retry before any task for this
+    // trusted session can receive or inject a new edge.
+    if let Err(e) = retry_stale_owned_input(inject.as_ref()) {
+        warn!(error = %e, "failed to retry stale input cleanup on reconnect");
+    }
 
     // Split the TCP stream so we can run a writer task (forwarding
     // RemoteEvent → ControlMsg) and a reader task (receiving the peer's
@@ -1370,7 +1543,6 @@ async fn run_peer_session(
     // none starves the others.
     let (rev_tx, mut rev_rx) =
         tokio::sync::mpsc::unbounded_channel::<mineshare_input::RemoteEvent>();
-    mineshare_input::set_remote_event_sender(rev_tx);
     let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<crate::clipboard::ClipboardEvent>(
         crate::clipboard::queue_capacity(),
     );
@@ -1386,20 +1558,22 @@ async fn run_peer_session(
     let (file_tx, mut file_rx) =
         tokio::sync::mpsc::channel::<ControlMsg>(crate::files::file_queue_capacity());
     let aead_writer = aead.clone_handle();
-    let writer_handle = tokio::spawn(async move {
+    let mut writer_handle = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
                 biased;
                 ev = rev_rx.recv() => match ev {
-                    Some(mineshare_input::RemoteEvent::Entered) => ControlMsg::TakeControl,
+                    Some(mineshare_input::RemoteEvent::Entered { epoch }) => ControlMsg::TakeControl { epoch },
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
                     Some(mineshare_input::RemoteEvent::RequestPeerExit) => ControlMsg::ForceRelease,
-                    Some(mineshare_input::RemoteEvent::GameDriveStart) => {
-                        ControlMsg::GameDrive { active: true }
+                    Some(mineshare_input::RemoteEvent::GameDriveStart { epoch }) => {
+                        ControlMsg::GameDrive { active: true, epoch }
                     }
                     Some(mineshare_input::RemoteEvent::GameDriveStop) => {
-                        ControlMsg::GameDrive { active: false }
+                        ControlMsg::GameDrive { active: false, epoch: 0 }
                     }
+                    Some(mineshare_input::RemoteEvent::InputLockRequest(request)) => ControlMsg::InputLockRequest(request),
+                    Some(mineshare_input::RemoteEvent::InputLockReply(reply)) => ControlMsg::InputLockReply(reply),
                     None => break,
                 },
                 rtt = rtt_rx.recv() => match rtt {
@@ -1444,7 +1618,8 @@ async fn run_peer_session(
                 warn!(error = %e, "control writer failed — peer probably disconnected");
                 break;
             }
-            debug!(?msg, "sent ControlMsg");
+            // Do not log clipboard text, file data, or pairing payloads.
+            debug!(kind = ?std::mem::discriminant(&msg), "sent ControlMsg");
         }
     });
 
@@ -1472,8 +1647,8 @@ async fn run_peer_session(
         // an early sample so the GUI shows non-zero stats fast.
         loop {
             tick.tick().await;
-            let ts_ms = crate::latency::now_ms();
-            if ping_tx.send(ControlMsg::Ping { ts_ms }).is_err() {
+            let ts_us = crate::latency::now_us();
+            if ping_tx.send(ControlMsg::Ping { ts_us }).is_err() {
                 // Writer task is gone → session ended; bail out.
                 break;
             }
@@ -1532,10 +1707,16 @@ async fn run_peer_session(
     let aead_reader = aead.clone_handle();
     let inject_for_reader = inject.clone();
     let pong_tx = rtt_tx.clone();
-    let reader_handle = tokio::spawn(async move {
+    let mut reader_handle = tokio::spawn(async move {
         loop {
-            match read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader).await {
-                Ok(ControlMsg::TakeControl) => {
+            let received = tokio::time::timeout(
+                CONTROL_IDLE_TIMEOUT,
+                read_encrypted::<_, ControlMsg>(&mut tcp_read, &aead_reader),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("control heartbeat timed out")));
+            match received {
+                Ok(ControlMsg::TakeControl { epoch }) => {
                     let action = control_collision_action(
                         mineshare_input::local_in_remote(),
                         local_wins_control_collision,
@@ -1544,6 +1725,7 @@ async fn run_peer_session(
                         ControlCollisionAction::AcceptPeer => {
                             info!("peer took Remote control");
                             mineshare_input::set_peer_in_remote(true);
+                            mineshare_input::note_peer_control(epoch);
                             // Warp our cursor to the boundary edge so the peer's
                             // virt_x model lines up with the real cursor position
                             // — otherwise their exit threshold fires after a tiny
@@ -1562,6 +1744,7 @@ async fn run_peer_session(
                             warn!("simultaneous cursor handover — yielding to peer");
                             mineshare_input::force_local_exit_remote();
                             mineshare_input::set_peer_in_remote(true);
+                            mineshare_input::note_peer_control(epoch);
                             mineshare_input::on_peer_take_control(&*inject_for_reader);
                         }
                     }
@@ -1580,12 +1763,14 @@ async fn run_peer_session(
                         warn!(error = %e, "failed to release peer input on forced handback");
                     }
                 }
-                Ok(ControlMsg::GameDrive { active }) => {
+                Ok(ControlMsg::GameDrive { active, epoch }) => {
                     if active {
                         mineshare_input::set_game_drive(mineshare_input::GameDrive::Receiving);
+                        mineshare_input::note_peer_control(epoch);
                         info!("game-drive: peer started driving — receiving");
                     } else {
                         mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
+                        mineshare_input::end_peer_control();
                         // Drop any keys/buttons the peer left held so WASD
                         // doesn't stick when the game session ends.
                         if let Err(e) = inject_for_reader.release_all_held() {
@@ -1594,11 +1779,23 @@ async fn run_peer_session(
                         info!("game-drive: peer stopped driving");
                     }
                 }
+                Ok(ControlMsg::InputLockRequest(request)) => {
+                    let reply = mineshare_input::receive_lock_request(request);
+                    let _ = pong_tx.send(ControlMsg::InputLockReply(reply));
+                }
+                Ok(ControlMsg::InputLockReply(reply)) => mineshare_input::receive_lock_reply(reply),
                 Ok(ControlMsg::ClipboardText(text)) => {
                     if let Err(e) = crate::clipboard::apply_from_peer(
                         crate::clipboard::ClipboardEvent::Text(text),
                     ) {
                         warn!(error = %e, "failed to apply peer clipboard");
+                    }
+                }
+                Ok(ControlMsg::ClipboardFiles(ids)) => {
+                    if let Err(e) = crate::files::received_clipboard_paths(&ids)
+                        .and_then(crate::clipboard::apply_files_from_peer)
+                    {
+                        warn!(error = %e, "failed to apply peer clipboard files");
                     }
                 }
                 Ok(ControlMsg::ClipboardImageStart {
@@ -1656,16 +1853,15 @@ async fn run_peer_session(
                     // log + ignore.
                     warn!("received pairing message mid-session — ignored");
                 }
-                Ok(ControlMsg::Ping { ts_ms }) => {
+                Ok(ControlMsg::Ping { ts_us }) => {
                     // Echo it straight back; the peer's writer will
                     // measure round-trip from its own clock. Failure
                     // to send means the writer task is gone — fine,
                     // session is winding down anyway.
-                    let _ = pong_tx.send(ControlMsg::Pong { ts_ms });
+                    let _ = pong_tx.send(ControlMsg::Pong { ts_us });
                 }
-                Ok(ControlMsg::Pong { ts_ms }) => {
-                    let now = crate::latency::now_ms();
-                    let rtt = now.saturating_sub(ts_ms) as f32;
+                Ok(ControlMsg::Pong { ts_us }) => {
+                    let rtt = crate::latency::elapsed_ms(ts_us, crate::latency::now_us());
                     crate::latency::record_rtt_ms(rtt);
                 }
                 Ok(ControlMsg::FileOffer {
@@ -1675,18 +1871,22 @@ async fn run_peer_session(
                 }) => {
                     if let Err(e) = crate::files::begin_incoming(id, &name, size_bytes).await {
                         warn!(id, error = %e, "failed to start incoming file");
-                        crate::files::mark_failed(id, format!("{e:#}"));
+                        crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
                 Ok(ControlMsg::FileChunk { id, offset, data }) => {
                     if let Err(e) = crate::files::write_chunk(id, offset, &data).await {
                         warn!(id, offset, error = %e, "file chunk write failed");
-                        crate::files::mark_failed(id, format!("{e:#}"));
+                        crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
                 Ok(ControlMsg::FileEnd { id, sha256 }) => {
                     if let Err(e) = crate::files::finalize_incoming(id, sha256).await {
                         warn!(id, error = %e, "file finalize failed");
+                        crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
                 Ok(ControlMsg::FileCancel { id }) => {
@@ -1712,8 +1912,6 @@ async fn run_peer_session(
     });
 
     let udp = Arc::new(udp);
-    let stats = Arc::new(SessionStats::default());
-    let inject_dispatcher = InjectDispatcher::start(inject.clone(), stats.clone())?;
 
     // --- recv → inject / playback ---------------------------------------
     let aead_recv = aead.clone_handle();
@@ -1722,7 +1920,7 @@ async fn run_peer_session(
     let playback_recv = playback.clone();
     let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
-    let recv_handle = tokio::spawn(async move {
+    let mut recv_handle = tokio::spawn(async move {
         // Buffer must fit the largest WireFrame: input events are
         // tiny but Opus frames + AEAD tag + bincode framing top out
         // around 1.5 KB. 4 KB leaves comfortable headroom.
@@ -1730,8 +1928,22 @@ async fn run_peer_session(
         let mut injected_state = ForwardedInputState::default();
         let mut input_ordering = InputReceiveOrdering::default();
         let mut snapshot_press_deduper = SnapshotPressDeduper::default();
+        let mut playback_route = PlaybackRoute::new(playback_recv);
+        let mut mic_playback_route = PlaybackRoute::new(mic_playback_recv);
+        playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
+        mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
+        let mut route_tick = tokio::time::interval(Duration::from_millis(20));
+        route_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match udp_recv.recv_from(&mut buf).await {
+            let received = tokio::select! {
+                _ = route_tick.tick() => {
+                    playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
+                    mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
+                    continue;
+                }
+                received = udp_recv.recv_from(&mut buf) => received,
+            };
+            match received {
                 Ok((n, src)) if src == peer_udp => {
                     stats_recv.recv_pkts.fetch_add(1, Ordering::Relaxed);
                     stats_recv.recv_bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -1750,7 +1962,7 @@ async fn run_peer_session(
                                             debug!(last, seq, "input UDP packet reordered");
                                         }
                                     }
-                                    if !input_ordering.accept_event(seq) {
+                                    if !input_ordering.accept_event(seq, ev) {
                                         continue;
                                     }
                                     // Genuine local hardware motion revokes
@@ -1821,22 +2033,8 @@ async fn run_peer_session(
                                     }
                                 }
                                 Ok((WireFrame::Audio(frame), _)) => {
-                                    // Arm the echo-loop guard ONLY on peer
-                                    // sysout arrivals. Mic frames from the
-                                    // peer don't cause sysout↔sysout
-                                    // feedback — including them here makes
-                                    // every keyboard click / breath the peer
-                                    // makes briefly mute our outgoing sysout,
-                                    // which the user perceives as stutter on
-                                    // shared music or video. Filter out
-                                    // Opus DTX comfort noise (≤ 3 bytes) so
-                                    // the always-on silence stream doesn't
-                                    // permanently suppress us.
-                                    if matches!(frame.stream, mineshare_audio::StreamKind::SysOut)
-                                        && frame.opus.len() >= ECHO_TRIGGER_MIN_BYTES
-                                    {
-                                        LAST_PEER_SYSOUT_AT_MS.store(now_ms(), Ordering::Relaxed);
-                                    }
+                                    let echo_stream = frame.stream;
+                                    let echo_opus_bytes = frame.opus.len();
                                     let n = stats_recv.audio_recv.load(Ordering::Relaxed);
                                     if n % 250 == 0 {
                                         debug!(
@@ -1858,6 +2056,14 @@ async fn run_peer_session(
                                             crate::audio_status::PLAY_MIC.load(Ordering::Relaxed)
                                         }
                                     };
+                                    match frame.stream {
+                                        mineshare_audio::StreamKind::SysOut => {
+                                            playback_route.sync(play)
+                                        }
+                                        mineshare_audio::StreamKind::Mic => {
+                                            mic_playback_route.sync(play)
+                                        }
+                                    }
                                     if !play {
                                         stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
                                         continue;
@@ -1870,14 +2076,29 @@ async fn run_peer_session(
                                     // VB-CABLE on Windows) so apps see
                                     // it as an input device without
                                     // mixing into the speaker output.
-                                    let target = match frame.stream {
-                                        mineshare_audio::StreamKind::SysOut => &playback_recv,
-                                        mineshare_audio::StreamKind::Mic => &mic_playback_recv,
+                                    let enqueue_result = match frame.stream {
+                                        mineshare_audio::StreamKind::SysOut => {
+                                            playback_route.enqueue(frame)
+                                        }
+                                        mineshare_audio::StreamKind::Mic => {
+                                            mic_playback_route.enqueue(frame)
+                                        }
                                     };
-                                    if let Err(e) = target.enqueue(frame) {
-                                        warn!(error = %e, "audio enqueue failed");
-                                    } else {
-                                        stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
+                                    match enqueue_result {
+                                        Err(e) => warn!(error = %e, "audio enqueue failed"),
+                                        Ok(true) => {
+                                            if should_arm_sysout_echo_guard(
+                                                echo_stream,
+                                                echo_opus_bytes,
+                                                play,
+                                                true,
+                                            ) {
+                                                LAST_PEER_SYSOUT_AT_MS
+                                                    .store(now_ms(), Ordering::Relaxed);
+                                            }
+                                            stats_recv.audio_recv.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Ok(false) => {}
                                     }
                                 }
                                 Err(e) => warn!(error = %e, "wireframe decode failed"),
@@ -1908,6 +2129,14 @@ async fn run_peer_session(
         loop {
             interval.tick().await;
             let curr = stats_tick.snapshot();
+            crate::status::publish_counters(
+                curr.sent_pkts,
+                curr.recv_pkts,
+                curr.injected,
+                curr.audio_recv,
+                curr.inject_errs,
+                curr.decrypt_errs,
+            );
             let delta = curr.delta(&prev);
             if delta.sent_pkts != 0 || delta.recv_pkts != 0 {
                 info!(
@@ -1942,13 +2171,16 @@ async fn run_peer_session(
     // to drag-across motion.
     let mut input_sub = input_bcast.subscribe();
     let mut sub = bcast.subscribe();
+    // Only allow capture to consume hardware after both data/control paths
+    // exist; otherwise the first input after connection can have no subscriber.
+    mineshare_input::set_remote_event_sender(rev_tx);
     let mut next_input_seq = 0u64;
     let mut next_state_seq = 0u64;
     let mut input_state_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     input_state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_state_sent = ForwardedInputState::default();
     let mut state_repeats_remaining = 0u8;
-    tokio::pin!(reader_handle);
+    let mut state_heartbeat_ticks = 0u8;
     let exit_reason = loop {
         // Each arm goes through this same encode → encrypt → send →
         // stats path; macro keeps the two arms terse without the
@@ -1982,9 +2214,12 @@ async fn run_peer_session(
         }
         tokio::select! {
             biased;
+            _ = claim.cancelled() => break "preferred connection replaced duplicate",
             _ = &mut reader_handle => {
                 break "TCP control reader ended";
             }
+            _ = &mut writer_handle => break "TCP control writer ended",
+            _ = &mut recv_handle => break "UDP receiver ended",
             // HIGH-PRIORITY: input events skip the audio queue.
             recv = input_sub.recv() => match recv {
                 // Coalesce a backlog of MouseMove deltas into a single
@@ -2077,12 +2312,19 @@ async fn run_peer_session(
             // tick wins while a key-down waits in the input channel, the
             // snapshot can describe that key before its event has a sequence.
             _ = input_state_tick.tick() => {
+                state_heartbeat_ticks = state_heartbeat_ticks.saturating_add(1);
+                let heartbeat_due = state_heartbeat_ticks >= INPUT_STATE_HEARTBEAT_TICKS;
                 let state = mineshare_input::forwarded_input_state();
                 let changed = state != last_state_sent;
                 if changed {
                     state_repeats_remaining = 4;
                 }
-                if changed || state.any_held() || state_repeats_remaining > 0 {
+                if should_send_input_state(
+                    changed,
+                    state.any_held(),
+                    state_repeats_remaining,
+                    heartbeat_due,
+                ) {
                     let seq = next_state_seq;
                     next_state_seq = next_state_seq.wrapping_add(1);
                     send_wire!(WireFrame::InputState {
@@ -2091,6 +2333,7 @@ async fn run_peer_session(
                         state,
                     }, "input-state");
                     last_state_sent = state;
+                    state_heartbeat_ticks = 0;
                     if !changed && state_repeats_remaining > 0 {
                         state_repeats_remaining -= 1;
                     }
@@ -2108,11 +2351,28 @@ async fn run_peer_session(
     };
 
     info!(reason = exit_reason, %peer_addr, "peer session ending");
+    mineshare_input::clear_remote_event_sender();
+    reader_handle.abort();
     writer_handle.abort();
     ping_handle.abort();
     beacon_handle.abort();
     recv_handle.abort();
     stats_handle.abort();
+    // abort() only schedules cancellation. Wait for every old worker to drop
+    // its session/audio leases before clearing shared state or admitting a peer.
+    // A handle already consumed by select! must not be polled a second time.
+    for handle in [
+        reader_handle,
+        writer_handle,
+        ping_handle,
+        beacon_handle,
+        recv_handle,
+        stats_handle,
+    ] {
+        if !handle.is_finished() {
+            let _ = handle.await;
+        }
+    }
     inject_dispatcher.stop();
     // Wipe RTT samples so the next session's stats start clean.
     crate::latency::reset();
@@ -2125,7 +2385,6 @@ async fn run_peer_session(
     mineshare_input::set_peer_in_remote(false);
     mineshare_input::set_peer_touchpad_capabilities(0);
     mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
-    mineshare_input::clear_remote_event_sender();
     crate::layout::clear_propagate_sender();
     crate::status::clear_peer_connected();
     // Stage 6.1: emit synthetic key-up for any keys / buttons the
@@ -2146,8 +2405,12 @@ where
     let pt = bincode::serde::encode_to_vec(msg, standard())?;
     let ct = aead.seal_for(TransportDomain::Control, &pt)?;
     let len = u32::try_from(ct.len()).context("frame too large")?;
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&ct).await?;
+    tokio::time::timeout(SETUP_TIMEOUT, async {
+        stream.write_all(&len.to_be_bytes()).await?;
+        stream.write_all(&ct).await
+    })
+    .await
+    .context("control write timed out")??;
     Ok(())
 }
 
@@ -2167,7 +2430,9 @@ where
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     let pt = aead.open_for(TransportDomain::Control, &buf)?;
-    let (val, _) = bincode::serde::decode_from_slice::<T, _>(&pt, standard())?;
+    let (val, consumed) =
+        bincode::serde::decode_from_slice::<T, _>(&pt, standard().with_limit::<65_535>())?;
+    anyhow::ensure!(consumed == pt.len(), "trailing bytes in control frame");
     Ok(val)
 }
 
@@ -2406,8 +2671,52 @@ impl InputInject for NullInject {
 struct NullPlayback;
 
 impl AudioPlayback for NullPlayback {
-    fn enqueue(&self, _frame: AudioFrame) -> Result<()> {
+    fn enqueue(
+        &self,
+        _session: &mineshare_audio::PlaybackSession,
+        _frame: AudioFrame,
+    ) -> Result<()> {
         Ok(())
+    }
+}
+
+struct PlaybackRoute {
+    backend: Arc<dyn AudioPlayback>,
+    session: Option<mineshare_audio::PlaybackSession>,
+}
+
+impl PlaybackRoute {
+    fn new(backend: Arc<dyn AudioPlayback>) -> Self {
+        let session = Some(backend.begin_session());
+        Self { backend, session }
+    }
+
+    fn sync(&mut self, enabled: bool) {
+        match (enabled, self.session.is_some()) {
+            (true, false) => self.session = Some(self.backend.begin_session()),
+            (false, true) => {
+                if let Some(session) = self.session.take() {
+                    self.backend.end_session(&session);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn enqueue(&self, frame: AudioFrame) -> Result<bool> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(false);
+        };
+        self.backend.enqueue(session, frame)?;
+        Ok(true)
+    }
+}
+
+impl Drop for PlaybackRoute {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            self.backend.end_session(&session);
+        }
     }
 }
 
@@ -2418,6 +2727,7 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
+    use mineshare_core::DeviceId;
     use mineshare_input::{
         Button, InputEvent, InputInject, KeyCode, TouchpadAction, TouchpadContact, TouchpadEvent,
     };
@@ -2427,10 +2737,81 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        ControlCollisionAction, InjectDispatcher, InjectQueue, InjectSender, InputReceiveOrdering,
-        MAX_WIRE_MOTION_MERGE, SessionStats, SnapshotPressDeduper, WireFrame,
-        can_merge_wire_motion, control_collision_action, motion_pacing_step,
+        ControlCollisionAction, ECHO_TRIGGER_MIN_BYTES, InjectDispatcher, InjectQueue,
+        InjectSender, InputReceiveOrdering, MAX_WIRE_MOTION_MERGE, STANDBY_RECONNECT_DELAY,
+        SessionStats, SnapshotPressDeduper, WireFrame, can_merge_wire_motion,
+        control_collision_action, legacy_echo_guard_policy, motion_pacing_step,
+        reconnect_initial_delay, retry_stale_owned_input, should_arm_sysout_echo_guard,
+        should_send_input_state, should_suppress_outbound_sysout,
     };
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_isolated_sysout_never_uses_the_legacy_echo_guard() {
+        assert!(!should_arm_sysout_echo_guard(
+            mineshare_audio::StreamKind::SysOut,
+            ECHO_TRIGGER_MIN_BYTES,
+            true,
+            true
+        ));
+        assert!(!should_suppress_outbound_sysout(1_000, 1_001));
+    }
+
+    #[test]
+    fn legacy_echo_guard_arms_only_after_enabled_route_accepts_sysout() {
+        let stream = mineshare_audio::StreamKind::SysOut;
+        assert!(!legacy_echo_guard_policy(
+            false,
+            stream,
+            ECHO_TRIGGER_MIN_BYTES,
+            false,
+            true
+        ));
+        assert!(!legacy_echo_guard_policy(
+            false,
+            stream,
+            ECHO_TRIGGER_MIN_BYTES,
+            true,
+            false
+        ));
+        assert!(legacy_echo_guard_policy(
+            false,
+            stream,
+            ECHO_TRIGGER_MIN_BYTES,
+            true,
+            true
+        ));
+    }
+
+    struct RecordingRoutePlayback {
+        ended: AtomicU64,
+    }
+
+    impl mineshare_audio::AudioPlayback for RecordingRoutePlayback {
+        fn end_session(&self, _session: &mineshare_audio::PlaybackSession) {
+            self.ended.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn enqueue(
+            &self,
+            _session: &mineshare_audio::PlaybackSession,
+            _frame: mineshare_audio::AudioFrame,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn disabling_playback_route_retires_its_session() {
+        let backend = Arc::new(RecordingRoutePlayback {
+            ended: AtomicU64::new(0),
+        });
+        let mut route = super::PlaybackRoute::new(backend.clone());
+
+        route.sync(false);
+
+        assert_eq!(backend.ended.load(Ordering::Relaxed), 1);
+    }
 
     struct SlowMouseInject {
         mouse_calls: AtomicU64,
@@ -2461,6 +2842,46 @@ mod tests {
         fn scroll(&self, _dx: f32, _dy: f32) -> Result<()> {
             Ok(())
         }
+    }
+
+    struct ReleaseTrackingInject {
+        releases: AtomicU64,
+    }
+
+    impl InputInject for ReleaseTrackingInject {
+        fn mouse_move_rel(&self, _dx: i32, _dy: i32) -> Result<()> {
+            Ok(())
+        }
+
+        fn mouse_button(&self, _btn: Button, _down: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn key(&self, _code: KeyCode, _down: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn scroll(&self, _dx: f32, _dy: f32) -> Result<()> {
+            Ok(())
+        }
+
+        fn release_all_held(&self) -> Result<()> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn new_session_retries_stale_owned_releases_before_receiving() {
+        let inject = ReleaseTrackingInject {
+            releases: AtomicU64::new(0),
+        };
+        retry_stale_owned_input(&inject).unwrap();
+        assert_eq!(
+            inject.releases.load(Ordering::Relaxed),
+            1,
+            "reconnect must retry ownership retained by a failed prior cleanup"
+        );
     }
 
     #[test]
@@ -2539,6 +2960,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mixed_pointer_burst_cannot_queue_keyboard_behind_one_second_of_motion() {
+        let queue = Arc::new(InjectQueue {
+            pending: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            wake: parking_lot::Condvar::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+
+        // A Precision Touchpad can make the legacy mouse path and the native
+        // contact path alternate. At 10 ms per Windows dispatch, leaving all
+        // 100 pairs ahead of the first key reproduces the reported ~1 s focus
+        // lag even though network RTT is only 1 ms.
+        for x in 0..100u16 {
+            sender.send(InputEvent::MouseMove { dx: 1, dy: 0 }).unwrap();
+            sender.send(touchpad_frame(91, x)).unwrap();
+        }
+        sender
+            .send(InputEvent::Key {
+                code: KeyCode(30),
+                down: true,
+            })
+            .unwrap();
+
+        let pending = queue.pending.lock();
+        let key_index = pending
+            .iter()
+            .position(|entry| matches!(entry.event, InputEvent::Key { .. }))
+            .expect("keyboard edge missing from inject queue");
+        assert!(
+            key_index <= 2,
+            "keyboard waited behind {key_index} stale pointer updates"
+        );
+        assert_eq!(pending.len(), 3, "continuous lanes must stay bounded");
+        assert!(pending.iter().any(|entry| {
+            matches!(entry.event, InputEvent::MouseMove { dx: 100, dy: 0 }) && entry.merged_motion
+        }));
+        assert!(
+            pending
+                .iter()
+                .any(|entry| entry.event == touchpad_frame(91, 99)),
+            "touchpad lane must retain its latest authoritative frame"
+        );
+    }
+
+    #[test]
+    fn pointer_coalescing_never_crosses_a_keyboard_barrier() {
+        let queue = Arc::new(InjectQueue {
+            pending: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            wake: parking_lot::Condvar::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        sender.send(InputEvent::MouseMove { dx: 3, dy: 0 }).unwrap();
+        sender
+            .send(InputEvent::Key {
+                code: KeyCode(30),
+                down: true,
+            })
+            .unwrap();
+        sender.send(InputEvent::MouseMove { dx: 5, dy: 0 }).unwrap();
+
+        let pending = queue.pending.lock();
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending[0].event, InputEvent::MouseMove { dx: 3, dy: 0 });
+        assert!(matches!(pending[1].event, InputEvent::Key { .. }));
+        assert_eq!(pending[2].event, InputEvent::MouseMove { dx: 5, dy: 0 });
+    }
+
     #[tokio::test]
     async fn touchpad_event_serializes_encrypts_and_decrypts() {
         let init_kp = generate_static_key().unwrap();
@@ -2589,6 +3083,47 @@ mod tests {
             }
             other => panic!("unexpected decoded frame: {other:?}"),
         }
+
+        // The actual framed/encrypted control path must survive large valid
+        // clipboard traffic and reject an unauthenticated oversized length
+        // before allocating or waiting for a payload that never arrives.
+        let (mut write, mut read) = tokio::io::duplex(70_000);
+        let text = "x".repeat(60 * 1024);
+        super::write_encrypted(
+            &mut write,
+            &sender,
+            &super::ControlMsg::ClipboardText(text.clone()),
+        )
+        .await
+        .unwrap();
+        let received: super::ControlMsg =
+            super::read_encrypted(&mut read, &receiver).await.unwrap();
+        assert!(matches!(received, super::ControlMsg::ClipboardText(got) if got == text));
+        let request = mineshare_input::LockRequest {
+            epoch: 9,
+            request: 3,
+            locked: true,
+        };
+        super::write_encrypted(
+            &mut write,
+            &sender,
+            &super::ControlMsg::InputLockRequest(request),
+        )
+        .await
+        .unwrap();
+        let received: super::ControlMsg =
+            super::read_encrypted(&mut read, &receiver).await.unwrap();
+        assert!(matches!(received, super::ControlMsg::InputLockRequest(got) if got == request));
+        assert!(crate::compatible_control_build(&crate::build_id()));
+        assert!(!crate::compatible_control_build("0.0.12 · 71049ab-dirty"));
+        tokio::io::AsyncWriteExt::write_all(&mut write, &u32::MAX.to_be_bytes())
+            .await
+            .unwrap();
+        assert!(
+            super::read_encrypted::<_, super::ControlMsg>(&mut read, &receiver)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -2639,19 +3174,74 @@ mod tests {
     }
 
     #[test]
+    fn both_discovery_sides_keep_a_reconnect_path() {
+        let lower = DeviceId(uuid::Uuid::from_u128(1));
+        let higher = DeviceId(uuid::Uuid::from_u128(2));
+
+        assert_eq!(reconnect_initial_delay(lower, higher), Duration::ZERO);
+        assert_eq!(
+            reconnect_initial_delay(higher, lower),
+            STANDBY_RECONNECT_DELAY,
+            "the peer that normally defers must dial when discovery is one-sided"
+        );
+    }
+
+    #[test]
     fn authoritative_snapshot_suppresses_a_late_covered_edge() {
         let mut ordering = InputReceiveOrdering::default();
         assert!(ordering.accept_snapshot(0, 1));
-        assert!(!ordering.accept_event(0));
-        assert!(ordering.accept_event(1));
+        let press = InputEvent::Key {
+            code: KeyCode(42),
+            down: true,
+        };
+        assert!(!ordering.accept_event(0, press));
+        assert!(ordering.accept_event(1, press));
     }
 
     #[test]
     fn snapshot_cannot_undo_an_event_newer_than_its_coverage() {
         let mut ordering = InputReceiveOrdering::default();
-        assert!(ordering.accept_event(1));
+        assert!(ordering.accept_event(
+            1,
+            InputEvent::Key {
+                code: KeyCode(42),
+                down: false,
+            }
+        ));
         assert!(!ordering.accept_snapshot(0, 1));
         assert!(ordering.accept_snapshot(1, 2));
+    }
+
+    #[test]
+    fn newer_pointer_motion_does_not_block_modifier_release_snapshot() {
+        for code in [42, 54] {
+            let mut ordering = InputReceiveOrdering::default();
+            assert!(ordering.accept_event(
+                0,
+                InputEvent::Key {
+                    code: KeyCode(code),
+                    down: true,
+                }
+            ));
+
+            // Shift-up seq=1 was lost. A later pointer packet arrives before
+            // an authoritative empty snapshot covering input seqs 0..3.
+            // Pointer ordering must not prevent that snapshot from releasing
+            // either physical Shift key.
+            assert!(ordering.accept_event(3, InputEvent::MouseMove { dx: 1, dy: 0 }));
+            assert!(
+                ordering.accept_snapshot(0, 3),
+                "newer pointer motion is unrelated to held-key reconciliation for code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_snapshot_heartbeat_prevents_permanent_stuck_keys() {
+        assert!(
+            should_send_input_state(false, false, 0, true),
+            "an idle authoritative snapshot must eventually heal a lost Shift-up burst"
+        );
     }
 
     #[test]

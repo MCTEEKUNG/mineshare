@@ -21,22 +21,23 @@
 //! boundary so the wire format stays uniform.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub mod codec;
 pub mod cpal_mic;
 pub mod playback;
+#[cfg(target_os = "windows")]
+mod process_loopback_win;
 pub mod resample;
 
 #[cfg(target_os = "windows")]
 pub mod virtual_mic_win;
-#[cfg(target_os = "windows")]
-pub mod wasapi_loopback;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub mod pipewire_monitor;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub mod virtual_mic_linux;
 
 /// Audio kind tag — both directions of the bridge ride the same wire,
@@ -67,12 +68,55 @@ pub const CHANNELS: u16 = 2;
 pub const FRAME_SAMPLES_PER_CHANNEL: usize = 960;
 pub const FRAME_SAMPLES_INTERLEAVED: usize = FRAME_SAMPLES_PER_CHANNEL * CHANNELS as usize;
 
-/// Construct the platform-specific sysout capture: WASAPI loopback
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum BackendState {
+    Idle = 0,
+    Starting = 1,
+    Active = 2,
+    Degraded = 3,
+    Stopped = 4,
+}
+
+#[derive(Clone)]
+pub struct BackendStatus {
+    state: Arc<AtomicU8>,
+}
+
+impl BackendStatus {
+    pub fn new(initial: BackendState) -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(initial as u8)),
+        }
+    }
+
+    pub fn set(&self, state: BackendState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    pub fn get(&self) -> BackendState {
+        match self.state.load(Ordering::Acquire) {
+            0 => BackendState::Idle,
+            1 => BackendState::Starting,
+            2 => BackendState::Active,
+            3 => BackendState::Degraded,
+            _ => BackendState::Stopped,
+        }
+    }
+}
+
+impl Default for BackendStatus {
+    fn default() -> Self {
+        Self::new(BackendState::Degraded)
+    }
+}
+
+/// Construct the platform-specific sysout capture: process-isolated WASAPI
 /// on Windows, PipeWire monitor on Linux.
 pub fn make_sysout_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(wasapi_loopback::WasapiLoopback::new()?))
+        Ok(Box::new(process_loopback_win::ProcessLoopbackCapture::new()))
     }
     #[cfg(target_os = "linux")]
     {
@@ -353,9 +397,8 @@ pub fn make_playback() -> anyhow::Result<Box<dyn AudioPlayback>> {
 }
 
 /// Bounded hand-off from a capture thread to the async runtime, plus a cheap
-/// demand probe. Capture backends can skip resampling/Opus work when there is
-/// no connected peer or the user disabled that stream, while retaining an
-/// already-open device for instant resume.
+/// demand probe. Capture backends release their hardware/COM resources when
+/// there is no connected peer or the user disabled that stream.
 #[derive(Clone)]
 pub struct CaptureSink {
     tx: tokio::sync::mpsc::Sender<AudioFrame>,
@@ -377,6 +420,10 @@ impl CaptureSink {
         (self.active)()
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     /// Returns false only when the runtime receiver has closed. A full queue is
     /// an intentional lossy drop: stale real-time audio must not accumulate.
     pub fn send_lossy(&self, frame: AudioFrame) -> bool {
@@ -388,20 +435,148 @@ impl CaptureSink {
 }
 
 pub trait AudioCapture: Send {
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
+
+    fn backend_status(&self) -> BackendStatus {
+        BackendStatus::default()
+    }
+
     /// Spawn whatever background work the platform needs and push
     /// encoded frames into the bounded, lossy `sink`. Returns immediately.
     fn start(&mut self, sink: CaptureSink) -> anyhow::Result<()>;
 }
 
+#[derive(Debug, Default)]
+struct PlaybackSessionIngress {
+    accepted: AtomicU64,
+    consumed: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackSession {
+    epoch: u64,
+    ingress: Arc<PlaybackSessionIngress>,
+}
+
+impl PartialEq for PlaybackSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+}
+
+impl Eq for PlaybackSession {}
+
+impl PlaybackSession {
+    pub(crate) fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            ingress: Arc::new(PlaybackSessionIngress::default()),
+        }
+    }
+
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.ingress, &other.ingress)
+    }
+
+    pub(crate) fn note_accepted_frame(&self) {
+        self.ingress.accepted.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn note_consumed_frame(&self) {
+        self.ingress.consumed.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_pending_ingress(&self) -> bool {
+        self.ingress.accepted.load(Ordering::Acquire)
+            != self.ingress.consumed.load(Ordering::Acquire)
+    }
+}
+
 pub trait AudioPlayback: Send + Sync {
+    fn backend_status(&self) -> BackendStatus {
+        BackendStatus::default()
+    }
+
+    /// Establish an opaque receive identity for one peer session. Implementations
+    /// must reject frames submitted with any older identity.
+    fn begin_session(&self) -> PlaybackSession {
+        PlaybackSession::new(0)
+    }
+
+    /// Retire a receive identity when its peer connection ends. Implementations
+    /// must make in-flight builds and queued frames for this identity stale.
+    fn end_session(&self, _session: &PlaybackSession) {}
+
     /// Decode and enqueue one frame for playback. Lossy: drops on
     /// buffer overflow (better latency than blocking).
-    fn enqueue(&self, frame: AudioFrame) -> anyhow::Result<()>;
+    fn enqueue(&self, session: &PlaybackSession, frame: AudioFrame) -> anyhow::Result<()>;
+}
 
-    /// Mark the boundary between peer sessions. Audio sequence numbers are
-    /// scoped to the sender process, so a restarted peer can legitimately
-    /// begin again at zero while this playback worker remains alive.
-    fn reset_session(&self) {}
+pub struct PlaybackSessionLease<'a> {
+    playback: &'a dyn AudioPlayback,
+    token: PlaybackSession,
+}
+
+impl<'a> PlaybackSessionLease<'a> {
+    pub fn begin(playback: &'a dyn AudioPlayback) -> Self {
+        Self {
+            playback,
+            token: playback.begin_session(),
+        }
+    }
+
+    pub fn token(&self) -> &PlaybackSession {
+        &self.token
+    }
+}
+
+impl Drop for PlaybackSessionLease<'_> {
+    fn drop(&mut self) {
+        self.playback.end_session(&self.token);
+    }
+}
+
+#[cfg(test)]
+mod playback_session_lease_tests {
+    use super::*;
+
+    struct RecordingPlayback {
+        ended: AtomicU64,
+    }
+
+    impl AudioPlayback for RecordingPlayback {
+        fn begin_session(&self) -> PlaybackSession {
+            PlaybackSession::new(7)
+        }
+
+        fn end_session(&self, session: &PlaybackSession) {
+            if session.epoch() == 7 {
+                self.ended.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        fn enqueue(&self, _session: &PlaybackSession, _frame: AudioFrame) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_session_lease_retires_the_backend_identity() {
+        let playback = RecordingPlayback {
+            ended: AtomicU64::new(0),
+        };
+        {
+            let lease = PlaybackSessionLease::begin(&playback);
+            assert_eq!(lease.token().epoch(), 7);
+        }
+        assert_eq!(playback.ended.load(Ordering::Acquire), 1);
+    }
 }
 
 #[cfg(test)]
@@ -435,7 +610,15 @@ mod capture_sink_tests {
         }
         assert_eq!(rx.len(), 1);
         drop(rx);
+        assert!(sink.is_closed());
         assert!(!sink.send_lossy(frame(3)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_sysout_factory_is_process_isolated() {
+        let capture = super::make_sysout_capture().expect("factory must be lazy and hardware-free");
+        assert_eq!(capture.backend_name(), "windows-process-loopback");
     }
 
     #[cfg(target_os = "windows")]
@@ -478,5 +661,17 @@ mod capture_sink_tests {
 
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(!rx.is_empty(), "active capture did not encode any audio");
+    }
+}
+
+#[cfg(test)]
+mod backend_status_tests {
+    use super::*;
+
+    #[test]
+    fn backend_status_reports_worker_transitions() {
+        let status = BackendStatus::new(BackendState::Idle);
+        status.set(BackendState::Active);
+        assert_eq!(status.get(), BackendState::Active);
     }
 }

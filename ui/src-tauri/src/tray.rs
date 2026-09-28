@@ -34,6 +34,23 @@ struct LiveMenu {
     play_mic: CheckMenuItem<Wry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioToggleTarget {
+    stream: &'static str,
+    direction: &'static str,
+}
+
+fn audio_toggle_target(menu_id: &str) -> Option<AudioToggleTarget> {
+    let (stream, direction) = match menu_id {
+        "send_sysout" => ("sysout", "send"),
+        "play_sysout" => ("sysout", "play"),
+        "send_mic" => ("mic", "send"),
+        "play_mic" => ("mic", "play"),
+        _ => return None,
+    };
+    Some(AudioToggleTarget { stream, direction })
+}
+
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // ---- Status header ------------------------------------------------
     // Disabled menu item — acts as a label that we mutate from the
@@ -52,12 +69,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     )?;
 
     // ---- Audio submenu -----------------------------------------------
+    let initial_audio = audio::snapshot();
     let send_sysout = CheckMenuItem::with_id(
         app,
         "send_sysout",
         "Send system sound",
         true,
-        true,
+        initial_audio.send_sysout,
         None::<&str>,
     )?;
     let play_sysout = CheckMenuItem::with_id(
@@ -65,17 +83,23 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         "play_sysout",
         "Receive system sound",
         true,
-        true,
+        initial_audio.play_sysout,
         None::<&str>,
     )?;
-    let send_mic =
-        CheckMenuItem::with_id(app, "send_mic", "Send microphone", true, true, None::<&str>)?;
+    let send_mic = CheckMenuItem::with_id(
+        app,
+        "send_mic",
+        "Send microphone",
+        true,
+        initial_audio.send_mic,
+        None::<&str>,
+    )?;
     let play_mic = CheckMenuItem::with_id(
         app,
         "play_mic",
         "Receive microphone",
         true,
-        true,
+        initial_audio.play_mic,
         None::<&str>,
     )?;
     let audio_menu = Submenu::with_items(
@@ -152,11 +176,26 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 let now = mineshare_input::is_input_locked();
                 mineshare_input::set_input_locked(!now);
             }
-            "send_sysout" => audio::set_send_sysout(!audio::snapshot().send_sysout),
-            "play_sysout" => audio::set_play_sysout(!audio::snapshot().play_sysout),
-            "send_mic" => audio::set_send_mic(!audio::snapshot().send_mic),
-            "play_mic" => audio::set_play_mic(!audio::snapshot().play_mic),
-            _ => {}
+            menu_id => {
+                let Some(target) = audio_toggle_target(menu_id) else {
+                    return;
+                };
+                let status = audio::snapshot();
+                let current = match (target.stream, target.direction) {
+                    ("sysout", "send") => status.send_sysout,
+                    ("sysout", "play") => status.play_sysout,
+                    ("mic", "send") => status.send_mic,
+                    ("mic", "play") => status.play_mic,
+                    _ => return,
+                };
+                if let Err(error) = mineshare_daemon::settings::set_audio_toggle(
+                    target.stream,
+                    target.direction,
+                    !current,
+                ) {
+                    tracing::warn!(%error, menu_id, "persist tray audio toggle failed");
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             // Plain left-click on the tray icon == "Show MineShare".
@@ -229,5 +268,21 @@ fn show_main_window(app: &AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_audio_item_maps_to_persisted_settings_route() {
+        assert_eq!(
+            audio_toggle_target("send_sysout"),
+            Some(AudioToggleTarget {
+                stream: "sysout",
+                direction: "send",
+            })
+        );
     }
 }

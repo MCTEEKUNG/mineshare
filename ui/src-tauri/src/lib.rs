@@ -56,6 +56,11 @@ fn set_input_lock(locked: bool) {
     mineshare_input::set_input_locked(locked);
 }
 
+#[tauri::command]
+fn preview_lock_effect(locked: bool, effect: mineshare_input::LockEffect) {
+    mineshare_input::preview_lock_effect(locked, effect);
+}
+
 /// GUI button equivalent of the Ctrl+Alt+K hotkey: cycles the
 /// keyboard target through Auto → ForcePeer → ForceLocal → Auto.
 #[tauri::command]
@@ -130,10 +135,10 @@ fn get_settings() -> mineshare_daemon::settings::Settings {
 }
 
 #[tauri::command]
-fn set_settings(
-    settings: mineshare_daemon::settings::Settings,
+fn patch_settings(
+    patch: mineshare_daemon::settings::SettingsPatch,
 ) -> Result<mineshare_daemon::settings::Settings, String> {
-    mineshare_daemon::settings::apply(settings).map_err(|e| e.to_string())
+    mineshare_daemon::settings::update(patch).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -332,7 +337,8 @@ pub fn run() {
             cancel_transfer,
             open_downloads_dir,
             get_settings,
-            set_settings,
+            patch_settings,
+            preview_lock_effect,
             get_pairing_phase,
             submit_pin,
             list_trusted_peers,
@@ -340,4 +346,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_webview_disables_gpu_composition_to_preserve_fullscreen_video() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json must remain valid JSON");
+        let args = config["app"]["windows"][0]["additionalBrowserArgs"]
+            .as_str()
+            .unwrap_or_default();
+
+        assert!(
+            args.split_ascii_whitespace()
+                .any(|arg| arg == "--disable-gpu"),
+            "a visible hardware-composited MineShare WebView makes Firefox fullscreen video black on the Windows target"
+        );
+        assert!(
+            args.contains("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"),
+            "custom WebView2 arguments replace Wry's defaults, so retain its UI and SmartScreen protection flags"
+        );
+    }
 }

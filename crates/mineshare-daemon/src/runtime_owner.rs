@@ -21,11 +21,23 @@ impl RuntimeOwner {
     pub fn acquire() -> Result<Self> {
         #[cfg(target_os = "windows")]
         {
+            Self::acquire_named("Local\\MineShareRuntimeOwner")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn acquire_named(name: &str) -> Result<Self> {
+        #[cfg(target_os = "windows")]
+        {
             use anyhow::Context;
             use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
             use windows_sys::Win32::System::Threading::CreateMutexW;
 
-            let name: Vec<u16> = "Local\\MineShareRuntimeOwner\0".encode_utf16().collect();
+            let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
             // SAFETY: `name` is NUL-terminated and lives through the call.
             // The returned handle is owned by `RuntimeOwner` and closed in Drop.
             let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
@@ -48,9 +60,9 @@ impl RuntimeOwner {
                 );
             }
 
-            return Ok(Self {
+            Ok(Self {
                 handle: handle as usize,
-            });
+            })
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -80,10 +92,14 @@ mod tests {
 
     #[test]
     fn only_one_runtime_owner_can_exist_per_session() {
-        let first = RuntimeOwner::acquire().expect("first owner");
-        let second = RuntimeOwner::acquire();
+        // Exercise the same kernel-object path without colliding with a real
+        // MineShare installation running while the developer executes tests.
+        let name = format!("Local\\MineShareRuntimeOwnerTest-{}", uuid::Uuid::new_v4());
+        let first = RuntimeOwner::acquire_named(&name).expect("first owner");
+        let second = RuntimeOwner::acquire_named(&name);
         assert!(second.is_err(), "a duplicate runtime owner was accepted");
         drop(first);
-        RuntimeOwner::acquire().expect("ownership should recover after the handle closes");
+        RuntimeOwner::acquire_named(&name)
+            .expect("ownership should recover after the handle closes");
     }
 }

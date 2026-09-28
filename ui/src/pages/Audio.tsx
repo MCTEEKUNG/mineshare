@@ -3,12 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { useT } from "../i18n";
 
 type VirtualMicBackend = "pipewire" | "vbcable" | "unavailable";
+type EffectiveAudioState = "disabled" | "idle" | "starting" | "active" | "degraded" | "stopped";
 
 type AudioStatus = {
   send_sysout: boolean;
   play_sysout: boolean;
   send_mic: boolean;
   play_mic: boolean;
+  send_sysout_state: EffectiveAudioState;
+  play_sysout_state: EffectiveAudioState;
+  send_mic_state: EffectiveAudioState;
+  play_mic_state: EffectiveAudioState;
   virtual_mic: VirtualMicBackend;
   os: string;
 };
@@ -73,6 +78,8 @@ export default function AudioPage() {
           subtitle={t("audio_sysout_sub")}
           sendOn={status.send_sysout}
           playOn={status.play_sysout}
+          sendState={status.send_sysout_state}
+          playState={status.play_sysout_state}
           onToggle={(dir, on) => toggle("sysout", dir, on)}
         />
         <StreamCard
@@ -80,6 +87,8 @@ export default function AudioPage() {
           subtitle={t("audio_mic_sub")}
           sendOn={status.send_mic}
           playOn={status.play_mic}
+          sendState={status.send_mic_state}
+          playState={status.play_mic_state}
           onToggle={(dir, on) => toggle("mic", dir, on)}
         />
       </div>
@@ -92,16 +101,20 @@ export default function AudioPage() {
 }
 
 function StreamCard({
-  title,
-  subtitle,
-  sendOn,
-  playOn,
-  onToggle,
+    title,
+    subtitle,
+    sendOn,
+    playOn,
+    sendState,
+    playState,
+    onToggle,
 }: {
   title: string;
   subtitle: string;
   sendOn: boolean;
   playOn: boolean;
+  sendState: EffectiveAudioState;
+  playState: EffectiveAudioState;
   onToggle: (direction: Direction, enabled: boolean) => void;
 }) {
   const { t } = useT();
@@ -117,12 +130,14 @@ function StreamCard({
           label={t("audio_send")}
           hint={t("audio_send_hint")}
           on={sendOn}
+          state={sendState}
           onChange={(v) => onToggle("send", v)}
         />
         <ToggleRow
           label={t("audio_play")}
           hint={t("audio_play_hint")}
           on={playOn}
+          state={playState}
           onChange={(v) => onToggle("play", v)}
         />
       </div>
@@ -134,11 +149,13 @@ function ToggleRow({
   label,
   hint,
   on,
+  state,
   onChange,
 }: {
   label: string;
   hint: string;
   on: boolean;
+  state: EffectiveAudioState;
   onChange: (v: boolean) => void;
 }) {
   return (
@@ -147,12 +164,27 @@ function ToggleRow({
       className="flex items-center justify-between rounded-lg border border-ds-border bg-ds-hover px-3 py-3 hover:bg-ds-hover transition-colors text-left"
     >
       <div>
-        <p className="text-sm font-medium text-ds-text">{label}</p>
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-medium text-ds-text">{label}</p>
+          <BackendBadge state={state} />
+        </div>
         <p className="text-[11px] text-ds-text-muted mt-0.5">{hint}</p>
       </div>
       <Switch on={on} />
     </button>
   );
+}
+
+function BackendBadge({ state }: { state: EffectiveAudioState }) {
+  const tone =
+    state === "active"
+      ? "text-emerald-400"
+      : state === "starting"
+        ? "text-amber-400"
+        : state === "degraded" || state === "stopped"
+          ? "text-red-400"
+          : "text-ds-text-muted";
+  return <span className={`text-[10px] font-mono uppercase ${tone}`}>{state}</span>;
 }
 
 function Switch({ on }: { on: boolean }) {

@@ -104,24 +104,24 @@ pub fn current() -> LayoutConfig {
 /// the active control channel so both machines agree on the desk
 /// arrangement after one click.
 pub fn set(cfg: LayoutConfig) -> Result<()> {
-    apply_locally(&cfg)?;
-    if let Some(tx) = PROPAGATE_TX.lock().as_ref() {
-        let _ = tx.send(cfg.peer_side.opposite());
-    }
-    Ok(())
+    apply_locally(&cfg, true)
 }
 
 /// Apply a layout received from the peer — same thing as `set` but
 /// without echoing it back over the control channel. Avoids an
 /// infinite ping-pong of SetPeerSide messages.
 pub fn apply_from_peer(cfg: LayoutConfig) -> Result<()> {
-    apply_locally(&cfg)
+    apply_locally(&cfg, false)
 }
 
-fn apply_locally(cfg: &LayoutConfig) -> Result<()> {
+fn apply_locally(cfg: &LayoutConfig, propagate: bool) -> Result<()> {
+    let mut current = CURRENT.lock();
     save(cfg)?;
     mineshare_input::set_peer_side(map_side(cfg.peer_side));
-    *CURRENT.lock() = Some(cfg.clone());
+    *current = Some(cfg.clone());
+    if propagate && let Some(tx) = PROPAGATE_TX.lock().as_ref() {
+        let _ = tx.send(cfg.peer_side.opposite());
+    }
     Ok(())
 }
 
@@ -156,6 +156,7 @@ fn load_or_default() -> LayoutConfig {
 fn save(cfg: &LayoutConfig) -> Result<()> {
     let path = config_path()?;
     let json = serde_json::to_vec_pretty(cfg)?;
-    fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    crate::settings::atomic_write_file(&path, &json)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }

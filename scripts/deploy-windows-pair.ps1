@@ -34,6 +34,7 @@ foreach ($path in @($BuiltExe, $BuiltIcon, $Installer, $IdentityFile)) {
 }
 
 $ExpectedHash = (Get-FileHash -LiteralPath $BuiltExe -Algorithm SHA256).Hash
+$BackupName = 'mineshare-app.backup-{0}.exe' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
 Write-Host "==> release SHA-256: $ExpectedHash"
 
 Write-Host '==> staging release on peer'
@@ -50,6 +51,23 @@ scp -i $IdentityFile $BuiltIcon "${Remote}:${RemoteStage}/icon.ico"
 if ($LASTEXITCODE -ne 0) { throw 'Could not upload remote icon' }
 scp -i $IdentityFile $Installer "${Remote}:${RemoteStage}/install.ps1"
 if ($LASTEXITCODE -ne 0) { throw 'Could not upload remote installer' }
+
+# Validate the staged artifact before interrupting either running app. Keep
+# each previously installed binary for an explicit, same-pair rollback.
+$CheckStage = @"
+`$ErrorActionPreference='Stop'
+`$ProgressPreference='SilentlyContinue'
+if ((Get-FileHash -LiteralPath '$RemoteStage/mineshare-app.exe').Hash -ne '$ExpectedHash') { throw 'Staged peer hash mismatch' }
+`$installed='C:/Users/$RemoteUser/AppData/Local/MineShare/mineshare-app.exe'
+if (Test-Path -LiteralPath `$installed) { Copy-Item -LiteralPath `$installed -Destination 'C:/Users/$RemoteUser/AppData/Local/MineShare/$BackupName' }
+"@
+$CheckStageEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($CheckStage))
+ssh -i $IdentityFile -o BatchMode=yes $Remote "powershell.exe -NoProfile -EncodedCommand $CheckStageEncoded"
+if ($LASTEXITCODE -ne 0) { throw 'Peer pre-install validation failed' }
+$LocalInstalled = Join-Path $env:LOCALAPPDATA 'MineShare\mineshare-app.exe'
+if (Test-Path -LiteralPath $LocalInstalled) {
+    Copy-Item -LiteralPath $LocalInstalled -Destination (Join-Path (Split-Path -Parent $LocalInstalled) $BackupName)
+}
 
 Write-Host '==> installing release on local Laptop'
 & $Installer -BuiltExe $BuiltExe -BuiltIcon $BuiltIcon
@@ -80,3 +98,4 @@ if ($RemoteHash -ne $ExpectedHash) {
 Write-Host '==> pair deployment verified'
 Write-Host "  local:  $LocalHash"
 Write-Host "  remote: $RemoteHash"
+Write-Host "  previous build backup on each PC: $BackupName"
