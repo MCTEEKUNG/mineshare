@@ -38,7 +38,7 @@ pub fn run(push: bool) -> Result<()> {
         let rel = format!("logs/{host}.log");
         run_git(&["add", &rel])?;
         // No-op if nothing changed
-        if !has_staged_changes()? {
+        if !has_staged_changes(&rel)? {
             println!("no log changes to commit");
             return Ok(());
         }
@@ -46,7 +46,7 @@ pub fn run(push: bool) -> Result<()> {
             .format(&Rfc3339)
             .unwrap_or_else(|_| "unknown".into());
         let msg = format!("logs: snapshot from {host} at {stamp}");
-        run_git(&["commit", "-m", &msg])?;
+        run_git(&log_commit_args(&rel, &msg))?;
         run_git(&["push"])?;
         println!("pushed {rel}");
     }
@@ -199,10 +199,30 @@ fn run_git(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn has_staged_changes() -> Result<bool> {
+fn log_commit_args<'a>(path: &'a str, message: &'a str) -> [&'a str; 6] {
+    ["commit", "--only", "-m", message, "--", path]
+}
+
+fn has_staged_changes(path: &str) -> Result<bool> {
     let status = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
+        .args(["diff", "--cached", "--quiet", "--", path])
         .status()?;
-    // exit 0 = no changes, 1 = changes
-    Ok(!status.success())
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => bail!("git diff failed (exit {:?})", status.code()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_collection_commit_is_restricted_to_its_own_file() {
+        assert_eq!(
+            log_commit_args("logs/host.log", "snapshot"),
+            ["commit", "--only", "-m", "snapshot", "--", "logs/host.log"]
+        );
+    }
 }

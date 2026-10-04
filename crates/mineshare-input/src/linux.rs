@@ -35,6 +35,7 @@
 use std::collections::HashSet;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -112,6 +113,8 @@ const RESTORE_MARGIN_PX: i32 = 120;
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_LEFT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_RIGHT: AtomicBool = AtomicBool::new(false);
 
 // --- shared cursor / grab state across all evdev pump threads ---------
 
@@ -169,6 +172,7 @@ static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Timestamp (ms) of the last exit_remote — gates ENTER_COOLDOWN_MS.
 static LAST_EXIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static FLUSH_WATCHDOG_THREAD: OnceLock<thread::Thread> = OnceLock::new();
 static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
 
 pub fn local_screen_geometry() -> (u32, u32) {
@@ -230,8 +234,8 @@ pub fn set_peer_screen(w: u32, _h: u32) {
 
 fn enter_remote() {
     // Refuse if the peer signalled it's already driving Remote.
-    if super::peer_in_remote() {
-        debug!("enter_remote refused — peer holds Remote");
+    if !super::can_enter_remote() {
+        debug!("enter_remote refused — peer unavailable or already driving");
         return;
     }
     // virt_x is "distance dragged INTO the peer from the edge we crossed".
@@ -246,9 +250,12 @@ fn enter_remote() {
     PENDING_DX.store(0, Ordering::Release);
     PENDING_DY.store(0, Ordering::Release);
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
-    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+    super::publish_local_control(false, || CURSOR_MODE.store(MODE_REMOTE, Ordering::Release));
+    wake_flush_watchdog();
     info!("cursor → remote (linux)");
-    super::fire_remote_event(super::RemoteEvent::Entered);
+    if !super::peer_session_ready() || super::is_input_locked() {
+        exit_remote();
+    }
 }
 
 fn exit_remote() {
@@ -270,7 +277,9 @@ fn exit_remote() {
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
     LAST_EXIT_MS.store(super::now_ms(), Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+    wake_flush_watchdog();
     info!(restore = ?(rx, ry), "cursor → local (linux)");
+    super::end_local_control();
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -320,23 +329,20 @@ fn flush_pending<F: Fn(InputEvent) + ?Sized>(sink: &F) {
     let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
     if n % 100 == 0 {
         let virt = VIRT_X.load(Ordering::Relaxed);
-        info!(
-            dx,
-            dy,
-            virt_x = virt,
-            n,
-            "linux coalesced motion forward (8ms-window)"
-        );
+        debug!(dx, dy, virt_x = virt, n, "linux coalesced motion forward");
     }
 }
 
-/// Spawn the periodic flush thread once. Wakes every
-/// `super::target_flush_us()` microseconds to deliver any pending motion
-/// that the pump thread couldn't dispatch (e.g. user moved 2 px then
-/// paused — without this the residual would sit in `PENDING_*` until the
-/// next motion event, producing a perceptible "phantom step" when
-/// the user resumes). Cheap: a few hundred wakeups/sec at most, only
-/// does atomic loads when nothing is pending.
+fn wake_flush_watchdog() {
+    if let Some(thread) = FLUSH_WATCHDOG_THREAD.get() {
+        thread.unpark();
+    }
+}
+
+/// Spawn the event-driven flush thread once. It remains parked while input is
+/// local and while a remote session has no pending motion. Producers unpark it
+/// after adding a delta, preserving the final-fragment latency without
+/// hundreds of idle wakeups per second.
 fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>) {
     if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -344,18 +350,35 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
     if let Err(e) = thread::Builder::new()
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
+            let _ = FLUSH_WATCHDOG_THREAD.set(thread::current());
             loop {
-                let flush_us = super::target_flush_us();
-                thread::sleep(Duration::from_micros(flush_us));
-                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                while CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
                     && !super::is_game_driving()
                 {
-                    continue;
+                    thread::park();
                 }
-                let n = super::now_ms();
-                let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                if n.saturating_sub(last) * 1000 >= flush_us {
-                    flush_pending(&*sink);
+
+                while CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::is_game_driving()
+                {
+                    let flush_us = super::target_flush_us();
+                    let has_pending = PENDING_DX.load(Ordering::Acquire) != 0
+                        || PENDING_DY.load(Ordering::Acquire) != 0;
+                    if has_pending {
+                        thread::park_timeout(Duration::from_micros(flush_us));
+                    } else {
+                        thread::park();
+                    }
+
+                    if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                        && !super::is_game_driving()
+                    {
+                        break;
+                    }
+                    let n = super::now_ms();
+                    let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+                    if n.saturating_sub(last) * 1000 >= flush_us {
+                        flush_pending(&*sink);
+                    }
                 }
             }
         })
@@ -694,6 +717,13 @@ fn pump_device(
                         }
                     }
 
+                    if down || up {
+                        match key {
+                            EvKey::KEY_LEFTSHIFT => MOD_SHIFT_LEFT.store(down, Ordering::Relaxed),
+                            EvKey::KEY_RIGHTSHIFT => MOD_SHIFT_RIGHT.store(down, Ordering::Relaxed),
+                            _ => {}
+                        }
+                    }
                     // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks
                     // the peer to release if the peer holds Remote.
                     if down
@@ -702,6 +732,7 @@ fn pump_device(
                         && MOD_ALT.load(Ordering::Relaxed)
                     {
                         let mode = CURSOR_MODE.load(Ordering::Acquire);
+                        super::set_input_locked(false);
                         if mode == MODE_REMOTE {
                             info!("hotkey Ctrl+Alt+R — forcing exit_remote");
                             exit_remote();
@@ -715,17 +746,20 @@ fn pump_device(
                         continue;
                     }
 
-                    // Hotkey: Ctrl+Alt+L toggles game-mode lock —
+                    // Hotkey: Ctrl+Shift+L toggles game-mode lock —
                     // pins input to this PC so accidental edge
                     // crosses during gameplay don't yank focus.
                     if down
                         && key == EvKey::KEY_L
-                        && MOD_CTRL.load(Ordering::Relaxed)
-                        && MOD_ALT.load(Ordering::Relaxed)
+                        && super::game_lock_chord(
+                            MOD_CTRL.load(Ordering::Relaxed),
+                            MOD_SHIFT_LEFT.load(Ordering::Relaxed)
+                                || MOD_SHIFT_RIGHT.load(Ordering::Relaxed),
+                            MOD_ALT.load(Ordering::Relaxed),
+                        )
                     {
-                        let next = !super::is_input_locked();
-                        info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
-                        super::set_input_locked(next);
+                        info!("hotkey Ctrl+Shift+L — focused desktop lock");
+                        super::toggle_focused_input_lock();
                         continue;
                     }
 
@@ -753,8 +787,7 @@ fn pump_device(
                     // Mouse buttons still follow the cursor (a pinned
                     // keyboard doesn't stop the user from clicking
                     // wherever the mouse is pointing).
-                    let cursor_in_remote =
-                        CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
+                    let cursor_in_remote = CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
                     if let Some(btn) = button_from_key(key) {
                         // Local click → focus signal (regardless of
                         // whether we forward it).
@@ -818,6 +851,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
         PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
         PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        wake_flush_watchdog();
         let flush_us = super::target_flush_us();
         let now_ms = super::now_ms();
         let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
@@ -867,10 +901,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // direction motion cancels an in-flight press (user pulled
         // back from the edge).
         let (overshoot, cancel) = match super::peer_side() {
-            super::PeerSide::Left => (
-                if raw_x < 0 { Some(-raw_x) } else { None },
-                dx > 0,
-            ),
+            super::PeerSide::Left => (if raw_x < 0 { Some(-raw_x) } else { None }, dx > 0),
             super::PeerSide::Right => (
                 if raw_x > screen_w - 1 {
                     Some(raw_x - (screen_w - 1))
@@ -879,10 +910,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
                 },
                 dx < 0,
             ),
-            super::PeerSide::Top => (
-                if raw_y < 0 { Some(-raw_y) } else { None },
-                dy > 0,
-            ),
+            super::PeerSide::Top => (if raw_y < 0 { Some(-raw_y) } else { None }, dy > 0),
             super::PeerSide::Bottom => (
                 if raw_y > screen_h - 1 {
                     Some(raw_y - (screen_h - 1))
@@ -948,7 +976,8 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             super::PeerSide::Bottom => dy,
         };
         let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
-        let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
+        let new_virt_x =
+            super::clamp_remote_depth(raw, peer_w, EXIT_BUFFER_PX, super::remote_input_locked());
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
         if new_virt_x <= -EXIT_BUFFER_PX {
@@ -980,6 +1009,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // instead of eight.
         PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
         PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        wake_flush_watchdog();
 
         // Opportunistic flush: if the window has already elapsed,
         // dispatch immediately on this SYN rather than waiting for
@@ -1091,7 +1121,10 @@ impl UinputInject {
             .with_keys(&kb_keys)?
             .build()
             .context("create uinput keyboard device")?;
-        info!(name = VIRTUAL_KEYBOARD_NAME, "uinput virtual keyboard created");
+        info!(
+            name = VIRTUAL_KEYBOARD_NAME,
+            "uinput virtual keyboard created"
+        );
 
         Ok(Self {
             mouse: parking_lot::Mutex::new(mouse),
@@ -1178,16 +1211,12 @@ impl InputInject for UinputInject {
         let count = drained.len();
         for h in drained {
             let res = match h {
-                HeldKey::KbKey(code) => self.emit_keyboard(&[evdev::InputEvent::new(
-                    EventType::KEY.0,
-                    code,
-                    0,
-                )]),
-                HeldKey::MouseBtn(code) => self.emit_mouse(&[evdev::InputEvent::new(
-                    EventType::KEY.0,
-                    code,
-                    0,
-                )]),
+                HeldKey::KbKey(code) => {
+                    self.emit_keyboard(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
+                }
+                HeldKey::MouseBtn(code) => {
+                    self.emit_mouse(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
+                }
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");

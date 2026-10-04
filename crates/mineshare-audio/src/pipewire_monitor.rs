@@ -23,12 +23,12 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 use crate::codec::OpusEncoder;
 use crate::{
-    AudioCapture, AudioFrame, CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
+    AudioCapture, AudioFrame, BackendState, BackendStatus, CHANNELS, CaptureSink,
+    FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
 };
 
 const OPUS_BITRATE_BPS: i32 = 128_000;
@@ -38,6 +38,7 @@ pub struct PipewireMonitor {
     /// Kept on the struct so the subprocess gets cleaned up when the
     /// capture handle is dropped.
     child: Option<Child>,
+    status: BackendStatus,
 }
 
 impl PipewireMonitor {
@@ -45,6 +46,7 @@ impl PipewireMonitor {
         Ok(Self {
             started: false,
             child: None,
+            status: BackendStatus::new(BackendState::Idle),
         })
     }
 }
@@ -55,17 +57,22 @@ impl Drop for PipewireMonitor {
             let _ = c.kill();
             let _ = c.wait();
         }
+        self.status.set(BackendState::Stopped);
     }
 }
 
 impl AudioCapture for PipewireMonitor {
-    fn start(&mut self, sink: UnboundedSender<AudioFrame>) -> Result<()> {
+    fn backend_status(&self) -> BackendStatus {
+        self.status.clone()
+    }
+
+    fn start(&mut self, sink: CaptureSink) -> Result<()> {
         if self.started {
             return Ok(());
         }
-        self.started = true;
+        self.status.set(BackendState::Starting);
 
-        let mut child = Command::new("parec")
+        let mut child = match Command::new("parec")
             .args([
                 "--device=@DEFAULT_MONITOR@",
                 "--format=float32le",
@@ -80,21 +87,21 @@ impl AudioCapture for PipewireMonitor {
             .context(
                 "spawn `parec` (need pulseaudio-utils — `apt install pulseaudio-utils`; \
                  routing follows the user's default sink via @DEFAULT_MONITOR@)",
-            )?;
+            ) {
+            Ok(child) => child,
+            Err(error) => {
+                self.status.set(BackendState::Degraded);
+                return Err(error);
+            }
+        };
 
-        let stdout = child
-            .stdout
-            .take()
-            .context("parec stdout pipe missing")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("parec stderr pipe missing")?;
+        let stdout = child.stdout.take().context("parec stdout pipe missing")?;
+        let stderr = child.stderr.take().context("parec stderr pipe missing")?;
 
         // Surface parec's own diagnostics if it complains about the
         // monitor source not existing, the user not being in the
         // pulse-access group, etc.
-        thread::Builder::new()
+        if let Err(error) = thread::Builder::new()
             .name("parec-stderr".into())
             .spawn(move || {
                 let mut reader = std::io::BufReader::new(stderr);
@@ -108,16 +115,35 @@ impl AudioCapture for PipewireMonitor {
                     buf.clear();
                 }
             })
-            .context("spawn parec-stderr drain thread")?;
+            .context("spawn parec-stderr drain thread")
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.status.set(BackendState::Degraded);
+            return Err(error);
+        }
 
-        thread::Builder::new()
+        let worker_status = self.status.clone();
+        let status_sink = sink.clone();
+        if let Err(error) = thread::Builder::new()
             .name("parec-pcm-encode".into())
             .spawn(move || {
                 if let Err(e) = drive_encode_loop(stdout, sink) {
                     warn!(error = %e, "parec encode thread exited");
                 }
+                if status_sink.is_closed() {
+                    worker_status.set(BackendState::Stopped);
+                } else {
+                    worker_status.set(BackendState::Degraded);
+                }
             })
-            .context("spawn parec-pcm-encode thread")?;
+            .context("spawn parec-pcm-encode thread")
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.status.set(BackendState::Degraded);
+            return Err(error);
+        }
 
         info!(
             sample_rate = SAMPLE_RATE,
@@ -125,14 +151,13 @@ impl AudioCapture for PipewireMonitor {
             "PipeWire monitor capture started via parec @DEFAULT_MONITOR@"
         );
         self.child = Some(child);
+        self.started = true;
+        self.status.set(BackendState::Active);
         Ok(())
     }
 }
 
-fn drive_encode_loop<R: Read>(
-    mut reader: R,
-    sink: UnboundedSender<AudioFrame>,
-) -> Result<()> {
+fn drive_encode_loop<R: Read>(mut reader: R, sink: CaptureSink) -> Result<()> {
     let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
     // 20 ms frame = 1920 interleaved f32 samples = 7680 bytes.
     let bytes_per_frame = FRAME_SAMPLES_INTERLEAVED * std::mem::size_of::<f32>();
@@ -146,6 +171,9 @@ fn drive_encode_loop<R: Read>(
             // down or parec died. Either way, terminate cleanly.
             warn!(error = %e, "parec stdout closed — stopping monitor capture");
             return Ok(());
+        }
+        if !sink.is_active() {
+            continue;
         }
         // Reinterpret the byte buffer as f32 little-endian.
         for (i, sample) in pcm.iter_mut().enumerate() {
@@ -168,9 +196,20 @@ fn drive_encode_loop<R: Read>(
         };
         seq = seq.wrapping_add(1);
 
-        if sink.send(frame).is_err() {
+        if !sink.send_lossy(frame) {
             info!("audio sink closed — stopping PipeWire monitor capture");
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_pipewire_monitor_reports_idle_instead_of_default_degraded() {
+        let monitor = PipewireMonitor::new().unwrap();
+        assert_eq!(monitor.backend_status().get(), crate::BackendState::Idle);
     }
 }

@@ -28,7 +28,7 @@ const ThemeCtx = createContext<{ choice: ThemeChoice; setChoice: (c: ThemeChoice
 
 function readChoice(): ThemeChoice {
   const v = localStorage.getItem(STORAGE_KEY);
-  return v === "light" || v === "dark" || v === "system" ? v : "system";
+  return v === "light" || v === "dark" || v === "system" ? v : "light";
 }
 
 export function applyTheme(choice: ThemeChoice) {

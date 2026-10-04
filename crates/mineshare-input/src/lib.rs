@@ -6,7 +6,7 @@
 //! keys — Windows side translates virtual keys to scan codes on the way in
 //! and back to virtual keys on the way out.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -31,12 +31,191 @@ pub enum Button {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyCode(pub u16);
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub const MAX_TOUCHPAD_CONTACTS: usize = 5;
+
+/// Device-relative contact position. Both axes cover the complete physical
+/// touchpad range, independent of either computer's DPI or display layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchpadContact {
+    pub id: u32,
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TouchpadAction {
+    Tap,
+    Press,
+    Release,
+}
+
+/// Authoritative Precision Touchpad stream carried over the encrypted input
+/// datagram channel. A frame contains the complete active-contact snapshot;
+/// receivers derive DOWN/UPDATE/UP transitions from consecutive snapshots so
+/// the next delivered frame repairs a lost UDP begin/update packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TouchpadEvent {
+    Frame {
+        stream_id: u32,
+        count: u8,
+        contacts: [TouchpadContact; MAX_TOUCHPAD_CONTACTS],
+        terminal: bool,
+    },
+    Action {
+        fingers: u8,
+        action: TouchpadAction,
+    },
+}
+
+impl TouchpadEvent {
+    pub fn frame(stream_id: u32, contacts: &[TouchpadContact], terminal: bool) -> Option<Self> {
+        if contacts.len() > MAX_TOUCHPAD_CONTACTS
+            || (terminal && !contacts.is_empty())
+            || (!terminal && contacts.is_empty())
+        {
+            return None;
+        }
+        let mut packed = [TouchpadContact::default(); MAX_TOUCHPAD_CONTACTS];
+        packed[..contacts.len()].copy_from_slice(contacts);
+        Some(Self::Frame {
+            stream_id,
+            count: contacts.len() as u8,
+            contacts: packed,
+            terminal,
+        })
+    }
+
+    pub fn terminal(stream_id: u32) -> Self {
+        Self::Frame {
+            stream_id,
+            count: 0,
+            contacts: [TouchpadContact::default(); MAX_TOUCHPAD_CONTACTS],
+            terminal: true,
+        }
+    }
+
+    pub fn contacts(&self) -> Option<&[TouchpadContact]> {
+        match self {
+            Self::Frame {
+                count,
+                contacts,
+                terminal,
+                ..
+            } => {
+                let count = usize::from(*count);
+                (count <= MAX_TOUCHPAD_CONTACTS
+                    && ((*terminal && count == 0) || (!*terminal && count > 0)))
+                    .then(|| &contacts[..count])
+            }
+            Self::Action { .. } => None,
+        }
+    }
+
+    pub fn coalescible_stream(&self) -> Option<u32> {
+        match self {
+            Self::Frame {
+                stream_id,
+                terminal: false,
+                ..
+            } if self.contacts().is_some() => Some(*stream_id),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Frame { terminal: true, .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
     MouseMove { dx: i32, dy: i32 },
     MouseButton { btn: Button, down: bool },
     Key { code: KeyCode, down: bool },
     Scroll { dx: f32, dy: f32 },
+    Touchpad(TouchpadEvent),
+}
+
+/// Compact authoritative state for keys/buttons currently routed to the
+/// peer. Periodic snapshots heal a lost UDP key/button edge without putting
+/// every input event behind TCP retransmission latency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedInputState {
+    key_words: [u64; 16],
+    mouse_buttons: u8,
+}
+
+impl ForwardedInputState {
+    pub fn any_held(&self) -> bool {
+        self.mouse_buttons != 0 || self.key_words.iter().any(|word| *word != 0)
+    }
+
+    pub fn apply_event(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Key { code, down } => self.set_key(code.0, down),
+            InputEvent::MouseButton { btn, down } => self.set_button(btn, down),
+            InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } | InputEvent::Touchpad(_) => {}
+        }
+    }
+
+    pub fn reconciliation_events(&self, desired: &Self) -> Vec<InputEvent> {
+        let mut events = Vec::new();
+        for code in 0..1024u16 {
+            let current = self.key_is_down(code);
+            let want = desired.key_is_down(code);
+            if current != want {
+                events.push(InputEvent::Key {
+                    code: KeyCode(code),
+                    down: want,
+                });
+            }
+        }
+        for btn in [
+            Button::Left,
+            Button::Right,
+            Button::Middle,
+            Button::X1,
+            Button::X2,
+        ] {
+            let current = self.button_is_down(btn);
+            let want = desired.button_is_down(btn);
+            if current != want {
+                events.push(InputEvent::MouseButton { btn, down: want });
+            }
+        }
+        events
+    }
+
+    fn key_is_down(&self, code: u16) -> bool {
+        let index = code as usize;
+        index < 1024 && self.key_words[index / 64] & (1u64 << (index % 64)) != 0
+    }
+
+    fn set_key(&mut self, code: u16, down: bool) {
+        let index = code as usize;
+        if index >= 1024 {
+            return;
+        }
+        let mask = 1u64 << (index % 64);
+        if down {
+            self.key_words[index / 64] |= mask;
+        } else {
+            self.key_words[index / 64] &= !mask;
+        }
+    }
+
+    fn button_is_down(&self, btn: Button) -> bool {
+        self.mouse_buttons & (1u8 << btn_index(btn)) != 0
+    }
+
+    fn set_button(&mut self, btn: Button, down: bool) {
+        let mask = 1u8 << btn_index(btn);
+        if down {
+            self.mouse_buttons |= mask;
+        } else {
+            self.mouse_buttons &= !mask;
+        }
+    }
 }
 
 /// Captures raw HID input. `start` spawns whatever background work the
@@ -79,6 +258,9 @@ pub trait InputInject: Send + Sync {
     fn mouse_button(&self, btn: Button, down: bool) -> anyhow::Result<()>;
     fn key(&self, code: KeyCode, down: bool) -> anyhow::Result<()>;
     fn scroll(&self, dx: f32, dy: f32) -> anyhow::Result<()>;
+    fn touchpad(&self, _event: TouchpadEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     fn dispatch(&self, event: InputEvent) -> anyhow::Result<()> {
         match event {
@@ -89,6 +271,7 @@ pub trait InputInject: Send + Sync {
             InputEvent::MouseButton { btn, down } => self.mouse_button(btn, down),
             InputEvent::Key { code, down } => self.key(code, down),
             InputEvent::Scroll { dx, dy } => self.scroll(dx, dy),
+            InputEvent::Touchpad(event) => self.touchpad(event),
         }
     }
 
@@ -101,6 +284,36 @@ pub trait InputInject: Send + Sync {
     fn release_all_held(&self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+pub const TOUCHPAD_CAP_FRAME_CAPTURE: u32 = 1 << 0;
+pub const TOUCHPAD_CAP_ACTION_CAPTURE: u32 = 1 << 1;
+pub const TOUCHPAD_CAP_FRAME_INJECT: u32 = 1 << 2;
+pub const TOUCHPAD_CAP_ACTION_INJECT: u32 = 1 << 3;
+
+static PEER_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
+
+pub fn local_touchpad_capabilities() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        windows::touchpad_capabilities()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+pub fn set_peer_touchpad_capabilities(capabilities: u32) {
+    PEER_TOUCHPAD_CAPABILITIES.store(capabilities, Ordering::Release);
+}
+
+pub fn peer_touchpad_capabilities() -> u32 {
+    PEER_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire)
+}
+
+pub fn native_touchpad_pair_available(local: u32, peer: u32) -> bool {
+    local & TOUCHPAD_CAP_FRAME_CAPTURE != 0 && peer & TOUCHPAD_CAP_FRAME_INJECT != 0
 }
 
 /// Returns the local primary screen geometry in **physical** pixels.
@@ -134,7 +347,9 @@ pub fn local_screen_geometry() -> (u32, u32) {
 pub enum RemoteEvent {
     /// Local capture has just entered Remote mode. Translates to
     /// `ControlMsg::TakeControl`.
-    Entered,
+    Entered {
+        epoch: u64,
+    },
     /// Local capture has just left Remote mode. Translates to
     /// `ControlMsg::ReleaseControl`.
     Exited,
@@ -144,13 +359,33 @@ pub enum RemoteEvent {
     RequestPeerExit,
     /// User toggled Game Drive ON locally → ask the peer to start receiving.
     /// Translates to `ControlMsg::GameDrive { active: true }`.
-    GameDriveStart,
+    GameDriveStart {
+        epoch: u64,
+    },
     /// User toggled Game Drive OFF → ask the peer to stop receiving.
     /// Translates to `ControlMsg::GameDrive { active: false }`.
     GameDriveStop,
+    InputLockRequest(LockRequest),
+    InputLockReply(LockReply),
 }
 
+mod lock_control;
+pub use lock_control::{
+    LockReply, LockRequest, end_peer_control, note_peer_control, receive_lock_reply,
+    receive_lock_request, remote_input_locked, set_input_locked, toggle_focused_input_lock,
+};
+pub(crate) use lock_control::{end_local_control, publish_local_control};
+
 static REMOTE_EVT_TX: Mutex<Option<UnboundedSender<RemoteEvent>>> = Mutex::new(None);
+static PEER_SESSION_READY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn peer_session_ready() -> bool {
+    PEER_SESSION_READY.load(Ordering::Acquire)
+}
+
+pub(crate) fn can_enter_remote() -> bool {
+    peer_session_ready() && !peer_in_remote() && !is_input_locked()
+}
 static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 
 /// "Game mode" — when on, edge detection / press gestures / auto
@@ -159,17 +394,87 @@ static PEER_IN_REMOTE: AtomicBool = AtomicBool::new(false);
 /// deliberate escape hatch (the user can ALWAYS leave or enter
 /// Remote with the keyboard) and peer-driven auto-release on
 /// real local HW also still fires. Persisted via the daemon's
-/// AppData config, toggled via the Ctrl+Alt+L hotkey or the
+/// AppData config, toggled via the Ctrl+Shift+L hotkey or the
 /// Status tab in the GUI.
 static INPUT_LOCKED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockAnimation {
+    Flow,
+    Pulse,
+    Fade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LockEffect {
+    pub rainbow: bool,
+    pub color: [u8; 3],
+    pub animation: LockAnimation,
+    pub duration_ms: u32,
+    pub thickness: u32,
+}
+impl Default for LockEffect {
+    fn default() -> Self {
+        Self {
+            rainbow: true,
+            color: [40, 210, 190],
+            animation: LockAnimation::Flow,
+            duration_ms: 1150,
+            thickness: 6,
+        }
+    }
+}
+impl LockEffect {
+    pub fn clamped(self) -> Self {
+        Self {
+            duration_ms: self.duration_ms.clamp(300, 3000),
+            thickness: self.thickness.clamp(2, 16),
+            ..self
+        }
+    }
+}
+fn game_lock_chord(ctrl: bool, shift: bool, alt: bool) -> bool {
+    ctrl && shift && !alt
+}
+
+#[test]
+fn game_lock_requires_ctrl_shift_not_alt() {
+    for ctrl in [false, true] {
+        for shift in [false, true] {
+            for alt in [false, true] {
+                assert_eq!(
+                    game_lock_chord(ctrl, shift, alt),
+                    (ctrl, shift, alt) == (true, true, false)
+                );
+            }
+        }
+    }
+}
+
+static LOCK_EFFECT: parking_lot::Mutex<LockEffect> = parking_lot::Mutex::new(LockEffect {
+    rainbow: true,
+    color: [40, 210, 190],
+    animation: LockAnimation::Flow,
+    duration_ms: 1150,
+    thickness: 6,
+});
+pub fn set_lock_effect(effect: LockEffect) {
+    *LOCK_EFFECT.lock() = effect.clamped();
+}
+pub fn preview_lock_effect(locked: bool, effect: LockEffect) {
+    #[cfg(target_os = "windows")]
+    windows::lock_feedback::show_configured(locked, effect.clamped());
+    #[cfg(not(target_os = "windows"))]
+    let _ = (locked, effect);
+}
 
 /// Name of the foreground anti-cheat-protected game when the
 /// Win-side game-detect thread has flagged one. `None` when no
 /// risky title is in the foreground. The GUI surfaces this as a
-/// red banner on the Status tab so the user knows *why* the
-/// input lock auto-engaged. Anti-cheat engines like BattlEye /
-/// EAC / Vanguard / RICOCHET ban accounts for using injected
-/// input — flagging matters more than just cursor capture.
+/// advisory banner on the Status tab. Detection never changes the user's
+/// input lock; injected input may still be subject to a game's anti-cheat rules.
 static ANTICHEAT_WARNING: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
 pub fn anticheat_warning() -> Option<String> {
@@ -182,7 +487,7 @@ pub(crate) fn set_anticheat_warning(name: Option<String>) {
     *g = name.clone();
     if changed {
         if let Some(ref n) = name {
-            tracing::warn!(game = %n, "anti-cheat-protected game in foreground — input locked");
+            tracing::warn!(game = %n, "anti-cheat-protected game in foreground — manual lock available");
         } else {
             tracing::info!("anti-cheat foreground cleared");
         }
@@ -244,6 +549,7 @@ pub fn is_game_receiving() -> bool {
 // ---------------------------------------------------------------------------
 
 static MOUSE_SENS_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // f32 1.0
+static TOUCHPAD_SCROLL_SPEED_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // f32 1.0
 static INVERT_SCROLL_X: AtomicBool = AtomicBool::new(false);
 static INVERT_SCROLL_Y: AtomicBool = AtomicBool::new(false);
 
@@ -258,6 +564,22 @@ pub fn set_mouse_sensitivity(v: f32) {
         1.0
     };
     MOUSE_SENS_BITS.store(clamped.to_bits(), Ordering::Relaxed);
+}
+
+/// Multiplier for outgoing two-finger touchpad translation and legacy wheel
+/// deltas. Native contact scaling preserves each contact's offset from the
+/// centroid, so pinch distance and three/four-finger gestures are unaffected.
+pub fn touchpad_scroll_speed() -> f32 {
+    f32::from_bits(TOUCHPAD_SCROLL_SPEED_BITS.load(Ordering::Relaxed))
+}
+
+pub fn set_touchpad_scroll_speed(v: f32) {
+    let clamped = if v.is_finite() {
+        v.clamp(0.25, 4.0)
+    } else {
+        1.0
+    };
+    TOUCHPAD_SCROLL_SPEED_BITS.store(clamped.to_bits(), Ordering::Relaxed);
 }
 
 pub fn invert_scroll_x() -> bool {
@@ -307,8 +629,10 @@ pub fn set_mouse_rate_hz(hz: u32) {
     TARGET_FLUSH_US.store(hz_to_flush_us(hz), Ordering::Relaxed);
 }
 
-/// Current flush interval in microseconds (read by platform flush loops).
-pub(crate) fn target_flush_us() -> u64 {
+/// Current mouse-motion interval in microseconds. Platform capture loops and
+/// the daemon's receive-side injection pacer share this deadline so neither
+/// side can burst faster than the rate selected by the user.
+pub fn target_flush_us() -> u64 {
     TARGET_FLUSH_US.load(Ordering::Relaxed)
 }
 
@@ -318,6 +642,7 @@ static INJ_EVENTS: AtomicU64 = AtomicU64::new(0); // injected mouse moves (Linux
 pub(crate) fn bump_fwd_events() {
     FWD_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
+#[cfg(target_os = "linux")]
 pub(crate) fn bump_inj_events() {
     INJ_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
@@ -338,7 +663,7 @@ pub fn mouse_rate_stats() -> MouseRateStats {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: Auto-focus click on peer take-control (opt-in).
+// Auto-focus assist for remote keyboard handoff.
 //
 // On GNOME-Wayland (Ubuntu's default desktop), keyboard focus is
 // click-to-focus by default — moving the mouse cursor over a
@@ -346,54 +671,20 @@ pub fn mouse_rate_stats() -> MouseRateStats {
 // peer drives the local cursor across, our uinput keyboard does
 // emit keys, but no window has focus and the keys vanish.
 //
-// When this flag is true, the local side fires a synthetic left-
-// click in place right after the cursor-warp slam in
-// `on_peer_take_control`. The click activates whatever window is
-// under the cursor and gives it keyboard focus. Cost: it really
-// is a click — buttons / menu items / drag handles under the
-// cursor get hit. Default OFF; users on focus-follows-mouse
-// compositors don't need this and shouldn't enable it.
+// Windows activates the window under the incoming boundary cursor without a
+// synthetic click as part of TakeControl itself. Motion / first-key retries
+// cover the rare case where Windows temporarily rejects foreground transfer.
+// Linux retains its platform-specific take-control behavior.
 // ---------------------------------------------------------------------------
 
 static AUTO_FOCUS_ON_TAKE: AtomicBool = AtomicBool::new(false);
-/// Wall-clock ms of the last auto-focus click. Used to
-/// rate-limit so rapid cursor crossings (e.g. user wiggling the
-/// mouse across the edge while reading something) don't fire a
-/// click on every single cross — that's the "phantom spacebar
-/// every time I move between screens" bug, since the click on
-/// any focusable element behaves identically to pressing Space
-/// (play/pause, button activation, etc.).
-static LAST_AUTO_CLICK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const AUTO_CLICK_COOLDOWN_MS: u64 = 30_000;
 
 pub fn auto_focus_on_take_control() -> bool {
-    if !AUTO_FOCUS_ON_TAKE.load(Ordering::Relaxed) {
-        return false;
-    }
-    // Rate-limited consume: returns true at most once every
-    // 30 seconds even when the underlying setting is on, so the
-    // click only fires when the user is actually returning to
-    // the peer after a quiet period — exactly the "I haven't
-    // been here in a while, please grab focus" scenario.
-    let now = now_ms();
-    let prev = LAST_AUTO_CLICK_AT.load(Ordering::Relaxed);
-    if prev != 0 && now.saturating_sub(prev) < AUTO_CLICK_COOLDOWN_MS {
-        tracing::debug!(
-            since_last_ms = now.saturating_sub(prev),
-            "auto-focus click suppressed by cooldown"
-        );
-        return false;
-    }
-    LAST_AUTO_CLICK_AT.store(now, Ordering::Relaxed);
-    tracing::info!("auto-focus click WILL fire on take-control");
-    true
+    AUTO_FOCUS_ON_TAKE.load(Ordering::Relaxed)
 }
 
 pub fn set_auto_focus_on_take_control(v: bool) {
     AUTO_FOCUS_ON_TAKE.store(v, Ordering::Relaxed);
-    // Reset cooldown when the user toggles, so turning it on
-    // doesn't have to wait 30 s for the first click.
-    LAST_AUTO_CLICK_AT.store(0, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,24 +706,26 @@ pub(crate) fn note_key_forwarded_with_code(code: u16, down: bool) {
     // → every 50th. KEY_SPACE (57) and KEY_ENTER (28) always
     // log because they're the most common "what just typed
     // that?!" suspects.
-    if n < 10 || n % 50 == 0 || code == 57 || code == 28 {
-        tracing::info!(scancode = code, down, total = n + 1, "key forwarded to peer");
+    if n < 10 || n.is_multiple_of(50) || code == 57 || code == 28 {
+        tracing::info!(
+            scancode = code,
+            down,
+            total = n + 1,
+            "key forwarded to peer"
+        );
     }
-}
-
-pub(crate) fn note_key_forwarded() {
-    KEYS_FORWARDED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn note_key_injected_with_code(code: u16, down: bool) {
     let n = KEYS_INJECTED.fetch_add(1, Ordering::Relaxed);
-    if n < 10 || n % 50 == 0 || code == 57 || code == 28 {
-        tracing::info!(scancode = code, down, total = n + 1, "key injected from peer");
+    if n < 10 || n.is_multiple_of(50) || code == 57 || code == 28 {
+        tracing::info!(
+            scancode = code,
+            down,
+            total = n + 1,
+            "key injected from peer"
+        );
     }
-}
-
-pub(crate) fn note_key_injected() {
-    KEYS_INJECTED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn keys_forwarded() -> u64 {
@@ -544,6 +837,8 @@ pub fn reset_smart_decision() {
     // as "never", local may still read as recent).
     clear_held_forwarded();
     clear_held_buttons();
+    #[cfg(target_os = "windows")]
+    windows::reset_forwarded_keyboard_latches();
 }
 
 /// Held-key tracker for "key currently held down whose press was
@@ -562,29 +857,12 @@ pub fn reset_smart_decision() {
 /// `KEY_*` codes (0..767). 1024 is a small constant array that
 /// const-initialises and avoids any HashSet allocation in the
 /// hot path.
-static HELD_FORWARDED: parking_lot::Mutex<[bool; 1024]> =
-    parking_lot::const_mutex([false; 1024]);
+static HELD_FORWARDED: parking_lot::Mutex<[bool; 1024]> = parking_lot::const_mutex([false; 1024]);
 
 /// Was the down event for `code` forwarded? If so, the matching
 /// up MUST also be forwarded so the peer's modifier state stays
 /// consistent. Atomic-light: a single Mutex lock per keystroke
 /// is well within budget on the WH_KEYBOARD_LL hot path.
-pub(crate) fn is_held_forwarded(code: u16) -> bool {
-    let i = code as usize;
-    if i >= 1024 {
-        return false;
-    }
-    HELD_FORWARDED.lock()[i]
-}
-
-pub(crate) fn set_held_forwarded(code: u16, held: bool) {
-    let i = code as usize;
-    if i >= 1024 {
-        return;
-    }
-    HELD_FORWARDED.lock()[i] = held;
-}
-
 /// Wipe held-state on session boundaries so the new session
 /// doesn't think a key is still in flight from the old one.
 fn clear_held_forwarded() {
@@ -603,13 +881,15 @@ fn clear_held_forwarded() {
 ///   * Else if `down`, evaluate Smart and remember the decision.
 ///   * Else (up of an un-tracked key) → don't forward; the
 ///     local OS gets it as usual.
-pub fn route_keystroke(
-    code: u16,
-    down: bool,
-    cursor_in_remote: bool,
-) -> bool {
+pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
     let mut held = HELD_FORWARDED.lock();
     let i = code as usize;
+    if !peer_session_ready() {
+        if let Some(key) = held.get_mut(i) {
+            *key = false;
+        }
+        return false;
+    }
     let was_held = i < 1024 && held[i];
     let forward = if was_held {
         // Continuation — must follow through.
@@ -642,8 +922,7 @@ pub fn route_keystroke(
 /// Routing rule for buttons is simpler than for keys: there's
 /// no "Smart" — buttons always follow the cursor. So a fresh
 /// DOWN forwards iff `cursor_in_remote`.
-static MOUSE_BTNS_FORWARDED: parking_lot::Mutex<[bool; 8]> =
-    parking_lot::const_mutex([false; 8]);
+static MOUSE_BTNS_FORWARDED: parking_lot::Mutex<[bool; 8]> = parking_lot::const_mutex([false; 8]);
 
 fn btn_index(btn: Button) -> usize {
     match btn {
@@ -658,6 +937,10 @@ fn btn_index(btn: Button) -> usize {
 pub fn route_mouse_button(btn: Button, down: bool, cursor_in_remote: bool) -> bool {
     let i = btn_index(btn);
     let mut held = MOUSE_BTNS_FORWARDED.lock();
+    if !peer_session_ready() {
+        held[i] = false;
+        return false;
+    }
     let was_held = held[i];
     let forward = if was_held {
         if !down {
@@ -683,18 +966,45 @@ fn clear_held_buttons() {
     }
 }
 
+/// Snapshot the state that capture routing currently intends the peer to
+/// hold. The two small locks are never held together, avoiding lock-order
+/// coupling with the keyboard and mouse hook paths.
+pub fn forwarded_input_state() -> ForwardedInputState {
+    let mut state = ForwardedInputState::default();
+    {
+        let held = HELD_FORWARDED.lock();
+        for (code, down) in held.iter().copied().enumerate() {
+            if down {
+                state.set_key(code as u16, true);
+            }
+        }
+    }
+    {
+        let held = MOUSE_BTNS_FORWARDED.lock();
+        for (index, down) in held.iter().copied().enumerate().take(5) {
+            if down {
+                state.mouse_buttons |= 1u8 << index;
+            }
+        }
+    }
+    state
+}
+
 /// Should this side forward an incoming keystroke to the peer?
 /// `cursor_in_remote` is the capture-side mouse-mode flag.
 ///
 /// Smart rule — "the keyboard follows the screen whose mouse was
 /// active most recently":
-///   1. Cursor crossed onto the peer screen → peer. Hard override:
+///   1. Peer cursor crossed onto this screen → local. Hard override:
+///      the local physical keyboard must not be captured and reflected
+///      back to the peer while both keyboards are targeting this screen.
+///   2. Cursor crossed onto the peer screen → peer. Hard override:
 ///      the physical local mouse keeps emitting HW motion while it
 ///      drives the peer cursor, so a raw motion race would wrongly
 ///      say local.
-///   2. Both sides stale (idle past `ACTIVITY_FRESH_MS`, or never
+///   3. Both sides stale (idle past `ACTIVITY_FRESH_MS`, or never
 ///      active) → keep the sticky decision (defaults to local).
-///   3. Otherwise the more-recently-active side wins.
+///   4. Otherwise the more-recently-active side wins.
 ///
 /// "Active" = a deliberate drag (see `bump_local_mouse_activity`) or
 /// any click. A brief nudge does NOT count, so it can't steal the
@@ -706,6 +1016,15 @@ fn clear_held_buttons() {
 /// so without it a minute of mutual idle would let the capped peer age
 /// "win" the race and silently flip the keyboard across.
 pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
+    if !peer_session_ready() {
+        return false;
+    }
+    if is_input_locked() {
+        return false;
+    }
+    if remote_input_locked() && cursor_in_remote {
+        return true;
+    }
     // Game Drive: while we are driving the peer's game, every key goes to
     // the peer regardless of cursor position or Smart routing.
     if is_game_driving() {
@@ -719,19 +1038,20 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
 
     match keyboard_target() {
         KeyboardTarget::Smart => {
-            let to_peer = if cursor_in_remote {
-                true
-            } else {
-                let la = local_activity_age();
-                let pa = peer_activity_age();
-                if la >= ACTIVITY_FRESH_MS && pa >= ACTIVITY_FRESH_MS {
-                    // Both idle (or never active) — hold the last call.
-                    LAST_SMART_TO_PEER.load(Ordering::Relaxed)
+            let to_peer =
+                if let Some(to_peer) = cursor_focus_is_peer(cursor_in_remote, peer_in_remote()) {
+                    to_peer
                 } else {
-                    // Smaller age = more recent. A tie falls to local.
-                    pa < la
-                }
-            };
+                    let la = local_activity_age();
+                    let pa = peer_activity_age();
+                    if la >= ACTIVITY_FRESH_MS && pa >= ACTIVITY_FRESH_MS {
+                        // Both idle (or never active) — hold the last call.
+                        LAST_SMART_TO_PEER.load(Ordering::Relaxed)
+                    } else {
+                        // Smaller age = more recent. A tie falls to local.
+                        pa < la
+                    }
+                };
             LAST_SMART_TO_PEER.store(to_peer, Ordering::Relaxed);
             to_peer
         }
@@ -739,6 +1059,22 @@ pub fn should_forward_keys(cursor_in_remote: bool) -> bool {
         KeyboardTarget::ForcePeer => true,
         KeyboardTarget::ForceLocal => false,
     }
+}
+
+/// Shared concrete ownership rule for Smart keys and desktop commands.
+/// Outbound capture wins over a stale inbound flag during collision resolution.
+pub(crate) fn cursor_focus_is_peer(outbound: bool, inbound: bool) -> Option<bool> {
+    if outbound {
+        Some(true)
+    } else if inbound {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn clamp_remote_depth(depth: i32, max: i32, exit_buffer: i32, locked: bool) -> i32 {
+    depth.clamp(if locked { 0 } else { -exit_buffer }, max.max(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -851,13 +1187,21 @@ fn local_activity_at() -> u64 {
 /// Age (ms) of the most recent local activity; `u64::MAX` = never.
 fn local_activity_age() -> u64 {
     let at = local_activity_at();
-    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
+    if at == 0 {
+        u64::MAX
+    } else {
+        now_ms().saturating_sub(at)
+    }
 }
 
 /// Age (ms) of the most recent peer activity; `u64::MAX` = never.
 fn peer_activity_age() -> u64 {
     let at = PEER_ACTIVITY_AT.load(Ordering::Relaxed);
-    if at == 0 { u64::MAX } else { now_ms().saturating_sub(at) }
+    if at == 0 {
+        u64::MAX
+    } else {
+        now_ms().saturating_sub(at)
+    }
 }
 
 /// ms since the local user's most recent activity (drag or click),
@@ -882,19 +1226,6 @@ pub fn scale_delta(d: i32, residue: &mut f32) -> i32 {
     let whole = scaled.trunc();
     *residue = scaled - whole;
     whole as i32
-}
-
-pub fn set_input_locked(v: bool) {
-    let prev = INPUT_LOCKED.swap(v, Ordering::AcqRel);
-    if prev != v {
-        tracing::info!(locked = v, "input lock toggled");
-        if v {
-            // Engaging the lock while in Remote drops us back to
-            // local immediately so the user isn't stuck driving
-            // the peer with no edge-crossing way back.
-            force_local_exit_remote();
-        }
-    }
 }
 
 /// Which side of the local screen the peer monitor is "stuck to"
@@ -950,10 +1281,13 @@ pub fn set_peer_side(side: PeerSide) {
 /// up. Capture modules call `fire_remote_event` on each transition.
 pub fn set_remote_event_sender(tx: UnboundedSender<RemoteEvent>) {
     *REMOTE_EVT_TX.lock() = Some(tx);
+    PEER_SESSION_READY.store(true, Ordering::Release);
 }
 
 pub fn clear_remote_event_sender() {
+    PEER_SESSION_READY.store(false, Ordering::Release);
     *REMOTE_EVT_TX.lock() = None;
+    lock_control::reset();
 }
 
 /// Returns true if the peer has signalled it is currently driving Remote
@@ -985,7 +1319,30 @@ pub fn peer_in_remote() -> bool {
 }
 
 pub fn set_peer_in_remote(v: bool) {
+    if !v {
+        end_peer_control();
+    }
     PEER_IN_REMOTE.store(v, Ordering::Release);
+    if v {
+        // A peer crossing onto this screen makes this screen the concrete
+        // Smart-keyboard destination. Clear any peer-directed decision left
+        // over from earlier activity so releasing control cannot resurrect
+        // a stale route before either mouse moves again.
+        LAST_SMART_TO_PEER.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Immediately revoke peer mouse ownership when genuine local hardware
+/// motion is detected. The control-plane `RequestPeerExit` still tells the
+/// peer to stop forwarding, but the local data plane must not wait for that
+/// round trip: otherwise queued `SendInput` motion fights the user's
+/// touchpad/mouse for the cursor until the acknowledgement arrives.
+///
+/// Returns `true` only for the first caller that performs the takeover so a
+/// burst of low-level-hook callbacks emits one control request, not one per
+/// hardware sample.
+pub(crate) fn reclaim_from_peer_hardware() -> bool {
+    lock_control::reclaim_from_peer_hardware()
 }
 
 pub(crate) fn fire_remote_event(ev: RemoteEvent) {
@@ -996,22 +1353,27 @@ pub(crate) fn fire_remote_event(ev: RemoteEvent) {
 
 /// Toggle Game Drive from this machine. When turning ON we become `Driving`
 /// and signal the peer to `Receiving`; when turning OFF we reset and signal
-/// stop. No-op semantics if there is no peer are handled by the daemon
-/// (the RemoteEvent simply isn't delivered).
+/// stop. Starting while disconnected must be a no-op: silently dropping the
+/// RemoteEvent would still grab the local mouse/keyboard with no destination.
 pub fn toggle_game_drive() {
     // Either role (Driving or Receiving) turns OFF on toggle so the person at
     // EITHER machine — including the one running the anti-cheat game — can
     // abort the session. Firing Stop makes the peer exit too.
     if is_game_driving() || is_game_receiving() {
         set_game_drive(GameDrive::Off);
+        end_local_control();
+        end_peer_control();
         fire_remote_event(RemoteEvent::GameDriveStop);
-    } else {
+    } else if peer_session_ready() {
         // Start from a clean LOCAL state: if the cursor had crossed into
         // REMOTE, the REMOTE motion branch would run virt_x + the anchor
         // warp and re-introduce the in-game camera fling. Force LOCAL first.
         force_local_exit_remote();
-        set_game_drive(GameDrive::Driving);
-        fire_remote_event(RemoteEvent::GameDriveStart);
+        set_input_locked(false);
+        publish_local_control(true, || set_game_drive(GameDrive::Driving));
+        if !peer_session_ready() {
+            set_game_drive(GameDrive::Off);
+        }
     }
 }
 
@@ -1039,17 +1401,7 @@ pub fn on_peer_take_control(inject: &dyn InputInject) {
     #[cfg(target_os = "windows")]
     {
         windows::on_peer_take_control();
-        // Phase 2 auto-focus: cursor warp alone doesn't shift
-        // keyboard focus on Windows (foreground window stays put
-        // when SetCursorPos moves the cursor without a click).
-        // The opt-in click here fires AFTER the warp so the
-        // window now under the cursor takes focus and subsequent
-        // key inject calls land on it.
-        if auto_focus_on_take_control() {
-            let _ = inject.mouse_button(Button::Left, true);
-            let _ = inject.mouse_button(Button::Left, false);
-            tracing::info!("auto-focus click fired on TakeControl");
-        }
+        let _ = inject;
     }
     #[cfg(target_os = "linux")]
     {
@@ -1122,16 +1474,82 @@ mod tests {
     static TEST_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
 
     fn reset() {
+        PEER_SESSION_READY.store(true, Ordering::Release);
         LOCAL_MOUSE_AT.store(0, Relaxed);
         LOCAL_CLICK_AT.store(0, Relaxed);
         PEER_ACTIVITY_AT.store(0, Relaxed);
         MOTION_RUN_START.store(0, Relaxed);
         LAST_MOTION_AT.store(0, Relaxed);
         LAST_SMART_TO_PEER.store(false, Relaxed);
+        set_peer_in_remote(false);
         set_keyboard_target(KeyboardTarget::Smart);
         set_game_drive(GameDrive::Off);
         clear_held_forwarded();
         clear_held_buttons();
+    }
+
+    #[test]
+    fn disconnected_peer_cannot_consume_local_input_in_any_routing_mode() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        set_remote_event_sender(tx);
+        assert!(can_enter_remote());
+        assert!(route_keystroke(37, true, true));
+        assert!(route_mouse_button(Button::Left, true, true));
+        clear_remote_event_sender();
+        assert!(!can_enter_remote());
+        assert!(!route_keystroke(37, true, true));
+        assert!(!route_keystroke(37, false, true));
+        assert!(!route_mouse_button(Button::Left, false, true));
+        assert!(!route_mouse_button(Button::Left, true, true));
+        for target in [
+            KeyboardTarget::Smart,
+            KeyboardTarget::Auto,
+            KeyboardTarget::ForcePeer,
+            KeyboardTarget::ForceLocal,
+        ] {
+            set_keyboard_target(target);
+            assert!(!should_forward_keys(false));
+            assert!(!should_forward_keys(true));
+        }
+        toggle_game_drive();
+        assert_eq!(game_drive(), GameDrive::Off);
+        reset();
+    }
+
+    #[test]
+    fn touchpad_frame_rejects_malformed_contact_counts() {
+        let contact = TouchpadContact { id: 1, x: 2, y: 3 };
+        let frame = TouchpadEvent::frame(9, &[contact], false).expect("valid contact frame");
+        assert_eq!(frame.contacts(), Some(&[contact][..]));
+        assert!(TouchpadEvent::frame(9, &[], false).is_none());
+        assert!(TouchpadEvent::frame(9, &[contact], true).is_none());
+
+        let malformed = TouchpadEvent::Frame {
+            stream_id: 9,
+            count: (MAX_TOUCHPAD_CONTACTS + 1) as u8,
+            contacts: [TouchpadContact::default(); MAX_TOUCHPAD_CONTACTS],
+            terminal: false,
+        };
+        assert!(malformed.contacts().is_none());
+        assert_eq!(TouchpadEvent::terminal(9).contacts(), Some(&[][..]));
+    }
+
+    #[test]
+    fn touchpad_capability_falls_back_without_both_frame_sides() {
+        assert!(native_touchpad_pair_available(
+            TOUCHPAD_CAP_FRAME_CAPTURE,
+            TOUCHPAD_CAP_FRAME_INJECT
+        ));
+        assert!(!native_touchpad_pair_available(
+            TOUCHPAD_CAP_FRAME_CAPTURE,
+            0
+        ));
+        assert!(!native_touchpad_pair_available(
+            0,
+            TOUCHPAD_CAP_FRAME_INJECT
+        ));
     }
 
     #[test]
@@ -1174,13 +1592,17 @@ mod tests {
         toggle_game_drive();
         assert!(is_game_driving(), "toggle from Off enters Driving");
         toggle_game_drive();
-        assert_eq!(game_drive(), GameDrive::Off, "toggle from Driving returns Off");
+        assert_eq!(
+            game_drive(),
+            GameDrive::Off,
+            "toggle from Driving returns Off"
+        );
     }
 
     #[test]
     fn game_drive_remote_events_exist() {
         // Compile-time proof the toggle signal variants exist and are distinct.
-        let a = RemoteEvent::GameDriveStart;
+        let a = RemoteEvent::GameDriveStart { epoch: 1 };
         let b = RemoteEvent::GameDriveStop;
         assert_ne!(format!("{a:?}"), format!("{b:?}"));
     }
@@ -1191,7 +1613,10 @@ mod tests {
         reset();
         set_keyboard_target(KeyboardTarget::ForceLocal); // even pinned-local…
         set_game_drive(GameDrive::Driving);
-        assert!(should_forward_keys(false), "Driving must forward keys to peer");
+        assert!(
+            should_forward_keys(false),
+            "Driving must forward keys to peer"
+        );
         set_game_drive(GameDrive::Off);
         assert!(!should_forward_keys(false), "Off + ForceLocal stays local");
     }
@@ -1217,9 +1642,15 @@ mod tests {
                 *self.0.lock().unwrap() = (dx, dy);
                 Ok(())
             }
-            fn mouse_button(&self, _: Button, _: bool) -> anyhow::Result<()> { Ok(()) }
-            fn key(&self, _: KeyCode, _: bool) -> anyhow::Result<()> { Ok(()) }
-            fn scroll(&self, _: f32, _: f32) -> anyhow::Result<()> { Ok(()) }
+            fn mouse_button(&self, _: Button, _: bool) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn key(&self, _: KeyCode, _: bool) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn scroll(&self, _: f32, _: f32) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let r = Rec(Mutex::new((0, 0)));
 
@@ -1227,7 +1658,8 @@ mod tests {
         // peer-take-control warp (see log: "warped cursor" then
         // MouseMove { dx: -969, dy: 453 }). It MUST be clamped so one bad
         // event can't teleport a mouse-look game's camera.
-        r.dispatch(InputEvent::MouseMove { dx: -969, dy: 453 }).unwrap();
+        r.dispatch(InputEvent::MouseMove { dx: -969, dy: 453 })
+            .unwrap();
         assert_eq!(
             *r.0.lock().unwrap(),
             (-MAX_INJECT_DELTA_PX, MAX_INJECT_DELTA_PX),
@@ -1236,7 +1668,8 @@ mod tests {
 
         // Normal in-game motion (observed peak ~64 px/event) passes through
         // untouched — the clamp must not throttle real aiming.
-        r.dispatch(InputEvent::MouseMove { dx: 64, dy: -18 }).unwrap();
+        r.dispatch(InputEvent::MouseMove { dx: 64, dy: -18 })
+            .unwrap();
         assert_eq!(
             *r.0.lock().unwrap(),
             (64, -18),
@@ -1265,6 +1698,40 @@ mod tests {
     }
 
     #[test]
+    fn peer_driving_local_screen_keeps_laptop_keyboard_local() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        let now = now_ms();
+        LOCAL_MOUSE_AT.store(now - 1000, Relaxed);
+        PEER_ACTIVITY_AT.store(now - 50, Relaxed);
+        set_peer_in_remote(true);
+
+        assert!(
+            !route_keystroke(30, true, false),
+            "when the peer cursor is on this screen, this machine's physical keyboard must remain local"
+        );
+        assert!(
+            !route_keystroke(30, false, false),
+            "the matching local key-up must also remain local"
+        );
+    }
+
+    #[test]
+    fn peer_control_handoff_clears_stale_smart_peer_route() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        LAST_SMART_TO_PEER.store(true, Relaxed);
+
+        set_peer_in_remote(true);
+        set_peer_in_remote(false);
+
+        assert!(
+            !should_forward_keys(false),
+            "a completed peer-control handoff must not resurrect the previous peer-directed sticky route"
+        );
+    }
+
+    #[test]
     fn click_counts_as_activity() {
         let _g = TEST_LOCK.lock();
         reset();
@@ -1284,6 +1751,26 @@ mod tests {
         // peer screen — that wins.
         LOCAL_MOUSE_AT.store(now - 5, Relaxed);
         assert!(should_forward_keys(true));
+    }
+
+    #[test]
+    fn physical_pc_key_follows_its_remote_cursor_during_stale_inbound_overlap() {
+        let _g = TEST_LOCK.lock();
+        reset();
+
+        // A delayed TakeControl can briefly leave both ownership flags set
+        // while collision resolution crosses the TCP control link. The real
+        // PC cursor is already on the Laptop, so its physical K key must not
+        // leak into the PC's foreground window during that overlap.
+        set_peer_in_remote(true);
+        assert!(
+            route_keystroke(37, true, true),
+            "physical PC K-down must follow the PC cursor to the Laptop"
+        );
+        assert!(
+            route_keystroke(37, false, true),
+            "physical PC K-up must follow the same routed press"
+        );
     }
 
     #[test]
@@ -1394,6 +1881,90 @@ mod tests {
             PEER_ACTIVITY_AT.load(Relaxed),
             0,
             "reset_smart_decision must clear stale peer-activity timing"
+        );
+    }
+
+    #[test]
+    fn held_state_snapshot_reconciles_lost_edges() {
+        let mut injected = ForwardedInputState::default();
+        let mut desired = ForwardedInputState::default();
+        desired.apply_event(InputEvent::Key {
+            code: KeyCode(30),
+            down: true,
+        });
+        desired.apply_event(InputEvent::MouseButton {
+            btn: Button::Left,
+            down: true,
+        });
+
+        let presses = injected.reconciliation_events(&desired);
+        assert_eq!(presses.len(), 2);
+        for event in presses {
+            injected.apply_event(event);
+        }
+        assert_eq!(injected, desired);
+
+        let released = ForwardedInputState::default();
+        let releases = injected.reconciliation_events(&released);
+        assert_eq!(releases.len(), 2);
+        assert!(releases.iter().all(|event| matches!(
+            event,
+            InputEvent::Key { down: false, .. } | InputEvent::MouseButton { down: false, .. }
+        )));
+    }
+
+    #[test]
+    fn forwarded_snapshot_matches_routing_tracker() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        assert!(route_keystroke(42, true, true));
+        assert!(route_mouse_button(Button::Right, true, true));
+
+        let snapshot = forwarded_input_state();
+        let events = ForwardedInputState::default().reconciliation_events(&snapshot);
+        assert!(events.contains(&InputEvent::Key {
+            code: KeyCode(42),
+            down: true,
+        }));
+        assert!(events.contains(&InputEvent::MouseButton {
+            btn: Button::Right,
+            down: true,
+        }));
+
+        reset_smart_decision();
+    }
+
+    #[test]
+    fn forwarded_snapshot_preserves_normalized_extended_keycode() {
+        let _g = TEST_LOCK.lock();
+        reset();
+        // KEY_LEFTMETA is the Linux evdev code emitted for the Windows logo
+        // key. It must not regress to the raw Windows 0x5B scan code in a
+        // held-state snapshot.
+        assert!(route_keystroke(125, true, true));
+
+        let snapshot = forwarded_input_state();
+        let events = ForwardedInputState::default().reconciliation_events(&snapshot);
+        assert!(events.contains(&InputEvent::Key {
+            code: KeyCode(125),
+            down: true,
+        }));
+
+        reset_smart_decision();
+    }
+
+    #[test]
+    fn local_hardware_takeover_is_immediate_and_one_shot() {
+        let _g = TEST_LOCK.lock();
+        set_peer_in_remote(true);
+        assert!(
+            reclaim_from_peer_hardware(),
+            "first local hardware motion must revoke remote ownership"
+        );
+        assert!(!peer_in_remote(), "remote motion must be gated immediately");
+        assert!(
+            !reclaim_from_peer_hardware(),
+            "one hardware burst must emit only one peer-exit request"
         );
     }
 }

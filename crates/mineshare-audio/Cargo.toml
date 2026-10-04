@@ -17,3 +17,13 @@ parking_lot = { workspace = true }
 cpal = { workspace = true }
 opus = { workspace = true }
 ringbuf = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.54", features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }

@@ -131,17 +131,33 @@ pub struct EncryptedSession {
 
 struct Inner {
     state: Mutex<StatelessTransportState>,
-    next_send_nonce: std::sync::atomic::AtomicU64,
-    replay: Mutex<ReplayWindow>,
+    control_send_nonce: std::sync::atomic::AtomicU64,
+    datagram_send_nonce: std::sync::atomic::AtomicU64,
+    control_replay: Mutex<ReplayWindow>,
+    datagram_replay: Mutex<ReplayWindow>,
 }
+
+/// Nonce namespaces for independently-reordered transports. TCP control and
+/// UDP datagrams share Noise keys, but must not share replay ordering: UDP can
+/// legitimately overtake a delayed TCP frame by hundreds of packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportDomain {
+    Control,
+    Datagram,
+}
+
+const DATAGRAM_NONCE_BIT: u64 = 1 << 63;
+const NONCE_COUNTER_MASK: u64 = !DATAGRAM_NONCE_BIT;
 
 impl EncryptedSession {
     pub fn from(session: NoiseSession) -> Self {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(session.transport),
-                next_send_nonce: std::sync::atomic::AtomicU64::new(0),
-                replay: Mutex::new(ReplayWindow::default()),
+                control_send_nonce: std::sync::atomic::AtomicU64::new(0),
+                datagram_send_nonce: std::sync::atomic::AtomicU64::new(0),
+                control_replay: Mutex::new(ReplayWindow::default()),
+                datagram_replay: Mutex::new(ReplayWindow::default()),
             }),
         }
     }
@@ -153,11 +169,17 @@ impl EncryptedSession {
     }
 
     /// Encrypt `plaintext`. Returns wire bytes: `[u64 nonce][ciphertext]`.
-    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let nonce = self
-            .inner
-            .next_send_nonce
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn seal_for(&self, domain: TransportDomain, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let counter = match domain {
+            TransportDomain::Control => &self.inner.control_send_nonce,
+            TransportDomain::Datagram => &self.inner.datagram_send_nonce,
+        }
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        anyhow::ensure!(counter <= NONCE_COUNTER_MASK, "transport nonce exhausted");
+        let nonce = match domain {
+            TransportDomain::Control => counter,
+            TransportDomain::Datagram => counter | DATAGRAM_NONCE_BIT,
+        };
         let mut buf = vec![0u8; plaintext.len() + 16];
         let n = self
             .inner
@@ -171,23 +193,35 @@ impl EncryptedSession {
         Ok(out)
     }
 
-    /// Decrypt a wire frame into plaintext, rejecting replays.
-    pub fn open(&self, frame: &[u8]) -> Result<Vec<u8>> {
+    /// Decrypt a wire frame into plaintext, rejecting replays. The replay
+    /// window is updated only after authentication succeeds; otherwise a
+    /// forged high nonce could advance the window and suppress real traffic.
+    pub fn open_for(&self, domain: TransportDomain, frame: &[u8]) -> Result<Vec<u8>> {
         if frame.len() < 8 {
             anyhow::bail!("frame too short");
         }
         let mut n = [0u8; 8];
         n.copy_from_slice(&frame[..8]);
         let nonce = u64::from_be_bytes(n);
-
-        if !self.inner.replay.lock().check_and_record(nonce) {
-            anyhow::bail!("replay or out-of-window nonce {nonce}");
-        }
+        let wire_domain = if nonce & DATAGRAM_NONCE_BIT == 0 {
+            TransportDomain::Control
+        } else {
+            TransportDomain::Datagram
+        };
+        anyhow::ensure!(wire_domain == domain, "transport nonce domain mismatch");
 
         let ct = &frame[8..];
         let mut buf = vec![0u8; ct.len()];
         let n = self.inner.state.lock().read_message(nonce, ct, &mut buf)?;
         buf.truncate(n);
+        let counter = nonce & NONCE_COUNTER_MASK;
+        let accepted = match domain {
+            TransportDomain::Control => self.inner.control_replay.lock().check_and_record(counter),
+            TransportDomain::Datagram => {
+                self.inner.datagram_replay.lock().check_and_record(counter)
+            }
+        };
+        anyhow::ensure!(accepted, "replay or out-of-window nonce {nonce}");
         Ok(buf)
     }
 }
@@ -265,18 +299,77 @@ mod tests {
 
         // initiator -> responder
         let pt = b"hello mineshare";
-        let frame = init_aead.seal(pt).unwrap();
-        let out = resp_aead.open(&frame).unwrap();
+        let frame = init_aead.seal_for(TransportDomain::Datagram, pt).unwrap();
+        let out = resp_aead
+            .open_for(TransportDomain::Datagram, &frame)
+            .unwrap();
         assert_eq!(out, pt);
 
         // replay should fail
-        assert!(resp_aead.open(&frame).is_err());
+        assert!(
+            resp_aead
+                .open_for(TransportDomain::Datagram, &frame)
+                .is_err()
+        );
 
         // responder -> initiator (reversed direction works because
         // StatelessTransportState exposes both write and read)
-        let frame2 = resp_aead.seal(b"reply").unwrap();
-        let out2 = init_aead.open(&frame2).unwrap();
+        let frame2 = resp_aead
+            .seal_for(TransportDomain::Datagram, b"reply")
+            .unwrap();
+        let out2 = init_aead
+            .open_for(TransportDomain::Datagram, &frame2)
+            .unwrap();
         assert_eq!(out2, b"reply");
+
+        // A delayed TCP control frame must remain valid even after enough UDP
+        // traffic to move the datagram replay window by more than 128 slots.
+        let delayed_control = init_aead
+            .seal_for(TransportDomain::Control, b"delayed control")
+            .unwrap();
+        for n in 0..200u16 {
+            let payload = n.to_be_bytes();
+            let datagram = init_aead
+                .seal_for(TransportDomain::Datagram, &payload)
+                .unwrap();
+            assert_eq!(
+                resp_aead
+                    .open_for(TransportDomain::Datagram, &datagram)
+                    .unwrap(),
+                payload
+            );
+        }
+        assert_eq!(
+            resp_aead
+                .open_for(TransportDomain::Control, &delayed_control)
+                .unwrap(),
+            b"delayed control"
+        );
+
+        // Invalid ciphertext carrying a forged high nonce must not poison the
+        // replay window. The untouched authenticated frame is still accepted.
+        let valid = init_aead
+            .seal_for(TransportDomain::Datagram, b"after forged nonce")
+            .unwrap();
+        let mut forged = valid.clone();
+        forged[..8].copy_from_slice(&(DATAGRAM_NONCE_BIT | 10_000).to_be_bytes());
+        assert!(
+            resp_aead
+                .open_for(TransportDomain::Datagram, &forged)
+                .is_err()
+        );
+        assert_eq!(
+            resp_aead
+                .open_for(TransportDomain::Datagram, &valid)
+                .unwrap(),
+            b"after forged nonce"
+        );
+
+        assert!(
+            resp_aead
+                .open_for(TransportDomain::Control, &valid)
+                .is_err()
+        );
     }
 
     #[test]

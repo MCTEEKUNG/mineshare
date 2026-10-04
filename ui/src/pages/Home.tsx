@@ -24,7 +24,7 @@ function ConnectionHero({ status, latency }: { status: Status; latency: Latency 
       <div className="flex items-center justify-between gap-6">
         <div className="flex items-center gap-4">
           <MachineBadge label="This PC" active />
-          <span className="text-emerald-400 font-mono text-lg">━━●━━▶</span>
+          <span className="text-ds-accent font-mono text-lg">━━●━━▶</span>
           <MachineBadge label={status.peer_name ?? "Peer"} active={connected} />
         </div>
         <div className="text-right">
@@ -86,9 +86,11 @@ function GameLockCard({
         <p className="text-xs text-ds-text-muted mt-1 max-w-prose leading-relaxed">
           {t("game_mode_desc")}{" "}
           <span className="text-ds-text-muted">
-            {t("game_mode_shortcut")} <kbd className="font-mono text-ds-text bg-ds-hover px-1 py-0.5 rounded text-[10px]">Ctrl+Alt+L</kbd>.
+            {t("game_mode_shortcut")} <kbd className="font-mono text-ds-text bg-ds-hover px-1 py-0.5 rounded text-[10px]">Ctrl+Shift+L</kbd>.
           </span>
         </p>
+        <p className="text-xs text-ds-text-muted mt-2">ปุ่มนี้ควบคุมเครื่องนี้ · Ctrl+Shift+L ล็อกเครื่องที่เคอร์เซอร์ควบคุม</p>
+        {s.remote_input_locked && <p role="status" className="text-xs text-amber-400 mt-2">Peer desktop locked · กด Ctrl+Shift+L เพื่อปลดล็อกปลายทาง</p>}
       </div>
       <button
         onClick={() => onChange(!locked)}

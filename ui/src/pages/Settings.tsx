@@ -4,6 +4,7 @@ import HotkeysPage from "./Hotkeys";
 import AdvancedPage from "./Advanced";
 import { useT } from "../i18n";
 import { ThemeSwitcher } from "../theme";
+import LockEffectSection from "./LockEffect";
 
 export default function SettingsPage() {
   const { t } = useT();
@@ -13,6 +14,7 @@ export default function SettingsPage() {
         <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_appearance")}</h3>
         <ThemeSwitcher />
       </section>
+      <LockEffectSection />
       <section>
         <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_performance")}</h3>
         <PerformanceSection />
@@ -81,7 +83,10 @@ function PerformanceSection() {
     setErr(null);
     setSettings(next);
     try {
-      const applied = await invoke<{ mouse_rate_hz: number }>("set_settings", { settings: next });
+      const applied = await invoke<{ mouse_rate_hz: number }>("patch_settings", {
+        // Only write this control's field, not other sections' stale settings.
+        patch: { mouse_rate_hz: next.mouse_rate_hz },
+      });
       setSettings(applied);
     } catch (e) {
       setErr(String(e));
@@ -110,7 +115,7 @@ function PerformanceSection() {
         value={settings.mouse_rate_hz}
         onChange={(e) => update({ ...settings, mouse_rate_hz: parseInt(e.target.value, 10) })}
         list="mouse-rate-ticks"
-        className="w-full accent-emerald-500"
+        className="w-full [accent-color:var(--ds-accent)]"
       />
       <datalist id="mouse-rate-ticks">
         <option value="125" /><option value="250" /><option value="500" /><option value="1000" />

@@ -21,22 +21,23 @@
 //! boundary so the wire format stays uniform.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub mod codec;
 pub mod cpal_mic;
 pub mod playback;
+#[cfg(target_os = "windows")]
+mod process_loopback_win;
 pub mod resample;
 
 #[cfg(target_os = "windows")]
-pub mod wasapi_loopback;
-#[cfg(target_os = "windows")]
 pub mod virtual_mic_win;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub mod pipewire_monitor;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub mod virtual_mic_linux;
 
 /// Audio kind tag — both directions of the bridge ride the same wire,
@@ -67,12 +68,55 @@ pub const CHANNELS: u16 = 2;
 pub const FRAME_SAMPLES_PER_CHANNEL: usize = 960;
 pub const FRAME_SAMPLES_INTERLEAVED: usize = FRAME_SAMPLES_PER_CHANNEL * CHANNELS as usize;
 
-/// Construct the platform-specific sysout capture: WASAPI loopback
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum BackendState {
+    Idle = 0,
+    Starting = 1,
+    Active = 2,
+    Degraded = 3,
+    Stopped = 4,
+}
+
+#[derive(Clone)]
+pub struct BackendStatus {
+    state: Arc<AtomicU8>,
+}
+
+impl BackendStatus {
+    pub fn new(initial: BackendState) -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(initial as u8)),
+        }
+    }
+
+    pub fn set(&self, state: BackendState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    pub fn get(&self) -> BackendState {
+        match self.state.load(Ordering::Acquire) {
+            0 => BackendState::Idle,
+            1 => BackendState::Starting,
+            2 => BackendState::Active,
+            3 => BackendState::Degraded,
+            _ => BackendState::Stopped,
+        }
+    }
+}
+
+impl Default for BackendStatus {
+    fn default() -> Self {
+        Self::new(BackendState::Degraded)
+    }
+}
+
+/// Construct the platform-specific sysout capture: process-isolated WASAPI
 /// on Windows, PipeWire monitor on Linux.
 pub fn make_sysout_capture() -> anyhow::Result<Box<dyn AudioCapture>> {
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(wasapi_loopback::WasapiLoopback::new()?))
+        Ok(Box::new(process_loopback_win::ProcessLoopbackCapture::new()))
     }
     #[cfg(target_os = "linux")]
     {
@@ -207,8 +251,10 @@ pub struct DeviceInfo {
 
 static SELECTED_OUTPUT: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 static SELECTED_INPUT: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+static SELECTED_SYSOUT_CAPTURE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 static OUTPUT_VERSION: AtomicU64 = AtomicU64::new(0);
 static INPUT_VERSION: AtomicU64 = AtomicU64::new(0);
+static SYSOUT_CAPTURE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// Set the preferred output device by name. Pass `None` to revert
 /// to the system default. The change takes effect within ~200 ms,
@@ -224,12 +270,23 @@ pub fn set_input_device(name: Option<String>) {
     INPUT_VERSION.fetch_add(1, Ordering::Release);
 }
 
+/// Select the render endpoint whose mixer is captured as local system audio.
+/// This is deliberately separate from peer-audio playback routing.
+pub fn set_sysout_capture_device(name: Option<String>) {
+    *SELECTED_SYSOUT_CAPTURE.lock() = name;
+    SYSOUT_CAPTURE_VERSION.fetch_add(1, Ordering::Release);
+}
+
 pub fn selected_output_device() -> Option<String> {
     SELECTED_OUTPUT.lock().clone()
 }
 
 pub fn selected_input_device() -> Option<String> {
     SELECTED_INPUT.lock().clone()
+}
+
+pub fn selected_sysout_capture_device() -> Option<String> {
+    SELECTED_SYSOUT_CAPTURE.lock().clone()
 }
 
 pub fn output_device_version() -> u64 {
@@ -240,18 +297,22 @@ pub fn input_device_version() -> u64 {
     INPUT_VERSION.load(Ordering::Acquire)
 }
 
+pub fn sysout_capture_device_version() -> u64 {
+    SYSOUT_CAPTURE_VERSION.load(Ordering::Acquire)
+}
+
 /// Resolve the cpal output device matching the user's selection, or
 /// the system default if no selection / not found. Used by the
 /// playback thread when (re)building a stream.
 pub fn resolve_output_device() -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    if let Some(want) = selected_output_device() {
-        if let Ok(iter) = host.output_devices() {
-            for d in iter {
-                if d.name().ok().as_deref() == Some(want.as_str()) {
-                    return Some(d);
-                }
+    if let Some(want) = selected_output_device()
+        && let Ok(iter) = host.output_devices()
+    {
+        for d in iter {
+            if d.name().ok().as_deref() == Some(want.as_str()) {
+                return Some(d);
             }
         }
         // selection no longer present — fall through to default.
@@ -259,20 +320,49 @@ pub fn resolve_output_device() -> Option<cpal::Device> {
     host.default_output_device()
 }
 
+/// Cheap probe used by the playback module while it is following the OS
+/// default. Unlike full device enumeration this asks cpal for one endpoint, so
+/// polling it at a human-scale interval does not reintroduce the old COM/CPU
+/// problem from the Devices page.
+pub(crate) fn default_output_device_name() -> Option<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
+
 /// Mirror of [`resolve_output_device`] for the mic capture path.
 pub fn resolve_input_device() -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    if let Some(want) = selected_input_device() {
-        if let Ok(iter) = host.input_devices() {
-            for d in iter {
-                if d.name().ok().as_deref() == Some(want.as_str()) {
-                    return Some(d);
-                }
+    if let Some(want) = selected_input_device()
+        && let Ok(iter) = host.input_devices()
+    {
+        for d in iter {
+            if d.name().ok().as_deref() == Some(want.as_str()) {
+                return Some(d);
             }
         }
     }
     host.default_input_device()
+}
+
+/// Resolve the endpoint used for WASAPI system-audio loopback. A missing
+/// explicit selection falls back safely to the current OS default while the
+/// preference remains intact for a future hot-plug recovery.
+pub fn resolve_sysout_capture_device() -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    if let Some(want) = selected_sysout_capture_device()
+        && let Ok(iter) = host.output_devices()
+    {
+        for d in iter {
+            if d.name().ok().as_deref() == Some(want.as_str()) {
+                return Some(d);
+            }
+        }
+    }
+    host.default_output_device()
 }
 
 /// Construct a virtual-mic playback sink — peer mic frames flow into
@@ -306,17 +396,282 @@ pub fn make_playback() -> anyhow::Result<Box<dyn AudioPlayback>> {
     Ok(Box::new(playback::CpalPlayback::new()?))
 }
 
+/// Bounded hand-off from a capture thread to the async runtime, plus a cheap
+/// demand probe. Capture backends release their hardware/COM resources when
+/// there is no connected peer or the user disabled that stream.
+#[derive(Clone)]
+pub struct CaptureSink {
+    tx: tokio::sync::mpsc::Sender<AudioFrame>,
+    active: std::sync::Arc<dyn Fn() -> bool + Send + Sync + 'static>,
+}
+
+impl CaptureSink {
+    pub fn new<F>(tx: tokio::sync::mpsc::Sender<AudioFrame>, active: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        Self {
+            tx,
+            active: std::sync::Arc::new(active),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        (self.active)()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Returns false only when the runtime receiver has closed. A full queue is
+    /// an intentional lossy drop: stale real-time audio must not accumulate.
+    pub fn send_lossy(&self, frame: AudioFrame) -> bool {
+        match self.tx.try_send(frame) {
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+}
+
 pub trait AudioCapture: Send {
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
+
+    fn backend_status(&self) -> BackendStatus {
+        BackendStatus::default()
+    }
+
     /// Spawn whatever background work the platform needs and push
-    /// encoded frames into `sink`. Returns immediately.
-    fn start(
-        &mut self,
-        sink: tokio::sync::mpsc::UnboundedSender<AudioFrame>,
-    ) -> anyhow::Result<()>;
+    /// encoded frames into the bounded, lossy `sink`. Returns immediately.
+    fn start(&mut self, sink: CaptureSink) -> anyhow::Result<()>;
+}
+
+#[derive(Debug, Default)]
+struct PlaybackSessionIngress {
+    accepted: AtomicU64,
+    consumed: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackSession {
+    epoch: u64,
+    ingress: Arc<PlaybackSessionIngress>,
+}
+
+impl PartialEq for PlaybackSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+}
+
+impl Eq for PlaybackSession {}
+
+impl PlaybackSession {
+    pub(crate) fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            ingress: Arc::new(PlaybackSessionIngress::default()),
+        }
+    }
+
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.ingress, &other.ingress)
+    }
+
+    pub(crate) fn note_accepted_frame(&self) {
+        self.ingress.accepted.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn note_consumed_frame(&self) {
+        self.ingress.consumed.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_pending_ingress(&self) -> bool {
+        self.ingress.accepted.load(Ordering::Acquire)
+            != self.ingress.consumed.load(Ordering::Acquire)
+    }
 }
 
 pub trait AudioPlayback: Send + Sync {
+    fn backend_status(&self) -> BackendStatus {
+        BackendStatus::default()
+    }
+
+    /// Establish an opaque receive identity for one peer session. Implementations
+    /// must reject frames submitted with any older identity.
+    fn begin_session(&self) -> PlaybackSession {
+        PlaybackSession::new(0)
+    }
+
+    /// Retire a receive identity when its peer connection ends. Implementations
+    /// must make in-flight builds and queued frames for this identity stale.
+    fn end_session(&self, _session: &PlaybackSession) {}
+
     /// Decode and enqueue one frame for playback. Lossy: drops on
     /// buffer overflow (better latency than blocking).
-    fn enqueue(&self, frame: AudioFrame) -> anyhow::Result<()>;
+    fn enqueue(&self, session: &PlaybackSession, frame: AudioFrame) -> anyhow::Result<()>;
+}
+
+pub struct PlaybackSessionLease<'a> {
+    playback: &'a dyn AudioPlayback,
+    token: PlaybackSession,
+}
+
+impl<'a> PlaybackSessionLease<'a> {
+    pub fn begin(playback: &'a dyn AudioPlayback) -> Self {
+        Self {
+            playback,
+            token: playback.begin_session(),
+        }
+    }
+
+    pub fn token(&self) -> &PlaybackSession {
+        &self.token
+    }
+}
+
+impl Drop for PlaybackSessionLease<'_> {
+    fn drop(&mut self) {
+        self.playback.end_session(&self.token);
+    }
+}
+
+#[cfg(test)]
+mod playback_session_lease_tests {
+    use super::*;
+
+    struct RecordingPlayback {
+        ended: AtomicU64,
+    }
+
+    impl AudioPlayback for RecordingPlayback {
+        fn begin_session(&self) -> PlaybackSession {
+            PlaybackSession::new(7)
+        }
+
+        fn end_session(&self, session: &PlaybackSession) {
+            if session.epoch() == 7 {
+                self.ended.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        fn enqueue(&self, _session: &PlaybackSession, _frame: AudioFrame) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_session_lease_retires_the_backend_identity() {
+        let playback = RecordingPlayback {
+            ended: AtomicU64::new(0),
+        };
+        {
+            let lease = PlaybackSessionLease::begin(&playback);
+            assert_eq!(lease.token().epoch(), 7);
+        }
+        assert_eq!(playback.ended.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(test)]
+mod capture_sink_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{AudioFrame, CaptureSink, StreamKind};
+
+    fn frame(seq: u32) -> AudioFrame {
+        AudioFrame {
+            stream: StreamKind::Mic,
+            seq,
+            opus: vec![seq as u8],
+        }
+    }
+
+    #[test]
+    fn capture_sink_is_dynamic_bounded_and_lossy() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let enabled_for_sink = enabled.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let sink = CaptureSink::new(tx, move || enabled_for_sink.load(Ordering::Relaxed));
+
+        assert!(!sink.is_active());
+        enabled.store(true, Ordering::Relaxed);
+        assert!(sink.is_active());
+        assert!(sink.send_lossy(frame(1)));
+        for seq in 2..=100_001 {
+            assert!(sink.send_lossy(frame(seq)), "a full queue is a lossy drop");
+        }
+        assert_eq!(rx.len(), 1);
+        drop(rx);
+        assert!(sink.is_closed());
+        assert!(!sink.send_lossy(frame(3)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_sysout_factory_is_process_isolated() {
+        let capture = super::make_sysout_capture().expect("factory must be lazy and hardware-free");
+        assert_eq!(capture.backend_name(), "windows-process-loopback");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual hardware/CPU gate; requires working loopback and mic devices"]
+    fn windows_capture_backends_skip_frames_without_demand() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut sysout = super::make_sysout_capture().expect("WASAPI loopback must be available");
+        let mut mic = super::make_mic_capture().expect("default mic must be available");
+        sysout
+            .start(CaptureSink::new(tx.clone(), || false))
+            .expect("start WASAPI loopback");
+        mic.start(CaptureSink::new(tx, || false))
+            .expect("start mic capture");
+
+        // Long enough for both 20 ms pipelines to produce hundreds of source
+        // frames if the demand gate regresses.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "inactive capture encoded or queued audio"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual comparison probe; requires working loopback and mic devices"]
+    fn windows_capture_backends_encode_with_demand() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut sysout = super::make_sysout_capture().expect("WASAPI loopback must be available");
+        let mut mic = super::make_mic_capture().expect("default mic must be available");
+        sysout
+            .start(CaptureSink::new(tx.clone(), || true))
+            .expect("start WASAPI loopback");
+        mic.start(CaptureSink::new(tx, || true))
+            .expect("start mic capture");
+
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        assert!(!rx.is_empty(), "active capture did not encode any audio");
+    }
+}
+
+#[cfg(test)]
+mod backend_status_tests {
+    use super::*;
+
+    #[test]
+    fn backend_status_reports_worker_transitions() {
+        let status = BackendStatus::new(BackendState::Idle);
+        status.set(BackendState::Active);
+        assert_eq!(status.get(), BackendState::Active);
+    }
 }

@@ -25,9 +25,12 @@ pub fn bootstrap_runtime() -> Result<()> {
     let _ = logs::init();
 
     tauri::async_runtime::spawn(async move {
+        let capture = std::env::var_os("MINESHARE_DISABLE_CAPTURE").is_none();
+        let audio = std::env::var_os("MINESHARE_DISABLE_AUDIO").is_none();
         let opts = runtime::RunOpts {
-            capture: true,
+            capture,
             inject: true,
+            audio,
         };
         if let Err(e) = runtime::run(opts).await {
             error!(error = %e, "embedded daemon runtime ended with error");

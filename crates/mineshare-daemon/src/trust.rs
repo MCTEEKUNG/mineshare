@@ -60,8 +60,18 @@ fn load_or_default() -> TrustList {
 
 fn save(list: &TrustList) -> Result<()> {
     let path = config_path()?;
-    fs::write(&path, serde_json::to_vec_pretty(list)?)
+    crate::settings::atomic_write_file(&path, &serde_json::to_vec_pretty(list)?)
         .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn persist_then_cache(
+    cache: &mut Option<TrustList>,
+    next: TrustList,
+    persist: impl FnOnce(&TrustList) -> Result<()>,
+) -> Result<()> {
+    persist(&next)?;
+    *cache = Some(next);
     Ok(())
 }
 
@@ -90,7 +100,7 @@ pub fn add_trusted(device_id: &str, display_name: &str, noise_static: &[u8]) -> 
     let hex = encode_hex(noise_static);
     let mut g = CACHED.lock();
     ensure_loaded(&mut g);
-    let list = g.as_mut().unwrap();
+    let mut list = g.as_ref().unwrap().clone();
     list.trusted.retain(|p| p.device_id != device_id);
     list.trusted.push(TrustedPeer {
         device_id: device_id.to_string(),
@@ -98,7 +108,7 @@ pub fn add_trusted(device_id: &str, display_name: &str, noise_static: &[u8]) -> 
         noise_static_hex: hex,
         paired_at: now_unix(),
     });
-    save(list)?;
+    persist_then_cache(&mut g, list, save)?;
     tracing::info!(device_id, display_name, "trusted peer recorded");
     Ok(())
 }
@@ -112,11 +122,11 @@ pub fn list_trusted() -> Vec<TrustedPeer> {
 pub fn revoke(device_id: &str) -> Result<()> {
     let mut g = CACHED.lock();
     ensure_loaded(&mut g);
-    let list = g.as_mut().unwrap();
+    let mut list = g.as_ref().unwrap().clone();
     let before = list.trusted.len();
     list.trusted.retain(|p| p.device_id != device_id);
     if list.trusted.len() != before {
-        save(list)?;
+        persist_then_cache(&mut g, list, save)?;
         tracing::info!(device_id, "trusted peer revoked");
     }
     Ok(())
@@ -136,4 +146,28 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_persistence_does_not_authorize_a_peer_in_memory() {
+        let mut cached = Some(TrustList::default());
+        let next = TrustList {
+            trusted: vec![TrustedPeer {
+                device_id: "peer".into(),
+                display_name: "peer".into(),
+                noise_static_hex: "key".into(),
+                paired_at: 0,
+            }],
+        };
+        assert!(
+            persist_then_cache(&mut cached, next.clone(), |_| anyhow::bail!("disk full")).is_err()
+        );
+        assert!(cached.as_ref().unwrap().trusted.is_empty());
+        persist_then_cache(&mut cached, next, |_| Ok(())).unwrap();
+        assert_eq!(cached.unwrap().trusted.len(), 1);
+    }
 }

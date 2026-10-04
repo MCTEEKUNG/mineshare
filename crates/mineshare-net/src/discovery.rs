@@ -273,7 +273,10 @@ mod tests {
     #[test]
     fn identical_endpoint_is_same() {
         // Byte-identical (the genuine multi-NIC duplicate) → suppress.
-        assert!(same_endpoint(&advert(5000, &["192.168.1.5"]), &advert(5000, &["192.168.1.5"])));
+        assert!(same_endpoint(
+            &advert(5000, &["192.168.1.5"]),
+            &advert(5000, &["192.168.1.5"])
+        ));
     }
 
     #[test]
@@ -288,13 +291,19 @@ mod tests {
     #[test]
     fn changed_port_is_different() {
         // Ephemeral control port rotated on restart → must re-fire.
-        assert!(!same_endpoint(&advert(5000, &["192.168.1.5"]), &advert(6001, &["192.168.1.5"])));
+        assert!(!same_endpoint(
+            &advert(5000, &["192.168.1.5"]),
+            &advert(6001, &["192.168.1.5"])
+        ));
     }
 
     #[test]
     fn changed_ip_is_different() {
         // DHCP reassigned the host → must re-fire.
-        assert!(!same_endpoint(&advert(5000, &["192.168.1.5"]), &advert(5000, &["192.168.1.9"])));
+        assert!(!same_endpoint(
+            &advert(5000, &["192.168.1.5"]),
+            &advert(5000, &["192.168.1.9"])
+        ));
     }
 
     #[test]
@@ -308,4 +317,3 @@ mod tests {
         ));
     }
 }
-
