@@ -59,7 +59,3 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[patch.crates-io]
-# Keep the standalone Tauri lock on the same upstream quick-xml advisory fix.
-wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "d07c4f91f28b42e5a485823ffd9d8d5a210b1053" }
