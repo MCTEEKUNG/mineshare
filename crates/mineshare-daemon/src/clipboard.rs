@@ -1,8 +1,8 @@
 //! Cross-platform clipboard text + image sync.
 //!
 //! M4 Slice 1: a daemon-lifetime watcher polls the local clipboard
-//! every `POLL_MS` and pushes a copy onto an mpsc when the text
-//! changes. The peer-session writer task reads those events and
+//! every `POLL_MS` (Windows checks its revision without opening unchanged
+//! data) and pushes changed snapshots onto an mpsc. The writer reads events and
 //! sends them as `ControlMsg::ClipboardText` over the existing
 //! encrypted TCP control channel — no new sockets, no new
 //! handshakes.
@@ -11,10 +11,13 @@
 //!
 //! A naive setup loops: A copies → A→B sends → B sets clipboard →
 //! B's watcher sees a "change" → B→A sends → A sets → … forever.
-//! We sidestep that by sharing the `LAST_TEXT` static between the
+//! We sidestep that by sharing the `LAST_CLIPBOARD` static between the
 //! watcher and the inbound handler. When we set the clipboard from a
-//! peer message we *also* update `LAST_TEXT` to the same value, so
+//! peer message we *also* update `LAST_CLIPBOARD` to the same value, so
 //! the next watcher tick sees `current == last` and skips the send.
+//! Windows also remembers the revision of our own write: unchanged images
+//! are never decoded again, and Ctrl+C of identical content is a new local
+//! copy. Queued peer data cannot replace a newer local revision.
 //!
 //! ## Wayland note
 //!
@@ -35,7 +38,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
-const POLL_MS: u64 = 400;
+// Windows can check a revision without opening (and locking) the clipboard.
+// Only read/decode its contents when that revision changes.
+const POLL_MS: u64 = if cfg!(target_os = "windows") { 50 } else { 400 };
 /// Cap forwarded clipboard size — pasting a 50 MB log into the
 /// clipboard shouldn't accidentally flood the control channel.
 // Leave room for ControlMsg/bincode framing and Noise's 16-byte tag inside
@@ -103,8 +108,77 @@ enum ApplyEvent {
     Files(Vec<PathBuf>),
 }
 
+struct PendingApply {
+    event: ApplyEvent,
+    received_revision: Option<u32>,
+}
+
+/// Local clipboard writes take precedence over an older queued peer snapshot.
+/// Our own writes are distinguished from user copies, so two consecutive peer
+/// updates still work even if the second arrived while applying the first.
+#[derive(Default)]
+struct RevisionGuard {
+    observed: Option<u32>,
+    applied: Option<u32>,
+    polled: bool,
+}
+
+impl RevisionGuard {
+    fn new(revision: Option<u32>) -> Self {
+        Self {
+            observed: revision,
+            ..Self::default()
+        }
+    }
+
+    fn needs_poll(&self, revision: Option<u32>) -> bool {
+        !self.polled || revision.is_none() || revision != self.observed
+    }
+
+    fn observe(&mut self, revision: Option<u32>) {
+        self.observed = revision;
+        self.polled = true;
+    }
+
+    fn applied(&mut self, revision: Option<u32>) {
+        self.observe(revision);
+        self.applied = revision;
+    }
+
+    fn may_apply(&self, received: Option<u32>, current: Option<u32>) -> bool {
+        let Some(current) = current else {
+            return true;
+        };
+        if self.local_revision_changed(Some(current)) {
+            // A user copy happened since our last poll. Do not overwrite it
+            // just because an inbound wake-up beat the change-detection tick.
+            return false;
+        }
+        received.is_none_or(|received| received == current) || self.applied == Some(current)
+    }
+
+    fn local_revision_changed(&self, revision: Option<u32>) -> bool {
+        revision.is_some() && self.observed.is_some() && revision != self.observed
+    }
+}
+
+fn clipboard_revision() -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        // This does not OpenClipboard or read any user data. Zero means the
+        // API is unavailable for this window station; retain basic polling.
+        let revision =
+            unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+        (revision != 0).then_some(revision)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 static APPLY_TX: Mutex<Option<std::sync::mpsc::SyncSender<()>>> = Mutex::new(None);
-static PENDING_APPLY: Mutex<Option<ApplyEvent>> = Mutex::new(None);
+static PENDING_APPLY: Mutex<Option<PendingApply>> = Mutex::new(None);
 static INCOMING_IMAGE: Mutex<Option<IncomingImage>> = Mutex::new(None);
 const APPLY_QUEUE_CAPACITY: usize = 1;
 
@@ -123,6 +197,7 @@ struct IncomingImage {
     height: usize,
     total_bytes: usize,
     rgba: Vec<u8>,
+    received_revision: Option<u32>,
 }
 
 impl IncomingImage {
@@ -137,6 +212,7 @@ impl IncomingImage {
             height,
             total_bytes,
             rgba: Vec::with_capacity(total_bytes),
+            received_revision: clipboard_revision(),
         })
     }
 
@@ -292,6 +368,7 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                 }
             };
             info!(poll_ms = POLL_MS, "clipboard watcher started");
+            let mut revisions = RevisionGuard::new(clipboard_revision());
 
             loop {
                 // Block up to POLL_MS for an inbound peer payload. A
@@ -300,47 +377,55 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                 // Either way, all `arboard` calls stay on this thread.
                 match apply_rx.recv_timeout(Duration::from_millis(POLL_MS)) {
                     Ok(()) => {
-                        let Some(event) = PENDING_APPLY.lock().take() else {
+                        let Some(pending) = PENDING_APPLY.lock().take() else {
                             continue;
                         };
-                        match event {
-                            ApplyEvent::Files(paths) => {
-                                let fingerprint = file_fingerprint(&paths);
-                                match clipboard.set().file_list(&paths) {
-                                    Ok(()) => {
+                        if revisions.may_apply(pending.received_revision, clipboard_revision()) {
+                            match pending.event {
+                                ApplyEvent::Files(paths) => {
+                                    let fingerprint = file_fingerprint(&paths);
+                                    match clipboard.set().file_list(&paths) {
+                                        Ok(()) => {
+                                            *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                            revisions.applied(clipboard_revision());
+                                            info!(count = paths.len(), "applied peer clipboard files");
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, "failed to apply peer clipboard files")
+                                        }
+                                    }
+                                }
+                                ApplyEvent::Text(text) => {
+                                    let fingerprint = ClipboardFingerprint::Text(text.clone());
+                                    if let Err(e) = clipboard.set_text(text) {
+                                        debug!(error = %e, "failed to apply peer clipboard text");
+                                    } else {
                                         *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                                        info!(count = paths.len(), "applied peer clipboard files");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "failed to apply peer clipboard files")
+                                        revisions.applied(clipboard_revision());
+                                        debug!("applied peer clipboard text (on watcher thread)");
                                     }
                                 }
-                            }
-                            ApplyEvent::Text(text) => {
-                                let fingerprint = ClipboardFingerprint::Text(text.clone());
-                                if let Err(e) = clipboard.set_text(text) {
-                                    debug!(error = %e, "failed to apply peer clipboard text");
-                                } else {
-                                    *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                                    debug!("applied peer clipboard text (on watcher thread)");
+                                ApplyEvent::Image(image) => {
+                                    let fingerprint = image_fingerprint(&image);
+                                    let width = image.width;
+                                    let height = image.height;
+                                    if let Err(e) = clipboard.set_image(image) {
+                                        debug!(
+                                            error = %e,
+                                            "failed to apply peer clipboard image"
+                                        );
+                                    } else {
+                                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                        revisions.applied(clipboard_revision());
+                                        info!(width, height, "applied peer clipboard image");
+                                    }
                                 }
                             }
-                            ApplyEvent::Image(image) => {
-                                let fingerprint = image_fingerprint(&image);
-                                let width = image.width;
-                                let height = image.height;
-                                if let Err(e) = clipboard.set_image(image) {
-                                    debug!(
-                                        error = %e,
-                                        "failed to apply peer clipboard image"
-                                    );
-                                } else {
-                                    *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                                    info!(width, height, "applied peer clipboard image");
-                                }
-                            }
+                            continue;
                         }
-                        continue;
+                        debug!("discarded stale peer clipboard — preserving newer local copy");
+                        // Poll and publish the local copy now, rather than
+                        // letting a burst of stale inbound events starve it.
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         // Fall through to the change-detection poll.
@@ -351,16 +436,29 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         // keep polling rather than killing the thread.
                     }
                 }
+                let revision = clipboard_revision();
+                if !revisions.needs_poll(revision) {
+                    continue;
+                }
                 // Explorer's native file list must not degrade to filename text.
                 if let Ok(paths) = clipboard.get().file_list()
                     && !paths.is_empty()
                 {
                     let fingerprint = file_fingerprint(&paths);
-                    if LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                    if clipboard_revision() != revision {
+                        continue;
+                    }
+                    if revisions.local_revision_changed(revision)
+                        || LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
                         match crate::files::send_clipboard(paths, &runtime) {
-                            Ok(()) => *LAST_CLIPBOARD.lock() = Some(fingerprint),
+                            Ok(()) => {
+                                *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                revisions.observe(revision);
+                            }
                             Err(e) => debug!(error = %e, "clipboard files not forwarded"),
                         }
+                    } else {
+                        revisions.observe(revision);
                     }
                     continue;
                 }
@@ -368,13 +466,20 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                 match clipboard.get_image() {
                     Ok(image) => {
                         let fingerprint = image_fingerprint(&image);
-                        if LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                        if clipboard_revision() != revision {
+                            continue;
+                        }
+                        if revisions.local_revision_changed(revision)
+                            || LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
                             let tx = REPLACE_TX_GUARD.lock().clone();
                             if let Some(tx) = tx
                                 && send_image(&tx, image)
                             {
                                 *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                                revisions.observe(revision);
                             }
+                        } else {
+                            revisions.observe(revision);
                         }
                         continue;
                     }
@@ -394,8 +499,12 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         continue;
                     }
                 };
+                if clipboard_revision() != revision {
+                    continue;
+                }
                 if let Some(current) = current_text {
                     if current.len() > MAX_BYTES {
+                        revisions.observe(revision);
                         debug!(
                             bytes = current.len(),
                             cap = MAX_BYTES,
@@ -404,7 +513,9 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         continue;
                     }
                     let fingerprint = ClipboardFingerprint::Text(current.clone());
-                    if LAST_CLIPBOARD.lock().as_ref() == Some(&fingerprint) {
+                    if !revisions.local_revision_changed(revision)
+                        && LAST_CLIPBOARD.lock().as_ref() == Some(&fingerprint) {
+                        revisions.observe(revision);
                         continue;
                     }
                     let tx = REPLACE_TX_GUARD.lock().clone();
@@ -413,10 +524,12 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                             debug!("clipboard sink closed — waiting for next session");
                         } else {
                             *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                            revisions.observe(revision);
                         }
                     }
                     continue;
                 }
+                revisions.observe(revision);
             }
         });
     if let Err(e) = started {
@@ -466,10 +579,13 @@ pub fn apply_files_from_peer(paths: Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
     *INCOMING_IMAGE.lock() = None;
-    enqueue_apply(ApplyEvent::Files(paths))
+    enqueue_apply(PendingApply {
+        event: ApplyEvent::Files(paths),
+        received_revision: clipboard_revision(),
+    })
 }
 
-fn enqueue_apply(event: ApplyEvent) -> Result<()> {
+fn enqueue_apply(event: PendingApply) -> Result<()> {
     let guard = APPLY_TX.lock();
     match guard.as_ref() {
         Some(tx) => {
@@ -494,11 +610,14 @@ fn enqueue_apply(event: ApplyEvent) -> Result<()> {
 fn assemble_event(
     incoming: &mut Option<IncomingImage>,
     event: ClipboardEvent,
-) -> Result<Option<ApplyEvent>> {
+) -> Result<Option<PendingApply>> {
     match event {
         ClipboardEvent::Text(text) => {
             *incoming = None;
-            Ok(Some(ApplyEvent::Text(text)))
+            Ok(Some(PendingApply {
+                event: ApplyEvent::Text(text),
+                received_revision: clipboard_revision(),
+            }))
         }
         ClipboardEvent::ImageStart {
             id,
@@ -524,9 +643,12 @@ fn assemble_event(
         ClipboardEvent::ImageEnd { id } => {
             let image = incoming
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("image end without start"))?
-                .finish(id)?;
-            Ok(Some(ApplyEvent::Image(image)))
+                .ok_or_else(|| anyhow::anyhow!("image end without start"))?;
+            let received_revision = image.received_revision;
+            Ok(Some(PendingApply {
+                event: ApplyEvent::Image(image.finish(id)?),
+                received_revision,
+            }))
         }
     }
 }
@@ -542,6 +664,83 @@ pub const fn queue_capacity() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_copy_before_poll_cannot_be_overwritten_by_peer_wakeup() {
+        let mut guard = RevisionGuard::new(Some(100));
+        guard.applied(Some(100)); // old laptop text currently on desktop
+        assert!(!guard.may_apply(Some(101), Some(101))); // Ctrl+C beat our tick
+        assert!(guard.needs_poll(Some(101)));
+        guard.observe(Some(101)); // publish desktop copy
+        assert!(!guard.may_apply(Some(100), Some(101))); // late old laptop data
+        assert!(guard.may_apply(Some(101), Some(101))); // truly new peer update
+    }
+
+    #[test]
+    fn queued_peer_updates_are_not_mistaken_for_local_copies() {
+        let mut guard = RevisionGuard::new(Some(100));
+        assert!(guard.may_apply(Some(100), Some(100)));
+        guard.applied(Some(102));
+        assert!(guard.may_apply(Some(100), Some(102)));
+        assert!(!guard.needs_poll(Some(102))); // no decode/hash/echo of own write
+    }
+
+    #[test]
+    fn copying_identical_text_again_is_a_new_local_copy() {
+        let mut guard = RevisionGuard::new(Some(100));
+        guard.applied(Some(100));
+        assert!(!guard.local_revision_changed(Some(100)));
+        assert!(guard.local_revision_changed(Some(101)));
+        guard.observe(Some(101));
+        assert!(!guard.local_revision_changed(Some(101)));
+    }
+
+    #[test]
+    fn unchanged_windows_clipboard_is_not_reopened_each_tick() {
+        let mut guard = RevisionGuard::new(Some(100));
+        assert!(guard.needs_poll(Some(100)));
+        guard.observe(Some(100));
+        assert!(!guard.needs_poll(Some(100)));
+        assert!(guard.needs_poll(Some(101)));
+        // A failed read/send must leave the revision eligible for retry.
+        assert!(guard.needs_poll(Some(101)));
+    }
+
+    #[test]
+    fn revision_wrap_and_missing_native_api_keep_sync_working() {
+        let mut guard = RevisionGuard::new(Some(u32::MAX));
+        guard.observe(Some(u32::MAX));
+        assert!(!guard.may_apply(Some(u32::MAX), Some(1)));
+        assert!(guard.needs_poll(Some(1)));
+        guard.observe(Some(1));
+        assert!(guard.may_apply(Some(1), Some(1)));
+        let mut fallback = RevisionGuard::default();
+        fallback.observe(None);
+        assert!(fallback.needs_poll(None));
+        assert!(fallback.may_apply(None, None));
+    }
+
+    #[test]
+    fn delayed_image_keeps_begin_revision_and_cannot_replace_new_text() {
+        let mut incoming = Some(IncomingImage::new(9, 1, 1, 4).unwrap());
+        incoming.as_mut().unwrap().received_revision = Some(100);
+        assemble_event(
+            &mut incoming,
+            ClipboardEvent::ImageChunk {
+                id: 9,
+                offset: 0,
+                data: vec![0; 4],
+            },
+        )
+        .unwrap();
+        let pending = assemble_event(&mut incoming, ClipboardEvent::ImageEnd { id: 9 })
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.received_revision, Some(100));
+        let mut guard = RevisionGuard::new(Some(100));
+        guard.observe(Some(101));
+        assert!(!guard.may_apply(pending.received_revision, Some(101)));
+    }
 
     #[test]
     fn screenshot_burst_larger_than_old_queue_publishes_only_when_complete() {
@@ -574,8 +773,10 @@ mod tests {
                 .is_none()
             );
         }
-        let Some(ApplyEvent::Image(image)) =
-            assemble_event(&mut incoming, ClipboardEvent::ImageEnd { id: 41 }).unwrap()
+        let Some(PendingApply {
+            event: ApplyEvent::Image(image),
+            ..
+        }) = assemble_event(&mut incoming, ClipboardEvent::ImageEnd { id: 41 }).unwrap()
         else {
             panic!("complete screenshot not published");
         };
@@ -603,7 +804,10 @@ mod tests {
         incoming = Some(IncomingImage::new(1, 1, 1, 4).unwrap());
         assert!(matches!(
             assemble_event(&mut incoming, ClipboardEvent::Text("replacement".into())).unwrap(),
-            Some(ApplyEvent::Text(_))
+            Some(PendingApply {
+                event: ApplyEvent::Text(_),
+                ..
+            })
         ));
         assert!(incoming.is_none());
     }
