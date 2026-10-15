@@ -2741,9 +2741,10 @@ mod tests {
         InjectSender, InputReceiveOrdering, MAX_WIRE_MOTION_MERGE, STANDBY_RECONNECT_DELAY,
         SessionStats, SnapshotPressDeduper, WireFrame, can_merge_wire_motion,
         control_collision_action, legacy_echo_guard_policy, motion_pacing_step,
-        reconnect_initial_delay, retry_stale_owned_input, should_arm_sysout_echo_guard,
-        should_send_input_state, should_suppress_outbound_sysout,
+        reconnect_initial_delay, retry_stale_owned_input, should_send_input_state,
     };
+    #[cfg(target_os = "windows")]
+    use super::{should_arm_sysout_echo_guard, should_suppress_outbound_sysout};
 
     #[cfg(target_os = "windows")]
     #[test]
