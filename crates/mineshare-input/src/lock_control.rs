@@ -192,6 +192,7 @@ pub fn receive_lock_request(request: LockRequest) -> LockReply {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn reclaim_from_peer_hardware() -> bool {
     let mut route = ROUTE.lock();
     if super::is_input_locked() {

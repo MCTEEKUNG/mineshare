@@ -481,6 +481,7 @@ pub fn anticheat_warning() -> Option<String> {
     ANTICHEAT_WARNING.lock().clone()
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn set_anticheat_warning(name: Option<String>) {
     let mut g = ANTICHEAT_WARNING.lock();
     let changed = g.as_ref() != name.as_ref();
@@ -639,6 +640,7 @@ pub fn target_flush_us() -> u64 {
 static FWD_EVENTS: AtomicU64 = AtomicU64::new(0); // forwarded MouseMove flushes (Windows)
 static INJ_EVENTS: AtomicU64 = AtomicU64::new(0); // injected mouse moves (Linux/receiver)
 
+#[cfg(target_os = "windows")]
 pub(crate) fn bump_fwd_events() {
     FWD_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
@@ -1341,6 +1343,7 @@ pub fn set_peer_in_remote(v: bool) {
 /// Returns `true` only for the first caller that performs the takeover so a
 /// burst of low-level-hook callbacks emits one control request, not one per
 /// hardware sample.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn reclaim_from_peer_hardware() -> bool {
     lock_control::reclaim_from_peer_hardware()
 }
