@@ -48,9 +48,9 @@ use windows::Win32::UI::Input::{
     RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CURSOR_SHOWING, CURSORINFO, CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    GA_ROOT, GetAncestor, GetClipCursor, GetCursorInfo, GetCursorPos, GetMessageW,
-    GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+    CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, CallNextHookEx, CreateWindowExW, DefWindowProcW,
+    DispatchMessageW, GA_ROOT, GetAncestor, GetClipCursor, GetCursorInfo, GetCursorPos,
+    GetMessageW, GetSystemMetrics, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
     PostThreadMessageW, RI_KEY_BREAK, RI_KEY_E0, RegisterClassExW, SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow,
     SetWindowsHookExW, ShowCursor, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
@@ -1977,8 +1977,22 @@ fn should_emit_mouse_motion_packet(
     game_foreground: bool,
     game_drive: super::GameDrive,
     mouse_button_held: bool,
+    cursor_suppressed: bool,
 ) -> bool {
-    should_use_true_relative_injection(game_foreground, game_drive) || mouse_button_held
+    should_use_true_relative_injection(game_foreground, game_drive)
+        || mouse_button_held
+        || cursor_suppressed
+}
+
+fn desktop_cursor_suppressed() -> bool {
+    let mut info = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    // Touch/pen suppression is distinct from a game or application choosing
+    // to hide its pointer. Never change ShowCursor's per-thread display count
+    // or steal foreground to recover this OS-owned state.
+    unsafe { GetCursorInfo(&mut info) }.is_ok() && info.flags.0 & CURSOR_SUPPRESSED.0 != 0
 }
 
 impl InputInject for EnigoInject {
@@ -1994,14 +2008,22 @@ impl InputInject for EnigoInject {
             // Pointer-lock games continually recenter the cursor and require
             // true relative mickeys.
             send_relative_mouse_input(dx, dy)?;
-        } else if should_emit_mouse_motion_packet(game_foreground, game_drive, mouse_button_held) {
+        } else if should_emit_mouse_motion_packet(
+            game_foreground,
+            game_drive,
+            mouse_button_held,
+            !mouse_button_held && desktop_cursor_suppressed(),
+        ) {
             // Drag-sensitive Windows surfaces (notably the Win+Shift+S
             // snipping overlay) require real mouse-move packets while a
-            // button is held. SetCursorPos alone changes the cursor location
-            // but does not extend their selection gesture.
+            // button is held. A touch-first desktop (including after boot)
+            // also needs a mouse packet to exit CURSOR_SUPPRESSED. SetCursorPos
+            // only moves the position; it cannot restore the input modality.
+            // Send the requested movement once, without clicks, extra motion,
+            // foreground changes, or an unbalanced ShowCursor call.
             send_desktop_mouse_move(dx, dy)?;
         } else {
-            // Desktop sharing deliberately avoids SendInput. Every SendInput
+            // An already-visible desktop deliberately avoids SendInput. Every SendInput
             // call traverses the machine-wide low-level-hook chain; on the
             // affected Laptop that path stalled for 50–180 ms and delayed
             // genuine touchpad events in the same Windows input queue.
@@ -2323,6 +2345,41 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "live Windows desktop: touch the screen first; moves cursor one pixel"]
+    fn live_peer_motion_restores_touch_suppressed_cursor() {
+        let inject = EnigoInject::new().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let mut ci = CURSORINFO {
+                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                ..Default::default()
+            };
+            unsafe { GetCursorInfo(&mut ci) }.unwrap();
+            if ci.flags.0 & CURSOR_SUPPRESSED.0 != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "precondition: touch suppression was not reproduced"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        inject.mouse_move_rel(1, 0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetCursorInfo(&mut ci) }.unwrap();
+        assert_ne!(
+            ci.flags.0 & CURSOR_SHOWING.0,
+            0,
+            "peer movement left cursor invisible: flags={}",
+            ci.flags.0
+        );
+    }
+
     #[test]
     #[ignore = "isolated end-to-end lock state probe; briefly displays native target feedback"]
     fn focused_lock_routes_to_target_and_disconnect_releases() {
@@ -2747,11 +2804,29 @@ mod tests {
         assert!(should_emit_mouse_motion_packet(
             false,
             super::super::GameDrive::Off,
+            true,
+            false
+        ));
+        assert!(!should_emit_mouse_motion_packet(
+            false,
+            super::super::GameDrive::Off,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn touch_suppressed_peer_motion_emits_a_real_mouse_packet() {
+        assert!(should_emit_mouse_motion_packet(
+            false,
+            super::super::GameDrive::Off,
+            false,
             true
         ));
         assert!(!should_emit_mouse_motion_packet(
             false,
             super::super::GameDrive::Off,
+            false,
             false
         ));
     }
