@@ -37,7 +37,7 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 | 📁 **File transfer** | Drag a file onto the MineShare window → streams to peer over the encrypted channel, lands at `Downloads/MineShare/<name>` with SHA-256 integrity check. Live progress + cancel. |
 | 🔒 **Encrypted by default** | Noise XX handshake → ChaCha20-Poly1305 AEAD on every byte. PIN-pairing once per device, trust-on-first-use. |
 | 📡 **Zero-config discovery** | mDNS announces `_mineshare._tcp.local.`; both ends auto-connect on the same LAN. |
-| 🎮 **Game-mode lock** | Auto-engages when fullscreen anti-cheat games (BattlEye / EAC / Vanguard / RICOCHET / Hyperion) are foregrounded — pins input to the local PC so accidental edge-crosses can't ban your account. Manual toggle: **Ctrl+Alt+L**. |
+| 🎮 **Game-mode lock** | User-controlled lock on the focused desktop; toggle with **Ctrl+Shift+L**. Opening a game does not automatically enable the lock. |
 | 📊 **Latency telemetry** | Round-trip Ping/Pong every 500 ms with rolling histogram in the GUI. |
 
 **Non-goals:** macOS, internet/NAT traversal, video mirroring, file transfer.
@@ -75,7 +75,7 @@ Hotkeys:
 |---|---|
 | `Ctrl+Alt+R` | Toggle Remote: enter / exit / ask peer to release |
 | `Ctrl+Alt+K` | Cycle keyboard target: Smart → Pin-to-peer → Pin-to-local → Auto |
-| `Ctrl+Alt+L` | Game-mode lock: pin all input here, ignore edge crossings |
+| `Ctrl+Shift+L` | Game-mode lock on the focused desktop |
 
 ---
 
@@ -90,6 +90,8 @@ Download `MineShare_<ver>_x64-setup.exe` (NSIS, ~3 MB) **or** `MineShare_<ver>_x
 > **First-launch SmartScreen warning** is expected because the binary isn't code-signed yet (this is a hobby project). Click **More info → Run anyway**. See [SECURITY.md](SECURITY.md) once published for the verification checklist.
 
 ### Ubuntu / Debian
+
+For current cross-platform checks, runtime requirements, and physical acceptance steps, see [Ubuntu readiness](docs/ubuntu-readiness.md). CI checks both Ubuntu 22.04 and 24.04; passing compilation is not a physical Wayland/X11 input test.
 
 Download `mineshare_<ver>_amd64.deb` and install:
 
