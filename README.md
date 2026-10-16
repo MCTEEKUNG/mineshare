@@ -20,8 +20,6 @@
 
 [![An illustrated desk workflow: a round mint mascot walks straight in from the bottom center, sets down a Windows laptop beside an Ubuntu PC, and moves one cursor between them. Keyboard, mouse and headset stay wired to the PC.](docs/media/desk-story-mascot-7f1ae438.gif)](docs/media/desk-story.mp4)
 
-<p align="center"><a href="docs/media/desk-story.mp4">Watch in Full HD · 18 seconds · 30 fps</a> · <a href="docs/media/desk-story-poster.png">Still preview</a> · <a href="media/promo">Edit the animation</a></p>
-
 > **About the animation:** an original workflow illustration, not a screen recording, benchmark, or proof of compatibility. The app interface is simplified for storytelling. Desktop autostart requires setup; trusted peers must already be paired on the same LAN.
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
