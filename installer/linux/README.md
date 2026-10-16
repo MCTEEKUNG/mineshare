@@ -1,5 +1,29 @@
 # MineShare — Linux install
 
+## Desktop app (recommended)
+
+After building the desktop app, run as your graphical user (without sudo):
+
+```bash
+bash installer/linux/install-desktop.sh
+# Optional existing binary and current icon directory:
+bash installer/linux/install-desktop.sh /absolute/path/mineshare-app /absolute/path/icons
+```
+
+This creates a per-user application launcher, installs the current icons, and
+enables XDG autostart after graphical login (not before login). Existing pinned
+`MineShare.desktop` entries keep the same desktop ID. An existing Desktop
+shortcut is updated; prior files are backed up under `~/.local/share/MineShare/backups`.
+The launcher symlinks to the supplied binary so rebuilds at that path stay current.
+The old headless user service is disabled if enabled: the desktop app already
+embeds the daemon. Do not run both.
+
+To disable automatic startup, remove `~/.config/autostart/MineShare.desktop`
+or disable MineShare in Startup Applications. A real logout/login is the final
+acceptance test; opening the launcher alone does not test autostart.
+
+## Legacy headless daemon
+
 Manual installer for the daemon side. Wraps:
 
 * The udev rule that grants the `input` group rw access to
