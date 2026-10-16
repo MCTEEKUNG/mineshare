@@ -58,6 +58,13 @@ $installed=Join-Path $location 'mineshare-app.exe'
 if($oldKind -ne 'fresh') { Assert (Test-Path -LiteralPath $installed) 'Baseline binary absent' }
 Get-Process mineshare-app -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $installed } | Stop-Process -Force
 $oldHash=if($oldKind -ne 'fresh') { (Get-FileHash -LiteralPath $installed).Hash } else { '' }
+$legacyMenu=Join-Path ([Environment]::GetFolderPath('Programs')) 'MineShare.lnk'
+if($oldKind -eq 'exe') {
+    $shortcutShell=New-Object -ComObject WScript.Shell
+    $link=$shortcutShell.CreateShortcut($legacyMenu)
+    $link.TargetPath=$installed
+    $link.Save()
+}
 $data=Join-Path $env:APPDATA 'MineShare'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 @{ device_id='fixture-do-not-change'; trusted_peers=@('pairing-fixture') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $data 'identity.json')
@@ -105,7 +112,10 @@ if($Scenario -in @('rollback','rollback-nsis','downgrade')) {
     if($newKind -eq 'msi') { Install $newMsi } else { Install $newExe }
     $newVersion=(Get-Content (Join-Path $PSScriptRoot '../../ui/src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
     Assert ((Get-Item -LiteralPath $installed).VersionInfo.ProductVersion -eq $newVersion) 'Wrong installed version or second installation path'
-    if($oldKind -eq 'exe') { Assert (-not (Test-Path (Join-Path $location 'uninstall.exe'))) 'Old NSIS uninstaller was not retired' }
+    if($oldKind -eq 'exe') {
+        Assert (-not (Test-Path (Join-Path $location 'uninstall.exe'))) 'Old NSIS uninstaller was not retired'
+        Assert (-not (Test-Path -LiteralPath $legacyMenu)) 'Duplicate legacy Start Menu shortcut remains'
+    }
     # Run the SAME payload again: maintenance must not add another product.
     if($newKind -eq 'msi') { Install $newMsi } else { Install $newExe }
 }

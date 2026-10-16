@@ -24,7 +24,7 @@
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
 
-**Development snapshot:** `0.0.12` · keyboard broker commit [`9dd85f7`](https://github.com/MCTEEKUNG/mineshare/commit/9dd85f7). Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Published installers below may predate this source snapshot; do not assume that “latest release” contains every development change.
+**Development snapshot:** `0.0.13` · unified Windows installer upgrades. Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Check the release tag when downloading; development changes are not necessarily published yet.
 
 ---
 
@@ -34,7 +34,7 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 
 | OS | File | Install |
 |---|---|---|
-| 🪟 **Windows** | [`MineShare_<ver>_x64-setup.exe`](https://github.com/MCTEEKUNG/mineshare/releases/latest) (NSIS, ~3 MB) or [`_x64_en-US.msi`](https://github.com/MCTEEKUNG/mineshare/releases/latest) (WiX, ~5 MB) | double-click → install |
+| 🪟 **Windows** | [`MineShare_<ver>_x64-setup.exe`](https://github.com/MCTEEKUNG/mineshare/releases/latest) or [`_x64_en-US.msi`](https://github.com/MCTEEKUNG/mineshare/releases/latest) (same MSI payload) | double-click → install / update |
 | 🐧 **Ubuntu / Debian** | [`MineShare_<ver>_amd64.deb`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `sudo apt install ./<file>` |
 | 🎩 **Fedora / RHEL** | [`MineShare-<ver>-1.x86_64.rpm`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `sudo rpm -i <file>` |
 | 🐧 **Any Linux** | [`MineShare_<ver>_amd64.AppImage`](https://github.com/MCTEEKUNG/mineshare/releases/latest) | `chmod +x <file>` → run |
@@ -94,7 +94,9 @@ Pre-built installers are attached to each [GitHub Release](https://github.com/MC
 
 ### Windows
 
-Download `MineShare_<ver>_x64-setup.exe` (NSIS, ~3 MB) **or** `MineShare_<ver>_x64_en-US.msi` (WiX, ~5 MB) → double-click → installer puts MineShare in `%LOCALAPPDATA%\Programs\MineShare` and adds a Start Menu shortcut.
+Download `MineShare_<ver>_x64-setup.exe` **or** `MineShare_<ver>_x64_en-US.msi` → double-click. From 0.0.13 onward, both downloads use the same Windows Installer engine and maintain one installed product, even when switching formats.
+
+An existing installation is detected and updated in its original directory, retaining pairing, settings and startup preferences (including disabled startup). Fresh installations use `%ProgramFiles%\MineShare` and add a Start Menu shortcut; administrator approval may be required. Verified older NSIS and script-only installations are migrated without running an old uninstaller against the updated files. If two legacy copies are found, setup stops and asks you to resolve the conflict instead of guessing. See [installer details](installer/windows/README.md).
 
 > **First-launch SmartScreen warning** is expected because the binary isn't code-signed yet (this is a hobby project). Click **More info → Run anyway**. See [SECURITY.md](SECURITY.md) once published for the verification checklist.
 

@@ -55,15 +55,42 @@ try {
         if ($state.Directory -ine $directory) { throw 'Installer transaction directory mismatch' }
         if ($action -eq 'complete') {
             if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing' }
+            $retiredNsis = $false
             # MSI owns the files now. Remove only a verified old NSIS registration,
             # not its uninstaller (running it would remove our newly installed files).
             foreach ($key in $legacyKeys) {
                 if (-not (Test-LegacyRegistration $key)) { continue }
                 # Exact, fixed registry key only; no registry or filesystem recursion.
                 Remove-Item -LiteralPath $key -Force
+                $retiredNsis = $true
                 $legacyUninstaller = Join-Path $directory 'uninstall.exe'
                 if (Test-Path -LiteralPath $legacyUninstaller) {
                     Remove-Item -LiteralPath $legacyUninstaller -Force
+                }
+            }
+            if ($retiredNsis) {
+                # Remove only standard, argument-free duplicate shortcuts whose
+                # target is this same executable AND whose MSI replacement exists.
+                # Startup and taskbar/pinned shortcuts are never touched here.
+                $shell = New-Object -ComObject WScript.Shell
+                $menus = @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))
+                $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+                $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+                $candidates = @((Join-Path $menus[0] 'MineShare.lnk'), (Join-Path $desktop 'MineShare.lnk'))
+                $replacements = @((Join-Path $menus[0] 'MineShare\MineShare.lnk'), (Join-Path $menus[1] 'MineShare\MineShare.lnk'), (Join-Path $publicDesktop 'MineShare.lnk'))
+                foreach ($candidate in $candidates) {
+                    if (-not (Test-Path -LiteralPath $candidate)) { continue }
+                    $oldShortcut = $shell.CreateShortcut($candidate)
+                    if ($oldShortcut.TargetPath -ine $exe -or $oldShortcut.Arguments) { continue }
+                    $replacementFound = $false
+                    foreach ($replacement in $replacements) {
+                        if ($replacement -ieq $candidate -or -not (Test-Path -LiteralPath $replacement)) { continue }
+                        # Compare shortcut types too: a menu link cannot replace
+                        # the desktop icon unless it is another desktop link.
+                        if (($candidate -ieq (Join-Path $desktop 'MineShare.lnk')) -ne ($replacement -ieq (Join-Path $publicDesktop 'MineShare.lnk'))) { continue }
+                        if ($shell.CreateShortcut($replacement).TargetPath -ieq $exe) { $replacementFound = $true }
+                    }
+                    if ($replacementFound) { Remove-Item -LiteralPath $candidate -Force }
                 }
             }
         }
