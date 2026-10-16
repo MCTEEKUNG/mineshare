@@ -18,7 +18,7 @@
 
 <br />
 
-[![An illustrated desk workflow: a round mint mascot walks straight in from the bottom center, sets down a Windows laptop beside an Ubuntu PC, and moves one cursor between them. Keyboard, mouse and headset stay wired to the PC.](docs/media/desk-story.gif)](docs/media/desk-story.mp4)
+[![An illustrated desk workflow: a round mint mascot walks straight in from the bottom center, sets down a Windows laptop beside an Ubuntu PC, and moves one cursor between them. Keyboard, mouse and headset stay wired to the PC.](docs/media/desk-story-mascot-7f1ae438.gif)](docs/media/desk-story.mp4)
 
 <p align="center"><a href="docs/media/desk-story.mp4">Watch in Full HD · 18 seconds · 30 fps</a> · <a href="docs/media/desk-story-poster.png">Still preview</a> · <a href="media/promo">Edit the animation</a></p>
 

@@ -41,7 +41,7 @@ API keys, fonts, or external stock assets are needed to reproduce the illustrati
 ```sh
 npx remotion render DeskStory ../../docs/media/desk-story.mp4 --codec=h264 --crf=14 --image-format=png
 npx remotion still DeskStory ../../docs/media/desk-story-poster.png --frame=315
-ffmpeg -i ../../docs/media/desk-story.mp4 -vf "fps=30,split[a][b];[a]palettegen=max_colors=256[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" -loop 0 ../../docs/media/desk-story.gif
+ffmpeg -i ../../docs/media/desk-story.mp4 -vf "fps=30,split[a][b];[a]palettegen=max_colors=256[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" -loop 0 ../../docs/media/desk-story-mascot-7f1ae438.gif
 ```
 
 The scene renders from vector artwork at 1920×1080, without upscaling the old GIF.
@@ -54,6 +54,8 @@ dropping frames to 12 fps. GIF timestamps use centiseconds, so 30 fps is represe
 by alternating 30/40 ms delays. The GIF is silent and loops with a fade; MP4 is
 still preferable for precise playback timing, clarity and smaller file size.
 README image alt text describes the action without requiring autoplay.
+The published GIF uses a content-versioned filename to avoid stale GitHub/browser
+image caches. When replacing its content, update the filename and README link too.
 
 ## Cinematic companion
 
