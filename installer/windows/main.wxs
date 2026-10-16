@@ -98,9 +98,9 @@
         </SetProperty>
         <Binary Id="MineShareInstallerHelper" SourceFile="{{main_binary_path}}.installer-helper.exe" />
         <!-- Paths end in a dot to avoid the quoted-trailing-backslash argv trap. -->
-        <CustomAction Id="MineSharePrepare" BinaryKey="MineShareInstallerHelper" ExeCommand='prepare "[INSTALLDIR]." "[ProductCode]"' Return="check" Impersonate="yes" />
-        <CustomAction Id="MineShareRollback" BinaryKey="MineShareInstallerHelper" ExeCommand='rollback "[INSTALLDIR]." "[ProductCode]"' Execute="rollback" Return="ignore" Impersonate="yes" />
-        <CustomAction Id="MineShareComplete" BinaryKey="MineShareInstallerHelper" ExeCommand='complete "[INSTALLDIR]." "[ProductCode]"' Return="check" Impersonate="yes" />
+        <CustomAction Id="MineSharePrepare" BinaryKey="MineShareInstallerHelper" ExeCommand='prepare "[INSTALLDIR]." "[ProductCode]" "[ProductVersion]"' Return="check" Impersonate="yes" />
+        <CustomAction Id="MineShareRollback" BinaryKey="MineShareInstallerHelper" ExeCommand='rollback "[INSTALLDIR]." "[ProductCode]" "[ProductVersion]"' Execute="rollback" Return="ignore" Impersonate="yes" />
+        <CustomAction Id="MineShareComplete" BinaryKey="MineShareInstallerHelper" ExeCommand='complete "[INSTALLDIR]." "[ProductCode]" "[ProductVersion]"' Return="check" Impersonate="yes" />
         <InstallExecuteSequence>
             <Custom Action="MineShareRollback" After="InstallInitialize">NOT REMOVE</Custom>
             <Custom Action="MineSharePrepare" After="MineShareRollback">NOT REMOVE</Custom>

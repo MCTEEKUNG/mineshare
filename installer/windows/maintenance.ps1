@@ -10,7 +10,25 @@ try {
     if (-not [IO.Path]::IsPathRooted($directory) -or $directory -eq [IO.Path]::GetPathRoot($directory).TrimEnd('\')) { throw 'Unsafe installation directory' }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'MineShareInstaller'
     $statePath = Join-Path $stateRoot ($transaction + '.json')
+    $legacyKeys = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MineShare',
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MineShare',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\MineShare')
+    function Test-LegacyRegistration([string]$key) {
+        $old = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+        if (-not $old) { return $false }
+        $expected = '"' + (Join-Path $directory 'uninstall.exe') + '"'
+        if ($old.DisplayName -ne 'MineShare' -or $old.Publisher -ne 'MineShare Contributors' -or
+            $old.UninstallString -ine $expected) { throw 'Unrecognized legacy registration; refusing to migrate it' }
+        return $true
+    }
     if ($action -eq 'prepare') {
+        # Validate conflicts before file replacement, not after the MSI commits.
+        foreach ($key in $legacyKeys) { $null = Test-LegacyRegistration $key }
+        $targetVersion = [Version]::Parse($env:MINESHARE_INSTALL_VERSION)
+        if (Test-Path -LiteralPath $exe) {
+            $currentVersion = [Version]::Parse((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion)
+            if ($currentVersion -gt $targetVersion) { throw "Refusing to downgrade MineShare $currentVersion to $targetVersion" }
+        }
         $running = @(Get-Process -Name mineshare-app,mineshare-daemon -ErrorAction SilentlyContinue | Where-Object {
             $_.Path -and [IO.Path]::GetDirectoryName($_.Path).TrimEnd('\') -ieq $directory
         })
@@ -39,16 +57,14 @@ try {
             if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing' }
             # MSI owns the files now. Remove only a verified old NSIS registration,
             # not its uninstaller (running it would remove our newly installed files).
-            foreach ($key in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MineShare',
-                'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MineShare',
-                'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\MineShare')) {
-                $old = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-                if (-not $old) { continue }
-                $expected = '"' + (Join-Path $directory 'uninstall.exe') + '"'
-                if ($old.DisplayName -ne 'MineShare' -or $old.Publisher -ne 'MineShare Contributors' -or
-                    $old.UninstallString -ine $expected) { throw 'Unrecognized legacy registration; refusing to remove it' }
+            foreach ($key in $legacyKeys) {
+                if (-not (Test-LegacyRegistration $key)) { continue }
                 # Exact, fixed registry key only; no registry or filesystem recursion.
                 Remove-Item -LiteralPath $key -Force
+                $legacyUninstaller = Join-Path $directory 'uninstall.exe'
+                if (Test-Path -LiteralPath $legacyUninstaller) {
+                    Remove-Item -LiteralPath $legacyUninstaller -Force
+                }
             }
         }
         if ($state.WasRunning -and (Test-Path -LiteralPath $exe)) {
@@ -58,6 +74,11 @@ try {
     } else { throw 'Unknown installer action' }
     exit 0
 } catch {
+    # Type-2 MSI actions cannot always capture child stderr; keep a small local
+    # diagnostic without recording pairing keys or application configuration.
+    if ($stateRoot -and (Test-Path -LiteralPath $stateRoot)) {
+        $_.Exception.Message | Add-Content -LiteralPath (Join-Path $stateRoot 'last-error.txt')
+    }
     Write-Error $_
     exit 1
 }

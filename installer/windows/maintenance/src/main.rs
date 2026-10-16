@@ -27,8 +27,8 @@ fn base64(bytes: &[u8]) -> String {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 3 || !["prepare", "complete", "rollback"].contains(&args[0].as_str()) {
-        eprintln!("Expected action, installation directory and transaction GUID");
+    if args.len() != 4 || !["prepare", "complete", "rollback"].contains(&args[0].as_str()) {
+        eprintln!("Expected action, installation directory, transaction GUID and version");
         return ExitCode::FAILURE;
     }
     // No user-controlled values are interpolated into PowerShell source.
@@ -49,7 +49,8 @@ fn main() -> ExitCode {
         ])
         .env("MINESHARE_INSTALL_ACTION", &args[0])
         .env("MINESHARE_INSTALL_DIRECTORY", &args[1])
-        .env("MINESHARE_INSTALL_TRANSACTION", &args[2]);
+        .env("MINESHARE_INSTALL_TRANSACTION", &args[2])
+        .env("MINESHARE_INSTALL_VERSION", &args[3]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

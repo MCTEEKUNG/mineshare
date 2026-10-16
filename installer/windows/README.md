@@ -53,8 +53,8 @@ development script.
 - `test-msi-package.ps1`: stable upgrade identity, legacy detection, Update UI
   and migration/rollback actions are present in the compiled MSI.
 - `test-upgrade.ps1`: **GitHub-hosted disposable Windows runners only**. Tests
-  MSI→MSI, MSI→EXE, EXE→MSI, EXE→EXE, script→MSI/EXE, repeat-install and an injected
-  installation failure. Check file version, original location, one registration,
+  MSI→MSI, MSI→EXE, EXE→MSI, EXE→EXE, script→MSI/EXE, fresh install, repeat-install,
+  downgrade rejection and injected MSI/NSIS migration failures. Check file version, original location, one registration,
   unchanged pairing/settings hashes and exact startup-task XML/Run values.
 - Do not publish until normal CI, both platform builds and every upgrade scenario
   pass. Silent-install tests do not replace a visual review of the wizard.

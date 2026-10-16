@@ -3,7 +3,7 @@ import {copyFileSync, existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 const directory = path.dirname(fileURLToPath(import.meta.url));
-const result = spawnSync('cargo', ['build', '--release', '--manifest-path', path.join(directory, 'maintenance/Cargo.toml')], {stdio:'inherit'});
+const result = spawnSync('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(directory, 'maintenance/Cargo.toml')], {stdio:'inherit'});
 if (result.status !== 0) process.exit(result.status ?? 1);
 const root = path.resolve(directory, '../../ui/src-tauri/target');
 let copied = 0;

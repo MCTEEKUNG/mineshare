@@ -118,16 +118,6 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
-      # Only run on tag pushes so workflow_dispatch builds don't
-      # accidentally publish.
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          draft: true
-          generate_release_notes: true
-
   installer-acceptance:
     name: Windows upgrade / ${{ matrix.scenario }}
     needs: build
@@ -138,7 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [msi-msi, msi-exe, exe-msi, exe-exe, script-msi, script-exe, rollback]
+        scenario: [msi-msi, msi-exe, exe-msi, exe-exe, script-msi, script-exe, fresh-msi, fresh-exe, rollback, rollback-nsis, downgrade]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -156,3 +146,30 @@ jobs:
         with:
           name: installer-logs-${{ matrix.scenario }}
           path: ${{ runner.temp }}/msi-*.log
+
+  stage-release:
+    name: Stage draft only after installer acceptance
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, installer-acceptance]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mineshare-*
+          merge-multiple: true
+          path: installers
+      - name: Never change assets of an already published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          existing=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [ "$existing" = "false" ]; then
+            echo "Release is already published; keeping its verified assets unchanged."
+            exit 0
+          fi
+          if [ -z "$existing" ]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --title "MineShare ${tag#v}" --generate-notes
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" installers/*
