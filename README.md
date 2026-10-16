@@ -18,9 +18,9 @@
 
 <br />
 
-[![An illustrated desk workflow: a developer arrives, sets down a Windows laptop, and moves one cursor from the PC to the laptop. Keyboard, mouse and headset cables remain connected to the PC.](docs/media/desk-story.gif)](docs/media/desk-story.mp4)
+[![An illustrated desk workflow: a round mint mascot walks straight in from the bottom center, sets down a Windows laptop beside an Ubuntu PC, and moves one cursor between them. Keyboard, mouse and headset stay wired to the PC.](docs/media/desk-story.gif)](docs/media/desk-story.mp4)
 
-<p align="center"><a href="docs/media/desk-story.mp4">Watch the 18-second MP4</a> · <a href="docs/media/desk-story-poster.png">Still preview</a> · <a href="media/promo">Edit the animation</a></p>
+<p align="center"><a href="docs/media/desk-story.mp4">Watch in Full HD · 18 seconds · 30 fps</a> · <a href="docs/media/desk-story-poster.png">Still preview</a> · <a href="media/promo">Edit the animation</a></p>
 
 > **About the animation:** an original workflow illustration, not a screen recording, benchmark, or proof of compatibility. The app interface is simplified for storytelling. Desktop autostart requires setup; trusted peers must already be paired on the same LAN.
 
