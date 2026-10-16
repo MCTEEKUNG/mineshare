@@ -25,9 +25,9 @@ export default function HotkeysPage() {
           desc="Smart → Pinned to peer → Pinned to local → Auto → Smart. Smart (default) auto-routes keys to whichever machine's mouse is currently in use AND follows cursor crossings — handles the 'two mice, one keyboard' workflow without manual pinning. Auto is the strict cursor-only mode. Pinned-* override everything regardless of mouse activity."
         />
         <Row
-          combo={["Ctrl", "Alt", "L"]}
+          combo={["Ctrl", "Shift", "L"]}
           name="Game-mode lock"
-          desc="Pins input to this PC. Edge crossing and auto-handover pause; Ctrl+Alt+R still works as a manual escape hatch. On Windows, the bridge also auto-engages this when a fullscreen app captures or hides the cursor."
+          desc="Manually locks the desktop controlled by the cursor. Edge crossing and auto-handover pause; Ctrl+Alt+R still works as a manual escape hatch."
         />
       </div>
     </section>

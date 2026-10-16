@@ -18,11 +18,18 @@ pub mod layout;
 pub mod logs;
 pub mod pairing;
 pub mod runtime;
+pub mod runtime_owner;
+mod session;
 pub mod settings;
 pub mod status;
 pub mod trust;
 
 use std::sync::OnceLock;
+pub const CONTROL_PROTOCOL: &str = "control-v2";
+
+pub fn compatible_control_build(version: &str) -> bool {
+    version.rsplit(" · ").next() == Some(CONTROL_PROTOCOL)
+}
 
 /// Precise build identity: `"<semver> · <hash>[-dirty] · <date>"`,
 /// e.g. `0.0.6 · 1a2b3c4 · 2026-05-27`. The hash/date come from `build.rs`
@@ -32,21 +39,24 @@ use std::sync::OnceLock;
 /// semver that previously hid newer code under an unchanged version number.
 pub fn build_id() -> String {
     format!(
-        "{} · {}{} · {}",
+        "{} · {}{} · {} · src:{} · {}",
         env!("CARGO_PKG_VERSION"),
         env!("MINESHARE_GIT_HASH"),
         env!("MINESHARE_GIT_DIRTY"),
         env!("MINESHARE_BUILD_DATE"),
+        env!("MINESHARE_SOURCE_ID"),
+        CONTROL_PROTOCOL,
     )
 }
 
 /// Compact identity for tray tooltips: `"<semver> · <hash>[-dirty]"`.
 pub fn build_id_short() -> String {
     format!(
-        "{} · {}{}",
+        "{} · {}{} · {}",
         env!("CARGO_PKG_VERSION"),
         env!("MINESHARE_GIT_HASH"),
         env!("MINESHARE_GIT_DIRTY"),
+        env!("MINESHARE_SOURCE_ID"),
     )
 }
 

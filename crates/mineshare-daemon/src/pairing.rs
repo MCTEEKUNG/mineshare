@@ -42,13 +42,9 @@ pub enum PairingPhase {
     /// Successful — peer is now in the trust list. The card
     /// stays up briefly so the user gets visible feedback before
     /// the regular Status view returns.
-    Trusted {
-        peer_name: String,
-    },
+    Trusted { peer_name: String },
     /// Mismatch / timeout / network error.
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 static PHASE: Mutex<PairingPhase> = Mutex::new(PairingPhase::None);

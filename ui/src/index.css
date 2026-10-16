@@ -9,26 +9,50 @@
 }
 
 :root, [data-theme="dark"] {
-  --ds-bg: #0F172A;
-  --ds-surface: #1B2336;
-  --ds-elevated: #1E293B;
-  --ds-sidebar: #0D1525;
-  --ds-accent: #22C55E;
-  --ds-text: #F1F5F9;        /* was text-slate-100 */
-  --ds-text-muted: #94A3B8;  /* slate-400 */
-  --ds-border: rgba(255,255,255,0.08);
-  --ds-hover: rgba(255,255,255,0.06);
+  color-scheme: dark;
+  --ds-bg: #15130F;
+  --ds-surface: #211D17;
+  --ds-elevated: #29231B;
+  --ds-sidebar: #191611;
+  --ds-accent: #D4AF37;
+  --ds-accent-strong: #B68A2E;
+  --ds-on-accent: #241F18;
+  --ds-accent-soft: rgba(212, 175, 55, 0.13);
+  --ds-accent-border: rgba(212, 175, 55, 0.34);
+  --ds-text: #F7F2E8;
+  --ds-text-muted: #B8AA97;
+  --ds-border: rgba(228, 201, 104, 0.15);
+  --ds-hover: rgba(212, 175, 55, 0.09);
+  --ds-marble-a: rgba(228, 201, 104, 0.08);
+  --ds-marble-b: rgba(112, 98, 78, 0.14);
 }
 [data-theme="light"] {
-  --ds-bg: #F4F5F7;
-  --ds-surface: #FFFFFF;
+  color-scheme: light;
+  --ds-bg: #F7F4EE;
+  --ds-surface: rgba(255, 254, 251, 0.94);
   --ds-elevated: #FFFFFF;
-  --ds-sidebar: #EAECEF;
-  --ds-accent: #16A34A;
-  --ds-text: #1F2937;
-  --ds-text-muted: #6B7280;
-  --ds-border: rgba(0,0,0,0.10);
-  --ds-hover: rgba(0,0,0,0.05);
+  --ds-sidebar: rgba(244, 239, 229, 0.96);
+  --ds-accent: #8A651F;
+  --ds-accent-strong: #6F4F16;
+  --ds-on-accent: #FFFFFF;
+  --ds-accent-soft: rgba(182, 138, 46, 0.12);
+  --ds-accent-border: rgba(138, 101, 31, 0.32);
+  --ds-text: #241F18;
+  --ds-text-muted: #766B5D;
+  --ds-border: rgba(104, 83, 47, 0.18);
+  --ds-hover: rgba(182, 138, 46, 0.09);
+  --ds-marble-a: rgba(216, 210, 200, 0.48);
+  --ds-marble-b: rgba(255, 255, 255, 0.8);
+}
+
+.app-marble {
+  background-color: var(--ds-bg);
+  background-image:
+    radial-gradient(ellipse at 12% 18%, transparent 0 32%, var(--ds-marble-a) 32.4% 33%, transparent 33.5% 100%),
+    radial-gradient(ellipse at 82% 76%, transparent 0 38%, var(--ds-marble-a) 38.4% 39.1%, transparent 39.6% 100%),
+    linear-gradient(118deg, transparent 0 46%, var(--ds-marble-b) 46.4% 47%, transparent 47.4% 100%);
+  background-size: 900px 680px, 980px 760px, 760px 760px;
+  background-attachment: fixed;
 }
 
 :where(button, [role="button"], a, input, select):focus-visible {

@@ -101,20 +101,20 @@ export default function FilesPage() {
         className={
           "rounded-xl border-2 border-dashed p-10 text-center transition-all duration-150 " +
           (dragOver
-            ? "border-emerald-500/60 bg-emerald-500/[0.08] scale-[1.01]"
+            ? "border-ds-accent-border bg-ds-accent-soft scale-[1.01]"
             : "border-ds-border bg-ds-hover")
         }
       >
         <div className={
           "mx-auto mb-3 size-12 rounded-full flex items-center justify-center transition-all duration-150 " +
-          (dragOver ? "bg-emerald-500/20" : "bg-ds-hover")
+          (dragOver ? "bg-ds-accent-soft" : "bg-ds-hover")
         }>
           {dragOver
-            ? <IconArrowDown className="size-6 text-emerald-400" />
+            ? <IconArrowDown className="size-6 text-ds-accent" />
             : <IconUpload className="size-6 text-ds-text-muted" />
           }
         </div>
-        <p className={"text-sm font-medium " + (dragOver ? "text-emerald-300" : "text-ds-text")}>
+        <p className={"text-sm font-medium " + (dragOver ? "text-ds-accent" : "text-ds-text")}>
           {dragOver ? "Drop to send" : "Drag a file anywhere on this window"}
         </p>
         <p className="text-xs text-ds-text-muted mt-1">
@@ -179,12 +179,12 @@ function TransferRow({
       ? 0
       : Math.min(100, Math.floor((t.bytes_so_far / t.size_bytes) * 100));
   const dirIcon = t.direction === "sending"
-    ? <IconArrowUpRight className="size-3.5 text-emerald-400 shrink-0" />
+    ? <IconArrowUpRight className="size-3.5 text-ds-accent shrink-0" />
     : <IconArrowDownLeft className="size-3.5 text-blue-400 shrink-0" />;
 
   const statusTone =
     t.status === "done"
-      ? "text-emerald-400"
+      ? "text-ds-accent"
       : t.status === "failed" || t.status === "cancelled"
         ? "text-red-400"
         : "text-ds-text-muted";
@@ -223,7 +223,7 @@ function TransferRow({
           <div
             className={
               "h-full transition-all " +
-              (t.direction === "sending" ? "bg-emerald-500" : "bg-blue-500")
+              (t.direction === "sending" ? "bg-ds-accent" : "bg-blue-500")
             }
             style={{ width: `${pct}%` }}
           />

@@ -15,9 +15,11 @@ type Status = {
 
 type Settings = {
   mouse_sensitivity: number;
+  touchpad_scroll_speed: number;
   invert_scroll_y: boolean;
   invert_scroll_x: boolean;
   auto_focus_on_take_control: boolean;
+  mouse_rate_hz: number;
 };
 
 /**
@@ -121,10 +123,25 @@ function InputPrefsCard() {
   }, []);
 
   async function update(next: Settings) {
+    const previous = settings;
+    if (!previous) return;
     setErr(null);
     setSettings(next);
     try {
-      const applied = await invoke<Settings>("set_settings", { settings: next });
+      const patch: Partial<Settings> = {};
+      if (next.mouse_sensitivity !== previous.mouse_sensitivity)
+        patch.mouse_sensitivity = next.mouse_sensitivity;
+      if (next.touchpad_scroll_speed !== previous.touchpad_scroll_speed)
+        patch.touchpad_scroll_speed = next.touchpad_scroll_speed;
+      if (next.invert_scroll_y !== previous.invert_scroll_y)
+        patch.invert_scroll_y = next.invert_scroll_y;
+      if (next.invert_scroll_x !== previous.invert_scroll_x)
+        patch.invert_scroll_x = next.invert_scroll_x;
+      if (next.auto_focus_on_take_control !== previous.auto_focus_on_take_control)
+        patch.auto_focus_on_take_control = next.auto_focus_on_take_control;
+      if (next.mouse_rate_hz !== previous.mouse_rate_hz)
+        patch.mouse_rate_hz = next.mouse_rate_hz;
+      const applied = await invoke<Settings>("patch_settings", { patch });
       setSettings(applied);
     } catch (e) {
       setErr(String(e));
@@ -166,7 +183,7 @@ function InputPrefsCard() {
           onChange={(e) =>
             update({ ...settings, mouse_sensitivity: parseFloat(e.target.value) })
           }
-          className="w-full accent-emerald-500"
+          className="w-full [accent-color:var(--ds-accent)]"
         />
         <div className="flex justify-between text-[10px] text-ds-text-muted font-mono mt-0.5">
           <span>0.25×</span>
@@ -177,6 +194,35 @@ function InputPrefsCard() {
           Multiplier applied to outgoing mouse deltas. Dial down if
           driving a low-DPI peer from a high-DPI laptop feels too
           fast; dial up for the opposite.
+        </p>
+      </div>
+
+      <div className="mb-5">
+        <div className="flex items-baseline justify-between mb-1.5">
+          <label className="text-sm font-medium text-ds-text">Touchpad scroll speed</label>
+          <span className="text-xs font-mono text-ds-text-muted">
+            {settings.touchpad_scroll_speed.toFixed(2)}×
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0.25}
+          max={3}
+          step={0.05}
+          value={settings.touchpad_scroll_speed}
+          onChange={(e) =>
+            update({ ...settings, touchpad_scroll_speed: parseFloat(e.target.value) })
+          }
+          className="w-full [accent-color:var(--ds-accent)]"
+        />
+        <div className="flex justify-between text-[10px] text-ds-text-muted font-mono mt-0.5">
+          <span>0.25×</span>
+          <span>1.00× native</span>
+          <span>3.00×</span>
+        </div>
+        <p className="text-[11px] text-ds-text-muted mt-2 max-w-prose leading-relaxed">
+          Scales outgoing two-finger vertical and horizontal scrolling.
+          Pinch-to-zoom and three/four-finger gestures keep their native distance and behavior.
         </p>
       </div>
 
@@ -196,8 +242,8 @@ function InputPrefsCard() {
       </div>
 
       <Toggle
-        label="Auto-click to grab keyboard focus"
-        hint="When the peer drives this machine, fire a single click in place to focus the window under the cursor. Useful on GNOME-Wayland (click-to-focus). Rate-limited to once every 30 s so rapid cursor crossings don't spam clicks — the previous unlimited version triggered phantom 'spacebar' behaviour by clicking on play/pause buttons, links, and similar focusable elements every time the cursor crossed. Leave OFF unless typed keys keep vanishing on the peer."
+        label="Linux click-to-focus compatibility"
+        hint="Optional compatibility mode for Linux desktops that require a click to focus. Windows never synthesizes a mouse click during keyboard handoff because it can activate browser players, buttons, and links unexpectedly."
         on={settings.auto_focus_on_take_control}
         onChange={(v) => update({ ...settings, auto_focus_on_take_control: v })}
       />
@@ -230,7 +276,7 @@ function Toggle({
       <span
         className={
           "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
-          (on ? "bg-emerald-500" : "bg-ds-hover")
+          (on ? "bg-ds-accent" : "bg-ds-hover")
         }
       >
         <span

@@ -7,8 +7,9 @@ type DevicesSnapshot = {
   inputs: DeviceInfo[];
   selected_output: string | null;
   selected_input: string | null;
+  selected_sysout_capture: string | null;
 };
-type Direction = "output" | "input";
+type Direction = "output" | "input" | "sysout_capture";
 
 /**
  * Devices tab — pick the cpal output / input device the bridge
@@ -40,10 +41,21 @@ export default function DevicesPage() {
     setPending(dir);
     setErr(null);
     try {
-      const cmd = dir === "output" ? "set_audio_output_device" : "set_audio_input_device";
+      const cmd =
+        dir === "output"
+          ? "set_audio_output_device"
+          : dir === "input"
+            ? "set_audio_input_device"
+            : "set_sysout_capture_device";
       await invoke(cmd, { name });
+      const selectedKey =
+        dir === "output"
+          ? "selected_output"
+          : dir === "input"
+            ? "selected_input"
+            : "selected_sysout_capture";
       setDevs((s) =>
-        s ? { ...s, [dir === "output" ? "selected_output" : "selected_input"]: name } : s,
+        s ? { ...s, [selectedKey]: name } : s,
       );
     } catch (e) {
       setErr(String(e));
@@ -62,6 +74,16 @@ export default function DevicesPage() {
 
   return (
     <section className="grid gap-6">
+      <DeviceList
+        icon={<IconSpeaker className="size-5 text-ds-text-muted" />}
+        title="System audio source"
+        subtitle="Which local output MineShare captures and sends to the peer."
+        devices={devs.outputs}
+        selected={devs.selected_sysout_capture}
+        busy={pending === "sysout_capture"}
+        onPick={(n) => pick("sysout_capture", n)}
+        onRefresh={() => refresh(true)}
+      />
       <DeviceList
         icon={<IconSpeaker className="size-5 text-ds-text-muted" />}
         title="Audio output"
@@ -174,14 +196,14 @@ function DeviceRow({
         className={
           "w-full flex items-center justify-between gap-4 px-5 py-3 transition-colors text-left " +
           (active
-            ? "bg-emerald-500/[0.08]"
+            ? "bg-ds-accent-soft"
             : "hover:bg-ds-hover")
         }
       >
         <div className="min-w-0 flex-1">
           <p className={
             "text-sm truncate " +
-            (active ? "font-semibold text-emerald-300" : "font-medium text-ds-text")
+            (active ? "font-semibold text-ds-accent" : "font-medium text-ds-text")
           }>
             {name}
           </p>
@@ -191,7 +213,7 @@ function DeviceRow({
           className={
             "shrink-0 inline-flex items-center justify-center size-5 rounded-full transition-colors " +
             (active
-              ? "bg-emerald-500 text-white"
+              ? "bg-ds-accent text-ds-on-accent"
               : "border border-ds-border")
           }
           aria-hidden

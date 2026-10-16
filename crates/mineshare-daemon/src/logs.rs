@@ -4,18 +4,26 @@
 //!   1. stderr (always, ANSI-colored when TTY)
 //!   2. `<config_dir>/MineShare/logs/daemon.YYYY-MM-DD` (rotating daily)
 //!
-//! Sync file writes — fine for a hobby daemon and means logs survive
-//! `kill -9` / power loss without losing the in-memory queue.
+//! File writes use a bounded, lossy background queue so diagnostics cannot
+//! stall latency-sensitive input and audio paths.
 
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+const LOG_RETENTION_DAYS: u64 = 14;
+const LOG_TOTAL_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+const LOG_QUEUE_LINES: usize = 8_192;
+
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 /// Returns the directory log files are written to.
 pub fn log_dir() -> Result<PathBuf> {
@@ -34,17 +42,22 @@ pub fn log_dir() -> Result<PathBuf> {
 /// second call panics with `SetGlobalDefaultError`.
 pub fn init() -> Result<()> {
     let dir = log_dir()?;
+    prune_old_logs(&dir);
     let appender = tracing_appender::rolling::daily(&dir, "daemon");
+    let (file_writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(LOG_QUEUE_LINES)
+        .lossy(true)
+        .thread_name("mineshare-log-writer")
+        .finish(appender);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,mineshare=debug"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let already_set = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr).with_target(true))
         .with(
             fmt::layer()
-                .with_writer(appender)
+                .with_writer(file_writer)
                 .with_target(true)
                 .with_ansi(false),
         )
@@ -52,6 +65,9 @@ pub fn init() -> Result<()> {
         .is_err();
 
     if !already_set {
+        // Keep the worker alive for the process lifetime. Dropping the guard
+        // stops the background writer and would silently discard later logs.
+        let _ = LOG_GUARD.set(guard);
         tracing::info!(log_dir = %dir.display(), "log file appender ready");
     }
 
@@ -64,6 +80,48 @@ pub fn init() -> Result<()> {
     // the existing hook.
     install_panic_hook();
     Ok(())
+}
+
+/// Keep diagnostics useful without allowing a long-running tray process to
+/// consume unbounded disk space. Files are deleted oldest-first, first by age
+/// and then until the aggregate size is below the cap.
+fn prune_old_logs(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff =
+        SystemTime::now().checked_sub(Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60));
+    let mut logs = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("daemon.") || !path.is_file() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if cutoff.is_some_and(|limit| modified < limit) {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        logs.push((modified, meta.len(), path));
+    }
+
+    logs.sort_by_key(|(modified, _, _)| *modified);
+    let mut total: u64 = logs.iter().map(|(_, len, _)| *len).sum();
+    for (_, len, path) in logs {
+        if total <= LOG_TOTAL_LIMIT_BYTES {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
 }
 
 fn install_panic_hook() {

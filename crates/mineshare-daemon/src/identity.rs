@@ -43,7 +43,7 @@ impl Identity {
                 noise_static_pub: kp.public,
             };
             let raw = serde_json::to_string_pretty(&id)?;
-            fs::write(&path, raw).context("write identity")?;
+            crate::settings::atomic_write_file(&path, raw.as_bytes()).context("write identity")?;
             info!(path = %path.display(), "created new identity");
             Ok(id)
         }

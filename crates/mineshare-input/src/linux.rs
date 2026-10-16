@@ -35,6 +35,7 @@
 use std::collections::HashSet;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -62,6 +63,169 @@ use tracing::{debug, info, warn};
 const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
+
+mod keyboard_broker;
+mod keyboard_routes;
+mod pointer;
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn measured_111_pixels_inside_must_not_cross_or_precharge_pressure() {
+        let motion = local_motion(
+            (0, 500),
+            (-20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            pointer::Sample::Position(111, 500),
+        );
+        assert_eq!(
+            motion.overshoot, None,
+            "raw estimate crossed before real pointer reached edge"
+        );
+        assert!(
+            motion.cancel,
+            "interior motion must clear existing edge pressure"
+        );
+        assert_eq!(motion.position, (111, 500));
+    }
+
+    #[test]
+    fn actual_edge_still_accepts_outward_pressure_and_cancels_pullback() {
+        let size = (1920, 1080);
+        for (side, previous, delta, at_edge) in [
+            (super::super::PeerSide::Left, (0, 500), (-20, 0), (0, 500)),
+            (
+                super::super::PeerSide::Right,
+                (1919, 500),
+                (20, 0),
+                (1919, 500),
+            ),
+            (super::super::PeerSide::Top, (500, 0), (0, -20), (500, 0)),
+            (
+                super::super::PeerSide::Bottom,
+                (500, 1079),
+                (0, 20),
+                (500, 1079),
+            ),
+        ] {
+            let sample = pointer::Sample::Position(at_edge.0, at_edge.1);
+            assert_eq!(
+                local_motion(previous, delta, size, side, sample).overshoot,
+                Some(20)
+            );
+            assert!(local_motion(previous, (-delta.0, -delta.1), size, side, sample).cancel);
+            let interior = local_motion(
+                previous,
+                delta,
+                size,
+                side,
+                pointer::Sample::Position(500, 500),
+            );
+            assert_eq!(interior.overshoot, None);
+            assert!(interior.cancel);
+        }
+    }
+
+    #[test]
+    fn failed_x11_query_cannot_authorize_crossing_but_wayland_keeps_fallback() {
+        let motion = local_motion(
+            (0, 500),
+            (-20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            pointer::Sample::Unavailable,
+        );
+        assert_eq!(motion.overshoot, None);
+        assert!(motion.cancel);
+        assert_eq!(
+            local_motion(
+                (0, 500),
+                (-20, 0),
+                (1920, 1080),
+                super::super::PeerSide::Left,
+                pointer::Sample::Unsupported
+            )
+            .overshoot,
+            Some(20)
+        );
+    }
+
+    #[test]
+    #[ignore = "live X11 read-only latency check; needs the graphical session environment"]
+    fn live_x11_pointer_confirmation_latency() {
+        let mut timings = Vec::new();
+        for _ in 0..1000 {
+            let started = std::time::Instant::now();
+            assert!(matches!(pointer::sample(), pointer::Sample::Position(_, _)));
+            timings.push(started.elapsed());
+        }
+        timings.sort_unstable();
+        eprintln!(
+            "X11 pointer confirmation p99={:?} max={:?}",
+            timings[990], timings[999]
+        );
+        assert!(timings[990] < Duration::from_millis(8));
+    }
+}
+
+#[derive(Debug)]
+struct LocalMotion {
+    position: (i32, i32),
+    overshoot: Option<i32>,
+    cancel: bool,
+}
+
+fn local_motion(
+    previous: (i32, i32),
+    delta: (i32, i32),
+    size: (i32, i32),
+    side: super::PeerSide,
+    actual: pointer::Sample,
+) -> LocalMotion {
+    let (dx, dy) = delta;
+    let (w, h) = size;
+    let raw_x = previous.0.saturating_add(dx);
+    let raw_y = previous.1.saturating_add(dy);
+    let (overshoot, cancel) = match side {
+        super::PeerSide::Left => ((raw_x < 0).then(|| raw_x.saturating_neg()), dx > 0),
+        super::PeerSide::Right => ((raw_x >= w).then(|| raw_x.saturating_sub(w - 1)), dx < 0),
+        super::PeerSide::Top => ((raw_y < 0).then(|| raw_y.saturating_neg()), dy > 0),
+        super::PeerSide::Bottom => ((raw_y >= h).then(|| raw_y.saturating_sub(h - 1)), dy < 0),
+    };
+    let mut motion = LocalMotion {
+        position: (
+            raw_x.clamp(0, (w - 1).max(0)),
+            raw_y.clamp(0, (h - 1).max(0)),
+        ),
+        overshoot,
+        cancel,
+    };
+    let confirmed = match actual {
+        pointer::Sample::Position(x, y) => {
+            motion.position = (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)));
+            let in_bounds = (0..w).contains(&x) && (0..h).contains(&y);
+            in_bounds
+                && match side {
+                    super::PeerSide::Left => x == 0 && dx < 0,
+                    super::PeerSide::Right => x == w - 1 && dx > 0,
+                    super::PeerSide::Top => y == 0 && dy < 0,
+                    super::PeerSide::Bottom => y == h - 1 && dy > 0,
+                }
+        }
+        pointer::Sample::Unavailable => false,
+        pointer::Sample::Unsupported => true,
+    };
+    if !confirmed {
+        // Do not bank pressure while merely near the edge, even if the old
+        // estimate was already clamped. Re-anchor it to the visible cursor.
+        motion.overshoot = None;
+        motion.cancel = true;
+    }
+    motion
+}
 
 /// Common prefix for our two virtual input devices. The pump
 /// loop uses this to skip them during enumeration so we don't
@@ -112,6 +276,8 @@ const RESTORE_MARGIN_PX: i32 = 120;
 // Modifier-key tracking for the emergency-return hotkey (Ctrl+Alt+R).
 static MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static MOD_ALT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_LEFT: AtomicBool = AtomicBool::new(false);
+static MOD_SHIFT_RIGHT: AtomicBool = AtomicBool::new(false);
 
 // --- shared cursor / grab state across all evdev pump threads ---------
 
@@ -169,6 +335,7 @@ static LAST_FLUSH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Timestamp (ms) of the last exit_remote — gates ENTER_COOLDOWN_MS.
 static LAST_EXIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FLUSH_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static FLUSH_WATCHDOG_THREAD: OnceLock<thread::Thread> = OnceLock::new();
 static FWD_COUNT: AtomicI32 = AtomicI32::new(0);
 
 pub fn local_screen_geometry() -> (u32, u32) {
@@ -230,8 +397,8 @@ pub fn set_peer_screen(w: u32, _h: u32) {
 
 fn enter_remote() {
     // Refuse if the peer signalled it's already driving Remote.
-    if super::peer_in_remote() {
-        debug!("enter_remote refused — peer holds Remote");
+    if !super::can_enter_remote() {
+        debug!("enter_remote refused — peer unavailable or already driving");
         return;
     }
     // virt_x is "distance dragged INTO the peer from the edge we crossed".
@@ -246,9 +413,12 @@ fn enter_remote() {
     PENDING_DX.store(0, Ordering::Release);
     PENDING_DY.store(0, Ordering::Release);
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
-    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+    super::publish_local_control(false, || CURSOR_MODE.store(MODE_REMOTE, Ordering::Release));
+    wake_flush_watchdog();
     info!("cursor → remote (linux)");
-    super::fire_remote_event(super::RemoteEvent::Entered);
+    if !super::peer_session_ready() || super::is_input_locked() {
+        exit_remote();
+    }
 }
 
 fn exit_remote() {
@@ -270,7 +440,9 @@ fn exit_remote() {
     LEFT_PRESSURE.store(0, Ordering::Relaxed);
     LAST_EXIT_MS.store(super::now_ms(), Ordering::Relaxed);
     CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+    wake_flush_watchdog();
     info!(restore = ?(rx, ry), "cursor → local (linux)");
+    super::end_local_control();
     super::fire_remote_event(super::RemoteEvent::Exited);
 }
 
@@ -320,23 +492,20 @@ fn flush_pending<F: Fn(InputEvent) + ?Sized>(sink: &F) {
     let n = FWD_COUNT.fetch_add(1, Ordering::Relaxed);
     if n % 100 == 0 {
         let virt = VIRT_X.load(Ordering::Relaxed);
-        info!(
-            dx,
-            dy,
-            virt_x = virt,
-            n,
-            "linux coalesced motion forward (8ms-window)"
-        );
+        debug!(dx, dy, virt_x = virt, n, "linux coalesced motion forward");
     }
 }
 
-/// Spawn the periodic flush thread once. Wakes every
-/// `super::target_flush_us()` microseconds to deliver any pending motion
-/// that the pump thread couldn't dispatch (e.g. user moved 2 px then
-/// paused — without this the residual would sit in `PENDING_*` until the
-/// next motion event, producing a perceptible "phantom step" when
-/// the user resumes). Cheap: a few hundred wakeups/sec at most, only
-/// does atomic loads when nothing is pending.
+fn wake_flush_watchdog() {
+    if let Some(thread) = FLUSH_WATCHDOG_THREAD.get() {
+        thread.unpark();
+    }
+}
+
+/// Spawn the event-driven flush thread once. It remains parked while input is
+/// local and while a remote session has no pending motion. Producers unpark it
+/// after adding a delta, preserving the final-fragment latency without
+/// hundreds of idle wakeups per second.
 fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>) {
     if FLUSH_WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -344,18 +513,35 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
     if let Err(e) = thread::Builder::new()
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
+            let _ = FLUSH_WATCHDOG_THREAD.set(thread::current());
             loop {
-                let flush_us = super::target_flush_us();
-                thread::sleep(Duration::from_micros(flush_us));
-                if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                while CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
                     && !super::is_game_driving()
                 {
-                    continue;
+                    thread::park();
                 }
-                let n = super::now_ms();
-                let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
-                if n.saturating_sub(last) * 1000 >= flush_us {
-                    flush_pending(&*sink);
+
+                while CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE || super::is_game_driving()
+                {
+                    let flush_us = super::target_flush_us();
+                    let has_pending = PENDING_DX.load(Ordering::Acquire) != 0
+                        || PENDING_DY.load(Ordering::Acquire) != 0;
+                    if has_pending {
+                        thread::park_timeout(Duration::from_micros(flush_us));
+                    } else {
+                        thread::park();
+                    }
+
+                    if CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
+                        && !super::is_game_driving()
+                    {
+                        break;
+                    }
+                    let n = super::now_ms();
+                    let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
+                    if n.saturating_sub(last) * 1000 >= flush_us {
+                        flush_pending(&*sink);
+                    }
                 }
             }
         })
@@ -438,6 +624,11 @@ impl EvdevCapture {
 
         let mut devices = Vec::new();
         for (path, device) in evdev::enumerate() {
+            if keyboard_broker::enabled()
+                && keyboard_broker::virtual_source(&path, device.name().unwrap_or(""))
+            {
+                continue;
+            }
             if device
                 .name()
                 .map(|n| n.starts_with(VIRTUAL_DEVICE_PREFIX))
@@ -508,7 +699,29 @@ impl InputCapture for EvdevCapture {
         // doesn't strand pending motion in the coalescer. Idempotent —
         // safe to call across reconnects.
         start_flush_watchdog(sink.clone());
-        for (path, device) in self.devices.drain(..) {
+        // Acquire all physical keyboards synchronously before publishing readiness.
+        // On any failure the prepared devices drop and release their grabs.
+        let broker_enabled = keyboard_broker::enabled();
+        if broker_enabled {
+            keyboard_broker::clear_readiness();
+        }
+        let mut prepared = Vec::new();
+        let mut keyboard_count = 0;
+        for (path, mut device) in self.devices.drain(..) {
+            let broker = if broker_enabled && !is_pointer_device(&device) {
+                let broker = keyboard_broker::Broker::prepare(&mut device)
+                    .with_context(|| format!("prepare keyboard broker for {}", path.display()))?;
+                keyboard_count += 1;
+                Some(broker)
+            } else {
+                None
+            };
+            prepared.push((path, device, broker));
+        }
+        if broker_enabled && keyboard_count == 0 {
+            anyhow::bail!("keyboard broker found no physical keyboard; Typeless startup must wait");
+        }
+        for (path, device, broker) in prepared {
             let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
@@ -520,8 +733,15 @@ impl InputCapture for EvdevCapture {
             );
             thread::Builder::new()
                 .name(format!("evdev-{}", path.display()))
-                .spawn(move || pump_device(path, device, is_pointer, sink))
+                .spawn(move || pump_device(path, device, is_pointer, broker, sink))
                 .context("spawn evdev thread")?;
+        }
+        if broker_enabled {
+            keyboard_broker::ready(keyboard_count)?;
+            info!(
+                keyboard_count,
+                "keyboard broker ready; physical keyboards stay grabbed, local keys use proxy"
+            );
         }
         Ok(())
     }
@@ -531,11 +751,13 @@ fn pump_device(
     path: PathBuf,
     mut device: Device,
     is_pointer: bool,
+    mut broker: Option<keyboard_broker::Broker>,
     sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
 ) {
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
-    let mut grabbed = false;
+    let mut grabbed = broker.is_some();
+    let mut last_grab_attempt = None::<std::time::Instant>;
 
     // Read non-blocking so the loop can wake on a timer (see
     // GRAB_POLL_MS) and re-apply the grab decision even while idle.
@@ -573,19 +795,30 @@ fn pump_device(
         //     "fight" the way cursor motion does.
         let we_drive = CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
         let peer_drives = super::peer_in_remote();
-        let want_grab = we_drive || (peer_drives && is_pointer);
+        let want_grab = broker.is_some() || we_drive || (peer_drives && is_pointer);
+        if !want_grab {
+            last_grab_attempt = None;
+        }
         if want_grab != grabbed {
             if want_grab {
-                match device.grab() {
-                    Ok(()) => {
-                        grabbed = true;
-                        debug!(path = %path.display(), "evdev grabbed");
+                // A competing exclusive reader cannot be evicted. Avoid a 250 Hz
+                // ioctl/log storm, but keep polling input without blocking sleeps.
+                if last_grab_attempt.is_some_and(|last| last.elapsed() < Duration::from_secs(1)) {
+                    // Still drain events below; never stall the input pump.
+                } else {
+                    last_grab_attempt = Some(std::time::Instant::now());
+                    match device.grab() {
+                        Ok(()) => {
+                            grabbed = true;
+                            debug!(path = %path.display(), "evdev grabbed");
+                        }
+                        Err(e) => warn!(error = %e, path = %path.display(), "evdev grab failed"),
                     }
-                    Err(e) => warn!(error = %e, path = %path.display(), "evdev grab failed"),
                 }
             } else {
                 let _ = device.ungrab();
                 grabbed = false;
+                last_grab_attempt = None;
                 debug!(path = %path.display(), "evdev ungrabbed");
             }
         }
@@ -619,6 +852,11 @@ fn pump_device(
             Ok(it) => it,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "evdev fetch_events failed");
+                if broker.is_some() {
+                    // Dropping the broker releases local held keys and invalidates
+                    // readiness. Device loss must not leave a false ready marker.
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -694,6 +932,13 @@ fn pump_device(
                         }
                     }
 
+                    if down || up {
+                        match key {
+                            EvKey::KEY_LEFTSHIFT => MOD_SHIFT_LEFT.store(down, Ordering::Relaxed),
+                            EvKey::KEY_RIGHTSHIFT => MOD_SHIFT_RIGHT.store(down, Ordering::Relaxed),
+                            _ => {}
+                        }
+                    }
                     // Hotkey: Ctrl+Alt+R toggles Local ⇄ Remote, or asks
                     // the peer to release if the peer holds Remote.
                     if down
@@ -702,6 +947,7 @@ fn pump_device(
                         && MOD_ALT.load(Ordering::Relaxed)
                     {
                         let mode = CURSOR_MODE.load(Ordering::Acquire);
+                        super::set_input_locked(false);
                         if mode == MODE_REMOTE {
                             info!("hotkey Ctrl+Alt+R — forcing exit_remote");
                             exit_remote();
@@ -712,20 +958,29 @@ fn pump_device(
                             info!("hotkey Ctrl+Alt+R — entering remote");
                             enter_remote();
                         }
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
-                    // Hotkey: Ctrl+Alt+L toggles game-mode lock —
+                    // Hotkey: Ctrl+Shift+L toggles game-mode lock —
                     // pins input to this PC so accidental edge
                     // crosses during gameplay don't yank focus.
                     if down
                         && key == EvKey::KEY_L
-                        && MOD_CTRL.load(Ordering::Relaxed)
-                        && MOD_ALT.load(Ordering::Relaxed)
+                        && super::game_lock_chord(
+                            MOD_CTRL.load(Ordering::Relaxed),
+                            MOD_SHIFT_LEFT.load(Ordering::Relaxed)
+                                || MOD_SHIFT_RIGHT.load(Ordering::Relaxed),
+                            MOD_ALT.load(Ordering::Relaxed),
+                        )
                     {
-                        let next = !super::is_input_locked();
-                        info!(locked = next, "hotkey Ctrl+Alt+L — game-mode lock");
-                        super::set_input_locked(next);
+                        info!("hotkey Ctrl+Shift+L — focused desktop lock");
+                        super::toggle_focused_input_lock();
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
@@ -739,6 +994,9 @@ fn pump_device(
                     {
                         super::cycle_keyboard_target();
                         info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
@@ -753,8 +1011,7 @@ fn pump_device(
                     // Mouse buttons still follow the cursor (a pinned
                     // keyboard doesn't stop the user from clicking
                     // wherever the mouse is pointing).
-                    let cursor_in_remote =
-                        CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
+                    let cursor_in_remote = CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
                     if let Some(btn) = button_from_key(key) {
                         // Local click → focus signal (regardless of
                         // whether we forward it).
@@ -766,22 +1023,64 @@ fn pump_device(
                         // with a stuck-down button after a cursor
                         // cross-back happens between press and
                         // release.
-                        if super::route_mouse_button(
-                            btn,
-                            value != 0,
-                            cursor_in_remote || super::is_game_driving(),
-                        ) {
+                        let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        let remote = !local_held
+                            && super::route_mouse_button(
+                                btn,
+                                value != 0,
+                                cursor_in_remote || super::is_game_driving(),
+                            );
+                        let forward = if let Some(broker) = broker.as_mut() {
+                            match broker.dispatch(key.0, value, remote) {
+                                Ok(forward) => forward && remote,
+                                Err(error) => {
+                                    warn!(%error, "local keyboard button proxy failed");
+                                    return;
+                                }
+                            }
+                        } else {
+                            remote
+                        };
+                        if forward {
                             sink(InputEvent::MouseButton {
                                 btn,
                                 down: value != 0,
                             });
                         }
-                    } else if super::route_keystroke(key.0, value != 0, cursor_in_remote) {
-                        sink(InputEvent::Key {
-                            code: KeyCode(key.0),
-                            down: value != 0,
-                        });
-                        super::note_key_forwarded_with_code(key.0, value != 0);
+                    } else {
+                        // A locally held key remains local even if a repeat arrives
+                        // after crossing. Remote routing keeps its existing held tracker.
+                        let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        let remote = !local_held
+                            && super::route_keystroke(key.0, value != 0, cursor_in_remote);
+                        let forward = if let Some(broker) = broker.as_mut() {
+                            match broker.dispatch(key.0, value, remote) {
+                                Ok(forward) => forward && remote,
+                                Err(error) => {
+                                    warn!(%error, path = %path.display(), "local keyboard proxy failed; releasing physical keyboard");
+                                    return;
+                                }
+                            }
+                        } else {
+                            remote
+                        };
+                        if matches!(key.0, 100 | 125 | 126) {
+                            info!(
+                                code = key.0,
+                                value,
+                                forward,
+                                broker = broker.is_some(),
+                                cursor_in_remote,
+                                "Linux modifier route"
+                            );
+                        }
+                        if forward {
+                            sink(InputEvent::Key {
+                                code: KeyCode(key.0),
+                                down: value != 0,
+                            });
+                            super::note_key_forwarded_with_code(key.0, value != 0);
+                        }
                     }
                     // In LOCAL we don't forward; they're already going to
                     // the OS via the un-grabbed kernel path.
@@ -818,6 +1117,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
         PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
         PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        wake_flush_watchdog();
         let flush_us = super::target_flush_us();
         let now_ms = super::now_ms();
         let last = LAST_FLUSH_MS.load(Ordering::Relaxed);
@@ -844,54 +1144,35 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             return;
         }
 
-        // Track an estimate of the real cursor X *and* Y. Wayland
-        // has no portable cursor-pos query, but the OS clamps at
-        // the screen edges — and evdev keeps reporting the
-        // overshoot. Mirroring with clamped CURSOR_X / CURSOR_Y
-        // means any time the user drags into a real screen edge our
-        // estimate self-syncs; drift can't accumulate beyond one
-        // screen.
+        // Track a coarse estimate, then confirm candidate overshoots against
+        // the real X11 pointer. Wayland retains the estimate fallback: global
+        // XWayland coordinates are not authoritative for a Wayland session.
         let screen_w = SCREEN_W.load(Ordering::Relaxed);
         let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
         let prev_y = CURSOR_Y.load(Ordering::Relaxed);
-        let raw_x = prev_x + dx;
-        let raw_y = prev_y + dy;
-        CURSOR_X.store(raw_x.clamp(0, (screen_w - 1).max(0)), Ordering::Relaxed);
-        CURSOR_Y.store(raw_y.clamp(0, (screen_h - 1).max(0)), Ordering::Relaxed);
-
-        // Edge press: which clamp signals "user is pushing into the
-        // boundary" depends on the layout. We pick one axis (X for
-        // left/right sides, Y for top/bottom) and detect overshoot
-        // past the configured edge of the screen. The opposite-
-        // direction motion cancels an in-flight press (user pulled
-        // back from the edge).
-        let (overshoot, cancel) = match super::peer_side() {
-            super::PeerSide::Left => (
-                if raw_x < 0 { Some(-raw_x) } else { None },
-                dx > 0,
-            ),
-            super::PeerSide::Right => (
-                if raw_x > screen_w - 1 {
-                    Some(raw_x - (screen_w - 1))
-                } else {
-                    None
-                },
-                dx < 0,
-            ),
-            super::PeerSide::Top => (
-                if raw_y < 0 { Some(-raw_y) } else { None },
-                dy > 0,
-            ),
-            super::PeerSide::Bottom => (
-                if raw_y > screen_h - 1 {
-                    Some(raw_y - (screen_h - 1))
-                } else {
-                    None
-                },
-                dy < 0,
-            ),
-        };
+        let mut motion = local_motion(
+            (prev_x, prev_y),
+            (dx, dy),
+            (screen_w, screen_h),
+            super::peer_side(),
+            pointer::Sample::Unsupported,
+        );
+        // Raw mickeys are not screen pixels: acceleration and handback can
+        // leave the estimate at the edge while the actual cursor is inside.
+        // Query X11 only on candidate edge reports, never the remote hot path.
+        if motion.overshoot.is_some() && !super::is_input_locked() {
+            motion = local_motion(
+                (prev_x, prev_y),
+                (dx, dy),
+                (screen_w, screen_h),
+                super::peer_side(),
+                pointer::sample(),
+            );
+        }
+        CURSOR_X.store(motion.position.0, Ordering::Relaxed);
+        CURSOR_Y.store(motion.position.1, Ordering::Relaxed);
+        let (overshoot, cancel) = (motion.overshoot, motion.cancel);
         if let Some(over) = overshoot {
             // Game-mode lock OR Game Drive: pretend the press never
             // happened. We still update CURSOR_X/Y above so the estimate
@@ -948,7 +1229,8 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             super::PeerSide::Bottom => dy,
         };
         let raw = VIRT_X.load(Ordering::Relaxed) + depth_dx;
-        let new_virt_x = raw.clamp(-EXIT_BUFFER_PX, peer_w);
+        let new_virt_x =
+            super::clamp_remote_depth(raw, peer_w, EXIT_BUFFER_PX, super::remote_input_locked());
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
         if new_virt_x <= -EXIT_BUFFER_PX {
@@ -980,6 +1262,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         // instead of eight.
         PENDING_DX.fetch_add(fdx, Ordering::AcqRel);
         PENDING_DY.fetch_add(fdy, Ordering::AcqRel);
+        wake_flush_watchdog();
 
         // Opportunistic flush: if the window has already elapsed,
         // dispatch immediately on this SYN rather than waiting for
@@ -1091,7 +1374,10 @@ impl UinputInject {
             .with_keys(&kb_keys)?
             .build()
             .context("create uinput keyboard device")?;
-        info!(name = VIRTUAL_KEYBOARD_NAME, "uinput virtual keyboard created");
+        info!(
+            name = VIRTUAL_KEYBOARD_NAME,
+            "uinput virtual keyboard created"
+        );
 
         Ok(Self {
             mouse: parking_lot::Mutex::new(mouse),
@@ -1178,16 +1464,12 @@ impl InputInject for UinputInject {
         let count = drained.len();
         for h in drained {
             let res = match h {
-                HeldKey::KbKey(code) => self.emit_keyboard(&[evdev::InputEvent::new(
-                    EventType::KEY.0,
-                    code,
-                    0,
-                )]),
-                HeldKey::MouseBtn(code) => self.emit_mouse(&[evdev::InputEvent::new(
-                    EventType::KEY.0,
-                    code,
-                    0,
-                )]),
+                HeldKey::KbKey(code) => {
+                    self.emit_keyboard(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
+                }
+                HeldKey::MouseBtn(code) => {
+                    self.emit_mouse(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
+                }
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");
