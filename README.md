@@ -1,12 +1,32 @@
-# MineShare
+<div align="center">
+  <img src="docs/media/mineshare-logo.png" width="80" alt="MineShare gold M logo" />
+  <h1>MineShare</h1>
+  <p><strong>Two computers. One familiar setup.</strong></p>
+  <p>Keep your keyboard, mouse and headset plugged into your PC.<br />Bring your laptop to the desk. Let your focus move between them.</p>
 
-> KVM-over-IP + bidirectional audio/mic bridge between **Windows** and **Ubuntu Linux** PCs over a LAN.
+  <a href="#the-desk-workflow">See the workflow</a> ·
+  <a href="#what-it-does">Explore features</a> ·
+  <a href="#install">Set up MineShare</a> ·
+  <a href="docs/ubuntu-readiness.md">Ubuntu support</a>
+  <br /><br />
 
-Drive two PCs with one keyboard + one mouse. Hear and speak through both. Cursor flows between machines like a single virtual desktop; clipboard, audio, microphone follow.
+  <img alt="Platforms: Windows 11 and Ubuntu" src="https://img.shields.io/badge/Windows_11_+_Ubuntu-LAN_bridge-bd9653?style=flat-square" />
+  <img alt="Status: pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-d1ad6c?style=flat-square" />
+  <img alt="Rust 1.94+" src="https://img.shields.io/badge/Rust-1.94+-43474b?style=flat-square" />
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-688477?style=flat-square" /></a>
+</div>
 
-**Status:** working end-to-end on Win 11 + Ubuntu 24.04 (Wayland/GNOME). Single user, single LAN. Pre-1.0 — see [PLAN.md](PLAN.md) for the full design.
+<br />
 
-![status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange) ![rust](https://img.shields.io/badge/rust-1.94+-orange) ![license](https://img.shields.io/badge/license-MIT-blue) [![latest release](https://img.shields.io/github/v/release/MCTEEKUNG/mineshare?label=download&sort=semver&color=brightgreen)](https://github.com/MCTEEKUNG/mineshare/releases/latest)
+[![An illustrated desk workflow: a developer arrives, sets down a Windows laptop, and moves one cursor from the PC to the laptop. Keyboard, mouse and headset cables remain connected to the PC.](docs/media/desk-story.gif)](docs/media/desk-story.mp4)
+
+<p align="center"><a href="docs/media/desk-story.mp4">Watch the 18-second MP4</a> · <a href="docs/media/desk-story-poster.png">Still preview</a> · <a href="media/promo">Edit the animation</a></p>
+
+> **About the animation:** an original workflow illustration, not a screen recording, benchmark, or proof of compatibility. The app interface is simplified for storytelling. Desktop autostart requires setup; trusted peers must already be paired on the same LAN.
+
+MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
+
+**Development snapshot:** `0.0.12` · keyboard broker commit [`9dd85f7`](https://github.com/MCTEEKUNG/mineshare/commit/9dd85f7). Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Published installers below may predate this source snapshot; do not assume that “latest release” contains every development change.
 
 ---
 
@@ -40,34 +60,25 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 | 🎮 **Game-mode lock** | User-controlled lock on the focused desktop; toggle with **Ctrl+Shift+L**. Opening a game does not automatically enable the lock. |
 | 📊 **Latency telemetry** | Round-trip Ping/Pong every 500 ms with rolling histogram in the GUI. |
 
-**Non-goals:** macOS, internet/NAT traversal, video mirroring, file transfer.
+**Non-goals:** macOS, internet/NAT traversal, video mirroring.
 
 ---
 
-## How I actually use it
+## The desk workflow
 
-This is the workflow this project was built around. The goal: leave the **Win laptop** as primary input, drop the **Ubuntu PC** beside it as a second screen + workhorse, never plug the keyboard into Ubuntu.
+| Arrive | Connect | Keep going |
+|---|---|---|
+| Set the Windows laptop in the center of the desk. The desktop PC is already running. | Configured desktop autostart launches MineShare; previously paired peers discover each other over the LAN. | Move the PC mouse across the configured edge. Use the same keyboard on the focused machine. |
 
-```
-┌─────────────────────────┐         LAN         ┌─────────────────────────┐
-│  Windows 11 (laptop)    │  ◄─ encrypted ─►   │  Ubuntu 24.04 (desktop) │
-│  2880×1800 @ 200% DPI   │                     │  1920×1080              │
-│                         │                     │                         │
-│  • USB keyboard         │                     │  • USB mouse            │
-│  • Trackpad             │                     │  • (no keyboard needed) │
-│  • Headset (mic + spk)  │                     │  • Speakers             │
-└─────────────────────────┘                     └─────────────────────────┘
-```
+The **keyboard, mouse and headset remain physically connected to the desktop PC**. MineShare carries the input and configured audio streams between computers; no unplugging or USB dock handoff is part of this illustration.
 
-Daily flow:
+1. Install MineShare on both machines, pair them, and configure their relative screen positions.
+2. Enable desktop autostart: the per-user Windows logon task or [Ubuntu graphical launcher](installer/linux/install-desktop.sh).
+3. Move the mouse against the configured edge to control the other machine. Smart keyboard routing follows input ownership; explicit pin modes are also available.
+4. Configure the audio bridge for the playback device you use. Microphone routing has additional platform requirements; see [installation](#install).
+5. Return across the edge to keep working on the PC. No video mirror is needed; each machine keeps its own screen.
 
-1. **Boot both PCs.** GUI launches automatically (Win Startup folder, Linux systemd user service). They find each other via mDNS within ~1 s.
-2. **First launch ever:** a 6-digit PIN appears on one machine; type it on the other → trusted forever.
-3. **Move cursor right** off the Win laptop → it appears on Ubuntu.
-4. **Click an Ubuntu app** with the Ubuntu mouse → Smart mode notices, routes the Win keyboard there. Type Discord messages, terminal commands, whatever — keys land on Ubuntu while the Win laptop stays on whatever it was doing.
-5. **Move Win cursor or click Win** → keys snap back to Win within ~1.5 s.
-6. **Open Chrome on Ubuntu, play music** → audio comes through the Win headset.
-7. **Voice-call from Win Discord** → Ubuntu apps see the Win headset mic as an input device (`Monitor of MineShare-Mic`).
+For Typeless on Ubuntu, use the [ordered keyboard-broker setup](docs/linux-typeless-keyboard-broker.md), then log out/in once. It is designed to let Typeless stay open on both machines and receive Right Alt only on the routed destination. That behavior still needs the documented physical acceptance test; it is not implied by the animation.
 
 Hotkeys:
 
