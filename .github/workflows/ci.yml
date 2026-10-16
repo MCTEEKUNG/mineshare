@@ -117,3 +117,4 @@ jobs:
           cargo fmt --manifest-path installer/windows/maintenance/Cargo.toml --check
           cargo clippy --manifest-path installer/windows/maintenance/Cargo.toml --locked -- -D warnings
           cargo test --manifest-path installer/windows/maintenance/Cargo.toml --locked
+          powershell.exe -NoProfile -File installer/windows/test-process-stop.ps1

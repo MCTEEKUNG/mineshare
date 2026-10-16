@@ -2,6 +2,21 @@
 # Never delete app configuration, pairing keys, logs, startup entries or directories.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+function Stop-InstallProcesses([object[]]$Processes) {
+    # Parents start before their workers. Stop the GUI first so its supervisor
+    # cannot respawn a child while MSI is trying to replace the executable.
+    foreach ($process in @($Processes | Sort-Object StartTime)) {
+        if ($process.HasExited) { continue }
+        try {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(1500)) { $process.Kill(); $process.WaitForExit() }
+        } catch {
+            # The child can exit when the parent's pipe closes, even between
+            # HasExited and a process method. Ignore only that confirmed race.
+            if (-not $process.HasExited) { throw }
+        }
+    }
+}
 try {
     $action = $env:MINESHARE_INSTALL_ACTION
     $transaction = [Guid]::Parse($env:MINESHARE_INSTALL_TRANSACTION).ToString('N')
@@ -45,10 +60,13 @@ try {
         }
         New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
         @{ Directory=$directory; WasRunning=($running.Count -gt 0) } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
-        foreach ($process in $running) {
-            $null = $process.CloseMainWindow()
-            if (-not $process.WaitForExit(1500)) { $process.Kill(); $process.WaitForExit() }
-        }
+        Stop-InstallProcesses $running
+        # Catch any worker spawned after the first snapshot. Only this exact
+        # installation directory is in scope; never stop unrelated processes.
+        $remaining = @(Get-Process -Name mineshare-app,mineshare-daemon -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -and [IO.Path]::GetDirectoryName($_.Path).TrimEnd('\') -ieq $directory
+        })
+        Stop-InstallProcesses $remaining
     } elseif ($action -in @('complete','rollback')) {
         if (-not (Test-Path -LiteralPath $statePath)) { exit 0 }
         $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
