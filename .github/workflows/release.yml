@@ -81,6 +81,17 @@ jobs:
         working-directory: ui
         run: npm run tauri -- build --ci -- --locked
 
+      - name: Build unified Windows EXE bootstrapper
+        if: runner.os == 'Windows'
+        run: node installer/windows/build-bootstrapper.mjs
+
+      - name: Audit Windows MSI update support
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem ui/src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1
+          ./installer/windows/test-msi-package.ps1 -MsiFile $msi.FullName
+
       - name: Collect artifacts
         shell: bash
         run: |
@@ -116,3 +127,32 @@ jobs:
           files: artifacts/*
           draft: true
           generate_release_notes: true
+
+  installer-acceptance:
+    name: Windows upgrade / ${{ matrix.scenario }}
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [msi-msi, msi-exe, exe-msi, exe-exe, script-msi, script-exe, rollback]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mineshare-windows-x64
+          path: new-installers
+      - name: Real installation, upgrade, repeat-install and data/startup checks
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./installer/windows/test-upgrade.ps1 -NewDirectory (Resolve-Path new-installers).Path -Scenario '${{ matrix.scenario }}'
+      - name: Keep installer failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-logs-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/msi-*.log

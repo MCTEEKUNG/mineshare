@@ -110,3 +110,10 @@ jobs:
       - name: cargo check (tauri backend)
         working-directory: ui/src-tauri
         run: cargo check --all-targets --locked
+
+      - name: Windows installer helper checks
+        if: runner.os == 'Windows'
+        run: |
+          cargo fmt --manifest-path installer/windows/maintenance/Cargo.toml --check
+          cargo clippy --manifest-path installer/windows/maintenance/Cargo.toml --locked -- -D warnings
+          cargo test --manifest-path installer/windows/maintenance/Cargo.toml --locked

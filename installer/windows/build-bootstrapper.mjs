@@ -1,0 +1,14 @@
+import {spawnSync} from 'node:child_process';
+import {readFileSync, readdirSync, mkdirSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const directory = path.dirname(fileURLToPath(import.meta.url));
+const ui = path.resolve(directory, '../../ui');
+const {version} = JSON.parse(readFileSync(path.join(ui, 'src-tauri/tauri.conf.json'), 'utf8'));
+const bundle = path.join(ui, 'src-tauri/target/release/bundle');
+const msi = path.join(bundle, 'msi', readdirSync(path.join(bundle,'msi')).find(n => n === `MineShare_${version}_x64_en-US.msi`) ?? 'MISSING');
+mkdirSync(path.join(bundle,'nsis'), {recursive:true});
+const output = path.join(bundle, 'nsis', `MineShare_${version}_x64-setup.exe`);
+const makensis = path.join(process.env.LOCALAPPDATA, 'tauri/NSIS/makensis.exe');
+const result = spawnSync(makensis, ['/V3', `/DVERSION=${version}`, `/DMSI_FILE=${msi}`, `/DOUTPUT_FILE=${output}`, path.join(directory,'bootstrapper.nsi')], {stdio:'inherit'});
+if (result.status !== 0) process.exit(result.status ?? 1);

@@ -25,6 +25,9 @@ if (Test-Path 'bun.lock') {
 Write-Host ''
 Write-Host '==> tauri build' -ForegroundColor Cyan
 bun run tauri build
+if ($LASTEXITCODE -ne 0) { throw 'Tauri build failed' }
+node "$Root\installer\windows\build-bootstrapper.mjs"
+if ($LASTEXITCODE -ne 0) { throw 'Windows bootstrapper build failed' }
 
 Write-Host ''
 Write-Host '==> Installer artifacts:' -ForegroundColor Cyan

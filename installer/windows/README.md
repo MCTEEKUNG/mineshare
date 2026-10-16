@@ -1,63 +1,67 @@
-# MineShare — Windows install
+# MineShare Windows installation and updates
 
-Per-user installer for the daemon side. No admin needed.
+## Packaged downloads (0.0.13 onward)
 
-The Slice 4 MSI wraps the same artifacts in a real installer for
-distribution; this script is for development + advanced users.
+Double-click either the MSI or the EXE. Both use the same MSI payload, upgrade
+identity and registration; changing download format must not install a second
+copy. Windows may request administrator approval. Install/update using the same
+Windows account that owns the existing per-user installation.
 
-## why not a Windows Service
+The installer detects older MSI and NSIS installations, plus the fixed legacy
+script location at `%LOCALAPPDATA%\\MineShare`. Existing installations get an
+Update page and reuse their directory. Pairing, settings and logs are outside
+the MSI's component ownership and are not reset. Existing startup tasks (including
+disabled state), Run entries and their arguments are left unchanged. A fresh
+installation does not enable startup without the user's choice.
 
-A SYSTEM-context Windows Service runs in its own session, with no
-desktop, no audio endpoint, no clipboard, and no ability to install
-WH_MOUSE_LL / WH_KEYBOARD_LL hooks for the user's input devices. We
-need all of those, so the daemon registers as a **logon-time**
-entry in the user's Startup folder instead. That keeps it scoped to
-the user's interactive session, where everything it needs is
-available.
+A verified NSIS registration is removed after the MSI succeeds, without running
+the old NSIS uninstaller against new files. MSI file replacement is transactional;
+the helper restarts a previously running app after success or rollback. A failed
+migration must not be described as a successful update.
 
-## install
-
-From a fresh checkout, after building the daemon:
-
-```powershell
-cargo build --release -p mineshare-daemon --bin mineshare-daemon
-
-# from the repo root:
-powershell -ExecutionPolicy Bypass -File .\installer\windows\install.ps1
-```
-
-The script will:
-
-1. stop any running daemon so it can overwrite the exe
-2. copy `target\release\mineshare-daemon.exe` →
-   `%LOCALAPPDATA%\Programs\MineShare\`
-3. create a Startup-folder shortcut so the daemon launches at
-   logon (minimized window style)
-4. start the daemon immediately
-
-## verify
+Silent deployment:
 
 ```powershell
-Get-Process mineshare-daemon
+msiexec /i "MineShare_0.0.13_x64_en-US.msi" /qn /norestart AUTOLAUNCHAPP=0
+.\\MineShare_0.0.13_x64-setup.exe /S
 ```
 
-mDNS announce should advertise this host inside ~1s; pair with the
-Linux side via the existing browse loop. Logs go to
-`%APPDATA%\MineShare\logs\` (whatever the daemon's `logs::init`
-writes).
+Keep the MSI UpgradeCode unchanged. Do not replace assets of a published version.
+Use a higher application version for subsequent releases. Installers remain
+unsigned; verify SHA-256 before running them.
 
-## uninstall
+## Development / advanced per-user deployment
+
+Build the GUI, not a second standalone daemon:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\windows\uninstall.ps1
+cd ui
+npm ci
+npm run tauri -- build --no-bundle
+cd ..
+powershell -ExecutionPolicy Bypass -File installer\\windows\\install.ps1
 ```
 
-## notes
+The script installs the GUI at `%LOCALAPPDATA%\\MineShare`, refreshes the icon and
+registers one `MineShareLaunch` task in the interactive user's session. It is not
+a Windows service and must not run the bridge as SYSTEM. Packaged MSI upgrades
+can detect this legacy directory; no fake MSI registration is created by the
+development script.
 
-* The console window briefly appears on logon because the daemon
-  is built as a console app. Replacing the binary with a
-  windows-subsystem build (no console) is M5 polish.
-* If you want VB-CABLE-routed peer-mic playback, install
-  https://vb-audio.com/Cable/ separately, then restart the daemon.
-  The daemon auto-detects "CABLE Input" at startup and skips it
-  with a warning if missing — install order doesn't matter.
+## Verification and release gate
+
+- `test-msi-package.ps1`: stable upgrade identity, legacy detection, Update UI
+  and migration/rollback actions are present in the compiled MSI.
+- `test-upgrade.ps1`: **GitHub-hosted disposable Windows runners only**. Tests
+  MSI→MSI, MSI→EXE, EXE→MSI, EXE→EXE, script→MSI/EXE, repeat-install and an injected
+  installation failure. Check file version, original location, one registration,
+  unchanged pairing/settings hashes and exact startup-task XML/Run values.
+- Do not publish until normal CI, both platform builds and every upgrade scenario
+  pass. Silent-install tests do not replace a visual review of the wizard.
+- Do not run destructive acceptance tests on the user's Laptop or PC.
+
+For developer uninstall use `installer\\windows\\uninstall.ps1`; for a packaged
+installation use Windows Settings → Apps. Do not run a leftover old NSIS
+uninstaller after migrating to MSI. User configuration and logs must remain.
+
+VB-CABLE is optional and installed separately for peer-microphone playback.

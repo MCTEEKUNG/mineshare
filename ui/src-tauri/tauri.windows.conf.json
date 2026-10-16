@@ -1,0 +1,14 @@
+{
+  "build": {
+    "beforeBundleCommand": "node ../installer/windows/build-maintenance.mjs"
+  },
+  "bundle": {
+    "windows": {
+      "allowDowngrades": false,
+      "wix": {
+        "upgradeCode": "ca10a129-4dcb-5d4b-82c4-5caaa33b3e4e",
+        "template": "../../installer/windows/main.wxs"
+      }
+    }
+  }
+}
