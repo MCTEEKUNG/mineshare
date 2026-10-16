@@ -93,9 +93,20 @@
                 <FileSearch Id="MineShareLegacyFile" Name="mineshare-app.exe" />
             </DirectorySearch>
         </Property>
-        <SetProperty Id="INSTALLDIR" Value="[LocalAppDataFolder]MineShare" After="AppSearch" Sequence="both">
+        <Property Id="MINESHARE_LEGACY_PROGRAMS_EXE">
+            <DirectorySearch Id="MineShareLegacyProgramsDirectory" Path="[LocalAppDataFolder]Programs\MineShare" Depth="0">
+                <FileSearch Id="MineShareLegacyProgramsFile" Name="mineshare-app.exe" />
+            </DirectorySearch>
+        </Property>
+        <SetProperty Id="INSTALLDIR" Action="SetMineShareLegacyDirectory" Value="[LocalAppDataFolder]MineShare" After="AppSearch" Sequence="both">
             MINESHARE_LEGACY_EXE AND NOT INSTALLDIR AND NOT WIX_UPGRADE_DETECTED
         </SetProperty>
+        <SetProperty Id="INSTALLDIR" Action="SetMineShareLegacyProgramsDirectory" Value="[LocalAppDataFolder]Programs\MineShare" After="AppSearch" Sequence="both">
+            MINESHARE_LEGACY_PROGRAMS_EXE AND NOT MINESHARE_LEGACY_EXE AND NOT INSTALLDIR AND NOT WIX_UPGRADE_DETECTED
+        </SetProperty>
+        <Condition Message="Two legacy MineShare folders were found. Remove the inactive copy before updating; your pairing and settings will not be deleted.">
+            NOT (MINESHARE_LEGACY_EXE AND MINESHARE_LEGACY_PROGRAMS_EXE)
+        </Condition>
         <Binary Id="MineShareInstallerHelper" SourceFile="{{main_binary_path}}.installer-helper.exe" />
         <!-- Paths end in a dot to avoid the quoted-trailing-backslash argv trap. -->
         <CustomAction Id="MineSharePrepare" BinaryKey="MineShareInstallerHelper" ExeCommand='prepare "[INSTALLDIR]." "[ProductCode]" "[ProductVersion]"' Return="check" Impersonate="yes" />
@@ -148,7 +159,7 @@
                 </Control>
             </Dialog>
             <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="MineShareUpdateDlg" Order="99">
-                NOT Installed AND (WIX_UPGRADE_DETECTED OR MINESHARE_LEGACY_EXE OR MINESHARE_NSIS_VERSION)
+                NOT Installed AND (WIX_UPGRADE_DETECTED OR MINESHARE_LEGACY_EXE OR MINESHARE_LEGACY_PROGRAMS_EXE OR MINESHARE_NSIS_VERSION)
             </Publish>
 
         </UI>
@@ -424,4 +435,3 @@
         <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
     </Product>
 </Wix>
-

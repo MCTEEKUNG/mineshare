@@ -3,6 +3,7 @@ Unicode true
 RequestExecutionLevel admin
 Name "MineShare"
 OutFile "${OUTPUT_FILE}"
+Icon "${ICON_FILE}"
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "MineShare"
 VIAddVersionKey "FileDescription" "MineShare installer and updater"

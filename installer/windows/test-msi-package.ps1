@@ -9,7 +9,7 @@ function Rows([string]$query) {
 $upgrade=@(Rows 'SELECT `Value` FROM `Property` WHERE `Property` = ''UpgradeCode''')
 if ($upgrade.Count -ne 1 -or $upgrade[0].StringData(1) -ne '{CA10A129-4DCB-5D4B-82C4-5CAAA33B3E4E}') { throw 'MSI upgrade identity changed' }
 $searches=@(Rows 'SELECT `Property` FROM `AppSearch`' | ForEach-Object { $_.StringData(1) })
-if ('MINESHARE_LEGACY_EXE' -notin $searches -or 'MINESHARE_NSIS_VERSION' -notin $searches) { throw 'MSI does not detect legacy script and NSIS installations' }
+if ('MINESHARE_LEGACY_EXE' -notin $searches -or 'MINESHARE_LEGACY_PROGRAMS_EXE' -notin $searches -or 'MINESHARE_NSIS_VERSION' -notin $searches) { throw 'MSI does not detect legacy script and NSIS installations' }
 $dialogs=@(Rows 'SELECT `Dialog` FROM `Dialog`' | ForEach-Object { $_.StringData(1) })
 if ('MineShareUpdateDlg' -notin $dialogs) { throw 'MSI has no explicit update UI' }
 $actions=@(Rows 'SELECT `Action` FROM `CustomAction`' | ForEach-Object { $_.StringData(1) })

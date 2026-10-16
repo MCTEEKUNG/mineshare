@@ -10,5 +10,6 @@ const msi = path.join(bundle, 'msi', readdirSync(path.join(bundle,'msi')).find(n
 mkdirSync(path.join(bundle,'nsis'), {recursive:true});
 const output = path.join(bundle, 'nsis', `MineShare_${version}_x64-setup.exe`);
 const makensis = path.join(process.env.LOCALAPPDATA, 'tauri/NSIS/makensis.exe');
-const result = spawnSync(makensis, ['/V3', `/DVERSION=${version}`, `/DMSI_FILE=${msi}`, `/DOUTPUT_FILE=${output}`, path.join(directory,'bootstrapper.nsi')], {stdio:'inherit'});
+const icon = path.join(ui, 'src-tauri/icons/icon.ico');
+const result = spawnSync(makensis, ['/V3', `/DVERSION=${version}`, `/DMSI_FILE=${msi}`, `/DOUTPUT_FILE=${output}`, `/DICON_FILE=${icon}`, path.join(directory,'bootstrapper.nsi')], {stdio:'inherit'});
 if (result.status !== 0) process.exit(result.status ?? 1);

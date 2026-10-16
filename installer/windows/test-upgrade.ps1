@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$NewDirectory,
     [Parameter(Mandatory=$true)]
-    [ValidateSet('msi-msi','msi-exe','exe-msi','exe-exe','script-msi','script-exe','fresh-msi','fresh-exe','rollback','rollback-nsis','downgrade')]
+    [ValidateSet('msi-msi','msi-exe','exe-msi','exe-exe','script-msi','script-exe','programs-msi','programs-exe','fresh-msi','fresh-exe','rollback','rollback-nsis','downgrade')]
     [string]$Scenario
 )
 $ErrorActionPreference='Stop'
@@ -31,7 +31,9 @@ function Install([string]$Path,[bool]$ShouldFail=$false) {
 Assert (@(Registrations).Count -eq 0) 'Runner already has MineShare installed'
 $oldDirectory=Join-Path $env:RUNNER_TEMP 'old-installers'
 New-Item -ItemType Directory -Force -Path $oldDirectory | Out-Null
-& gh release download v0.0.12 --repo MCTEEKUNG/mineshare -p '*x64-setup.exe' -p '*x64_en-US.msi' -D $oldDirectory
+# Pin the original, verified release build used on the user's machines. The old
+# tag workflow rebuilt public v0.0.12 assets; do not silently trust replacements.
+& gh run download 38932717686 --repo MCTEEKUNG/mineshare -n mineshare-windows-x64 -D $oldDirectory
 Assert ($LASTEXITCODE -eq 0) 'Could not fetch baseline release'
 $oldMsi=(Get-ChildItem $oldDirectory -Filter *.msi | Select-Object -First 1).FullName
 $oldExe=(Get-ChildItem $oldDirectory -Filter *.exe | Select-Object -First 1).FullName
@@ -48,7 +50,7 @@ else {
     $extract=Join-Path $env:RUNNER_TEMP 'old-extracted'
     $p=Start-Process msiexec.exe -WindowStyle Hidden -ArgumentList @('/a',('"'+$oldMsi+'"'),'/qn',('TARGETDIR="'+$extract+'"')) -Wait -PassThru
     Assert ($p.ExitCode -eq 0) 'Baseline extraction failed'
-    $location=Join-Path $env:LOCALAPPDATA 'MineShare'
+    $location=if($oldKind -eq 'programs') { Join-Path $env:LOCALAPPDATA 'Programs\MineShare' } else { Join-Path $env:LOCALAPPDATA 'MineShare' }
     New-Item -ItemType Directory -Force -Path $location | Out-Null
     Copy-Item -LiteralPath (Get-ChildItem $extract -Recurse -Filter mineshare-app.exe | Select-Object -First 1).FullName -Destination $location
 }
@@ -108,6 +110,8 @@ if($Scenario -in @('rollback','rollback-nsis','downgrade')) {
     if($newKind -eq 'msi') { Install $newMsi } else { Install $newExe }
 }
 Assert (@(Registrations).Count -eq 1) 'Duplicate or missing installed product registration'
+$transactions=Join-Path $env:LOCALAPPDATA 'MineShareInstaller'
+Assert (@(Get-ChildItem -LiteralPath $transactions -Filter *.json -ErrorAction SilentlyContinue).Count -eq 0) 'Installer transaction/rollback did not finish'
 foreach($name in $before.Keys) {
     Assert ((Get-FileHash -LiteralPath (Join-Path $data $name)).Hash -eq $before[$name]) "User data changed: $name"
 }

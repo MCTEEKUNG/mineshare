@@ -8,7 +8,7 @@ copy. Windows may request administrator approval. Install/update using the same
 Windows account that owns the existing per-user installation.
 
 The installer detects older MSI and NSIS installations, plus the fixed legacy
-script location at `%LOCALAPPDATA%\\MineShare`. Existing installations get an
+script locations at `%LOCALAPPDATA%\MineShare` and `%LOCALAPPDATA%\Programs\MineShare`. Existing installations get an
 Update page and reuse their directory. Pairing, settings and logs are outside
 the MSI's component ownership and are not reset. Existing startup tasks (including
 disabled state), Run entries and their arguments are left unchanged. A fresh
@@ -23,7 +23,7 @@ Silent deployment:
 
 ```powershell
 msiexec /i "MineShare_0.0.13_x64_en-US.msi" /qn /norestart AUTOLAUNCHAPP=0
-.\\MineShare_0.0.13_x64-setup.exe /S
+.\MineShare_0.0.13_x64-setup.exe /S
 ```
 
 Keep the MSI UpgradeCode unchanged. Do not replace assets of a published version.
@@ -39,10 +39,10 @@ cd ui
 npm ci
 npm run tauri -- build --no-bundle
 cd ..
-powershell -ExecutionPolicy Bypass -File installer\\windows\\install.ps1
+powershell -ExecutionPolicy Bypass -File installer\windows\install.ps1
 ```
 
-The script installs the GUI at `%LOCALAPPDATA%\\MineShare`, refreshes the icon and
+The script installs the GUI at `%LOCALAPPDATA%\MineShare`, refreshes the icon and
 registers one `MineShareLaunch` task in the interactive user's session. It is not
 a Windows service and must not run the bridge as SYSTEM. Packaged MSI upgrades
 can detect this legacy directory; no fake MSI registration is created by the
@@ -60,8 +60,14 @@ development script.
   pass. Silent-install tests do not replace a visual review of the wizard.
 - Do not run destructive acceptance tests on the user's Laptop or PC.
 
-For developer uninstall use `installer\\windows\\uninstall.ps1`; for a packaged
+For developer uninstall use `installer\windows\uninstall.ps1`; for a packaged
 installation use Windows Settings → Apps. Do not run a leftover old NSIS
 uninstaller after migrating to MSI. User configuration and logs must remain.
 
 VB-CABLE is optional and installed separately for peer-microphone playback.
+
+The original 0.0.12 acceptance fixture is pinned to Actions run `38932717686`
+and known installer SHA-256 values, not mutable latest-release URLs. Actions
+artifacts expire: before expiry, archive the audited baseline or deliberately
+replace the fixture reference and expected hashes after verifying provenance.
+A missing fixture must fail the release gate, not silently bypass testing.
