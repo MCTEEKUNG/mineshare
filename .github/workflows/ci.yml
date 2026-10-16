@@ -29,6 +29,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          # Native dependencies differ between Ubuntu 22.04 and 24.04.
+          # runner.os alone is just Linux and lets incompatible targets collide.
+          key: ${{ matrix.os }}
           workspaces: ". -> target"
 
       - name: Linux deps for mDNS / Tauri later
@@ -62,6 +65,9 @@ jobs:
       - name: Cache cargo (tauri)
         uses: Swatinem/rust-cache@v2
         with:
+          # Keep GTK/WebKit Rust artifacts isolated by Ubuntu release, including
+          # fallback restores (rust-cache includes this key in its prefix).
+          key: ${{ matrix.os }}
           workspaces: "ui/src-tauri -> target"
 
       - name: Install Node
