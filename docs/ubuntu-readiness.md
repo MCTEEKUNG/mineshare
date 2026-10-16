@@ -33,5 +33,59 @@ Use the repository's Linux installer or packaged deb to configure input access. 
 4. Replace a laptop clipboard copy with a new Ubuntu copy, paste locally, then paste across devices. Check text, screenshots, and files separately.
 5. Check audio playback, output-device changes, and microphone routing.
 6. Use Ctrl+Shift+L on the focused desktop; confirm other shortcuts and edge crossing recover after unlocking.
+7. Switch English/Thai with the Ubuntu physical keyboard and verify the typed
+   characters, not only the input-source indicator. Repeat after crossing back
+   from the Windows peer.
 
 Automated Linux builds/tests cannot certify permissions, compositor behavior, physical input, audio devices, or boot behavior. Those remain pending until Ubuntu is running; no Ubuntu installation is performed while the desktop is booted into Windows.
+
+## GNOME: Alt+Shift indicates Thai but typing remains English
+
+On the tested Ubuntu X11 desktop, the physical keyboard was routed through the
+MineShare local keyboard broker with Typeless running. GNOME had English/Thai
+input sources, but `Alt+Shift` was configured as the low-level XKB option
+`grp:alt_shift_toggle`, while GNOME's input-source shortcut remained `Super+Space`.
+During the failure the real XKB keymap contained only English. Choosing a source
+and switching the actual keymap must be verified separately from its indicator.
+
+The verified configuration uses GNOME's input-source manager for `Alt+Shift`
+instead of the overlapping XKB group toggle. This is an **opt-in desktop setting**,
+not a MineShare app update; the application and installer do not overwrite the
+user's language preferences automatically.
+
+Run this only in the affected user's GNOME graphical session, **without sudo**.
+It prints the previous values for rollback, retains existing GNOME shortcuts and
+unrelated XKB options, and changes only the conflicting Alt+Shift configuration:
+
+```sh
+python3 - <<'PY'
+from gi.repository import Gio
+
+wm = Gio.Settings.new('org.gnome.desktop.wm.keybindings')
+sources = Gio.Settings.new('org.gnome.desktop.input-sources')
+keys = list(wm.get_strv('switch-input-source'))
+options = list(sources.get_strv('xkb-options'))
+print('Previous switch-input-source:', keys)
+print('Previous xkb-options:', options)
+new_keys = list(dict.fromkeys(keys + ['<Alt>Shift_L', '<Shift>Alt_L']))
+new_options = [option for option in options if option != 'grp:alt_shift_toggle']
+try:
+    assert wm.set_strv('switch-input-source', new_keys)
+    assert sources.set_strv('xkb-options', new_options)
+    Gio.Settings.sync()
+except Exception:
+    wm.set_strv('switch-input-source', keys)
+    sources.set_strv('xkb-options', options)
+    Gio.Settings.sync()
+    raise
+PY
+```
+
+To undo, restore the two printed arrays with `gsettings set` for their respective
+schema/key. Do not use a blanket reset of all keyboard settings.
+
+Validation on this desktop: synthetic `Alt+Shift` and `Super+Space` each changed
+the active XKB group English → Thai → English; the A-position keysym changed
+between `a` and `Thai_fofan`. The user then confirmed the physical-keyboard test
+passed, with MineShare and Typeless left running. This does not certify all
+Wayland sessions or other input methods, and requires no new installer/version.
