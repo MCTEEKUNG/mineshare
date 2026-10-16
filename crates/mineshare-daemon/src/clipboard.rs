@@ -384,7 +384,13 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                             match pending.event {
                                 ApplyEvent::Files(paths) => {
                                     let fingerprint = file_fingerprint(&paths);
-                                    match clipboard.set().file_list(&paths) {
+                                    let setter = clipboard.set();
+                                    #[cfg(target_os = "windows")]
+                                    let setter = {
+                                        use arboard::SetExtWindows;
+                                        setter.exclude_from_monitoring()
+                                    };
+                                    match setter.file_list(&paths) {
                                         Ok(()) => {
                                             *LAST_CLIPBOARD.lock() = Some(fingerprint);
                                             revisions.applied(clipboard_revision());
@@ -448,16 +454,20 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                     if clipboard_revision() != revision {
                         continue;
                     }
-                    if revisions.local_revision_changed(revision)
-                        || LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                    if should_send_files(&revisions, revision, &fingerprint, LAST_CLIPBOARD.lock().as_ref(), files_excluded_from_monitoring()) {
+                        // File sends have disk side effects. Claim this snapshot
+                        // BEFORE sending: a failure after file N must not retry
+                        // files 1..N every poll and fill both peers' disks.
+                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                        revisions.observe(revision);
                         match crate::files::send_clipboard(paths, &runtime) {
-                            Ok(()) => {
-                                *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                                revisions.observe(revision);
-                            }
-                            Err(e) => debug!(error = %e, "clipboard files not forwarded"),
+                            Ok(()) => {}
+                            Err(e) => warn!(error = %e, "clipboard file send failed; copy again to retry (automatic retry disabled)"),
                         }
                     } else {
+                        // Baseline the clipboard on launch without replaying
+                        // a file copy left behind by a previous process/session.
+                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
                         revisions.observe(revision);
                     }
                     continue;
@@ -574,6 +584,44 @@ fn file_fingerprint(paths: &[PathBuf]) -> ClipboardFingerprint {
     )
 }
 
+fn should_send_files(
+    revisions: &RevisionGuard,
+    revision: Option<u32>,
+    fingerprint: &ClipboardFingerprint,
+    last: Option<&ClipboardFingerprint>,
+    excluded_from_monitoring: bool,
+) -> bool {
+    if excluded_from_monitoring
+        || (!revisions.polled && !revisions.local_revision_changed(revision))
+    {
+        return false;
+    }
+    revisions.local_revision_changed(revision) || last != Some(fingerprint)
+}
+
+fn files_excluded_from_monitoring() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::DataExchange::{
+            IsClipboardFormatAvailable, RegisterClipboardFormatW,
+        };
+        static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let format = *FORMAT.get_or_init(|| {
+            let name: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing\0"
+                .encode_utf16()
+                .collect();
+            unsafe { RegisterClipboardFormatW(name.as_ptr()) }
+        });
+        // Added atomically with CF_HDROP by arboard, retained across process
+        // restarts, and cleared by the next genuine native Copy operation.
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 pub fn apply_files_from_peer(paths: Vec<PathBuf>) -> Result<()> {
     if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
         return Ok(());
@@ -664,6 +712,101 @@ pub const fn queue_capacity() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_clipboard_restart_never_replays_six_existing_files() {
+        let paths: Vec<_> = (0..6)
+            .map(|i| PathBuf::from(format!("received-{i}.txt")))
+            .collect();
+        let fingerprint = file_fingerprint(&paths);
+        for revision in [Some(100), None] {
+            // Repeated process restarts lose LAST_CLIPBOARD but retain native
+            // file clipboard. None means Linux/content-polling fallback.
+            for _restart in 0..4 {
+                let guard = RevisionGuard::new(revision);
+                assert!(!should_send_files(
+                    &guard,
+                    revision,
+                    &fingerprint,
+                    None,
+                    false
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn peer_file_clipboard_marker_survives_revision_changes_and_restart() {
+        let fingerprint = file_fingerprint(&[PathBuf::from("received.txt")]);
+        let mut guard = RevisionGuard::new(Some(100));
+        guard.applied(Some(100));
+        assert!(!should_send_files(
+            &guard,
+            Some(101),
+            &fingerprint,
+            Some(&fingerprint),
+            true
+        ));
+        assert!(!should_send_files(
+            &RevisionGuard::new(Some(101)),
+            Some(101),
+            &fingerprint,
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn file_baseline_and_failed_send_do_not_retry_but_fresh_copy_still_works() {
+        let fingerprint = file_fingerprint(&[PathBuf::from("example.txt")]);
+        for initial in [Some(100), None] {
+            let mut guard = RevisionGuard::new(initial);
+            assert!(!should_send_files(
+                &guard,
+                initial,
+                &fingerprint,
+                None,
+                false
+            ));
+            guard.observe(initial);
+            assert!(!should_send_files(
+                &guard,
+                initial,
+                &fingerprint,
+                Some(&fingerprint),
+                false
+            ));
+            // A real copy after startup must still be forwarded. On Linux
+            // a new file fingerprint, rather than a native revision, detects it.
+            let fresh = file_fingerprint(&[PathBuf::from("fresh.txt")]);
+            let revision = initial.map(|r| r + 1);
+            assert!(should_send_files(
+                &guard,
+                revision,
+                &fresh,
+                Some(&fingerprint),
+                false
+            ));
+            // Production records the attempted snapshot before side effects;
+            // model an error half way through a multi-file batch here.
+            guard.observe(revision);
+            for _poll in 0..20 {
+                assert!(!should_send_files(
+                    &guard,
+                    revision,
+                    &fresh,
+                    Some(&fresh),
+                    false
+                ));
+            }
+            if let Some(r) = revision {
+                assert!(
+                    should_send_files(&guard, Some(r + 1), &fresh, Some(&fresh), false),
+                    "explicit recopy is allowed"
+                );
+            }
+        }
+    }
 
     #[test]
     fn local_copy_before_poll_cannot_be_overwritten_by_peer_wakeup() {

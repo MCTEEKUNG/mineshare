@@ -63,8 +63,11 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThre
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode, TouchpadEvent};
 
+mod keyboard_worker;
 pub(crate) mod lock_feedback;
 mod touchpad;
+
+pub use keyboard_worker::{enable_gui_keyboard_worker, run_keyboard_worker_if_requested};
 
 /// RAII guard that releases the raised system timer resolution
 /// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
@@ -948,7 +951,7 @@ impl InputCapture for HookCapture {
 
         launch_isolated_hook_workers(
             || unsafe { mouse_hook_thread() },
-            || unsafe { keyboard_hook_thread() },
+            keyboard_worker::capture_or_fallback,
         )
         .context("spawn isolated Windows hook threads")?;
 
@@ -1638,10 +1641,18 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
 }
 
 unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let result = unsafe { process_keyboard_hook(code, wparam, lparam) };
+    if result.0 != 0 {
+        return result;
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         if info.flags.0 & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) != 0 {
-            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+            return LRESULT(0);
         }
         let scan = info.scanCode;
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -1794,7 +1805,7 @@ unsafe extern "system" fn low_kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
             }
         }
     }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    LRESULT(0)
 }
 
 fn route_physical_key(

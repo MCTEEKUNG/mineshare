@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$NewDirectory,
     [Parameter(Mandatory=$true)]
-    [ValidateSet('msi-msi','msi-exe','exe-msi','exe-exe','script-msi','script-exe','programs-msi','programs-exe','fresh-msi','fresh-exe','rollback','rollback-nsis','downgrade')]
+    [ValidateSet('msi-msi','msi-exe','exe-msi','exe-exe','script-msi','script-exe','programs-msi','programs-exe','fresh-msi','fresh-exe','rollback','rollback-nsis','downgrade','unified-msi','unified-exe')]
     [string]$Scenario
 )
 $ErrorActionPreference='Stop'
@@ -43,6 +43,17 @@ $oldKind=if($Scenario -eq 'rollback') { 'msi' } elseif($Scenario -in @('downgrad
 $newKind=if($Scenario -in @('rollback','rollback-nsis','downgrade')) { 'msi' } else { $Scenario.Split('-')[1] }
 if ($oldKind -eq 'msi') { Install $oldMsi; $location=Join-Path $env:ProgramFiles 'MineShare' }
 elseif ($oldKind -eq 'exe') { Install $oldExe; $location=Join-Path $env:LOCALAPPDATA 'MineShare' }
+elseif ($oldKind -eq 'unified') {
+    # The previous published EXE is already an MSI bootstrapper. Exercise its
+    # migration to both new formats, not only the older NSIS/script paths.
+    & gh release download v0.0.13 --repo MCTEEKUNG/mineshare -p '*-setup.exe' -D $oldDirectory
+    Assert ($LASTEXITCODE -eq 0) 'Could not fetch unified baseline'
+    $unified=Join-Path $oldDirectory 'MineShare_0.0.13_x64-setup.exe'
+    Assert ((Get-FileHash -LiteralPath $unified).Hash -eq '2CDC92B38571FB78731D553147B6BAC071B46774F602F8857E369B392B24E944') 'Unified baseline digest changed'
+    Install $unified
+    $location=Join-Path $env:ProgramFiles 'MineShare'
+    Assert ((Get-Item (Join-Path $location 'mineshare-app.exe')).VersionInfo.ProductVersion -eq '0.0.13') 'Unified baseline version mismatch'
+}
 elseif ($oldKind -eq 'fresh') { $location=Join-Path $env:ProgramFiles 'MineShare' }
 else {
     # Script-only deployments have no Windows Installer product registration.

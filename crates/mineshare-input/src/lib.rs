@@ -1492,6 +1492,27 @@ mod tests {
     }
 
     #[test]
+    fn system_keys_follow_remote_cursor_and_release_after_return_on_all_platforms() {
+        let _g = TEST_LOCK.lock();
+        for code in [125, 126, 111, 59, 60, 68, 87, 88] {
+            reset();
+            assert!(
+                route_keystroke(code, true, true),
+                "key {code} down must reach peer"
+            );
+            assert!(
+                route_keystroke(code, false, false),
+                "key {code} up must follow down after crossing back"
+            );
+            assert!(
+                !route_keystroke(code, false, false),
+                "key {code} duplicate up must not forward"
+            );
+        }
+        reset();
+    }
+
+    #[test]
     fn disconnected_peer_cannot_consume_local_input_in_any_routing_mode() {
         let _g = TEST_LOCK.lock();
         reset();

@@ -226,23 +226,10 @@ fn promote_taskbar_window_icon(window: &tauri::WebviewWindow) -> tauri::Result<(
     // builds leaves WM_GETICON(ICON_BIG) empty. The taskbar then falls back
     // to the generic white-document glyph. Reuse the live small HICON for
     // BIG/SMALL2 so every shell surface resolves the same application mark.
-    let mut icon = unsafe {
-        SendMessageW(
-            hwnd,
-            WM_GETICON,
-            Some(WPARAM(ICON_SMALL2 as usize)),
-            None,
-        )
-    };
+    let mut icon =
+        unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_SMALL2 as usize)), None) };
     if icon.0 == 0 {
-        icon = unsafe {
-            SendMessageW(
-                hwnd,
-                WM_GETICON,
-                Some(WPARAM(ICON_SMALL as usize)),
-                None,
-            )
-        };
+        icon = unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_SMALL as usize)), None) };
     }
     if icon.0 != 0 {
         unsafe {

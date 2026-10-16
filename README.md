@@ -24,7 +24,7 @@
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
 
-**Development snapshot:** `0.0.13` · unified Windows installer upgrades. Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Check the release tag when downloading; development changes are not necessarily published yet.
+**Development snapshot:** `0.0.14` · resilient Windows keyboard capture and file-clipboard replay prevention. See [release notes](docs/releases/0.0.14.md). Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Check the release tag when downloading; development changes are not necessarily published yet.
 
 ---
 
