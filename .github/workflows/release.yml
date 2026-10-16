@@ -54,27 +54,32 @@ jobs:
             build-essential
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94
         with:
           targets: ${{ matrix.os == 'windows-latest' && 'x86_64-pc-windows-msvc' || 'x86_64-unknown-linux-gnu' }}
 
       - name: Cache Cargo + Tauri target dir
         uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.os }}
           workspaces: |
             .
             ui/src-tauri
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
 
       - name: Install JS deps
         working-directory: ui
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Build installers
         working-directory: ui
-        run: bun run tauri build
+        run: npm run tauri -- build --ci -- --locked
 
       - name: Collect artifacts
         shell: bash
@@ -89,6 +94,11 @@ jobs:
               cp ui/src-tauri/target/release/bundle/nsis/*-setup.exe artifacts/ 2>/dev/null || true
           fi
           ls -la artifacts/
+
+      - name: Installer checksums
+        shell: bash
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS-${{ matrix.label }}.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

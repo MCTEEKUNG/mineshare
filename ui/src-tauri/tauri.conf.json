@@ -34,7 +34,7 @@
     "shortDescription": "Cross-PC keyboard, mouse, audio, and file bridge",
     "longDescription": "MineShare is an encrypted KVM-over-IP + bidirectional audio/mic + file-transfer bridge between Windows and Linux PCs on the same LAN. One mouse, one keyboard, one mic — drive both machines as if they were a single virtual desktop. Cursor flows between every monitor of every machine; clipboard, audio, and dragged files follow.",
     "publisher": "MineShare Contributors",
-    "homepage": "https://github.com/mineshare/mineshare",
+    "homepage": "https://github.com/MCTEEKUNG/mineshare",
     "copyright": "Copyright (c) 2026 MineShare Contributors",
     "licenseFile": "../../LICENSE",
     "icon": [
