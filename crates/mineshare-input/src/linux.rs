@@ -64,6 +64,8 @@ const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+mod keyboard_broker;
+mod keyboard_routes;
 mod pointer;
 
 #[cfg(test)]
@@ -622,6 +624,11 @@ impl EvdevCapture {
 
         let mut devices = Vec::new();
         for (path, device) in evdev::enumerate() {
+            if keyboard_broker::enabled()
+                && keyboard_broker::virtual_source(&path, device.name().unwrap_or(""))
+            {
+                continue;
+            }
             if device
                 .name()
                 .map(|n| n.starts_with(VIRTUAL_DEVICE_PREFIX))
@@ -692,7 +699,29 @@ impl InputCapture for EvdevCapture {
         // doesn't strand pending motion in the coalescer. Idempotent —
         // safe to call across reconnects.
         start_flush_watchdog(sink.clone());
-        for (path, device) in self.devices.drain(..) {
+        // Acquire all physical keyboards synchronously before publishing readiness.
+        // On any failure the prepared devices drop and release their grabs.
+        let broker_enabled = keyboard_broker::enabled();
+        if broker_enabled {
+            keyboard_broker::clear_readiness();
+        }
+        let mut prepared = Vec::new();
+        let mut keyboard_count = 0;
+        for (path, mut device) in self.devices.drain(..) {
+            let broker = if broker_enabled && !is_pointer_device(&device) {
+                let broker = keyboard_broker::Broker::prepare(&mut device)
+                    .with_context(|| format!("prepare keyboard broker for {}", path.display()))?;
+                keyboard_count += 1;
+                Some(broker)
+            } else {
+                None
+            };
+            prepared.push((path, device, broker));
+        }
+        if broker_enabled && keyboard_count == 0 {
+            anyhow::bail!("keyboard broker found no physical keyboard; Typeless startup must wait");
+        }
+        for (path, device, broker) in prepared {
             let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
@@ -704,8 +733,15 @@ impl InputCapture for EvdevCapture {
             );
             thread::Builder::new()
                 .name(format!("evdev-{}", path.display()))
-                .spawn(move || pump_device(path, device, is_pointer, sink))
+                .spawn(move || pump_device(path, device, is_pointer, broker, sink))
                 .context("spawn evdev thread")?;
+        }
+        if broker_enabled {
+            keyboard_broker::ready(keyboard_count)?;
+            info!(
+                keyboard_count,
+                "keyboard broker ready; physical keyboards stay grabbed, local keys use proxy"
+            );
         }
         Ok(())
     }
@@ -715,11 +751,13 @@ fn pump_device(
     path: PathBuf,
     mut device: Device,
     is_pointer: bool,
+    mut broker: Option<keyboard_broker::Broker>,
     sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
 ) {
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
-    let mut grabbed = false;
+    let mut grabbed = broker.is_some();
+    let mut last_grab_attempt = None::<std::time::Instant>;
 
     // Read non-blocking so the loop can wake on a timer (see
     // GRAB_POLL_MS) and re-apply the grab decision even while idle.
@@ -757,19 +795,30 @@ fn pump_device(
         //     "fight" the way cursor motion does.
         let we_drive = CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE;
         let peer_drives = super::peer_in_remote();
-        let want_grab = we_drive || (peer_drives && is_pointer);
+        let want_grab = broker.is_some() || we_drive || (peer_drives && is_pointer);
+        if !want_grab {
+            last_grab_attempt = None;
+        }
         if want_grab != grabbed {
             if want_grab {
-                match device.grab() {
-                    Ok(()) => {
-                        grabbed = true;
-                        debug!(path = %path.display(), "evdev grabbed");
+                // A competing exclusive reader cannot be evicted. Avoid a 250 Hz
+                // ioctl/log storm, but keep polling input without blocking sleeps.
+                if last_grab_attempt.is_some_and(|last| last.elapsed() < Duration::from_secs(1)) {
+                    // Still drain events below; never stall the input pump.
+                } else {
+                    last_grab_attempt = Some(std::time::Instant::now());
+                    match device.grab() {
+                        Ok(()) => {
+                            grabbed = true;
+                            debug!(path = %path.display(), "evdev grabbed");
+                        }
+                        Err(e) => warn!(error = %e, path = %path.display(), "evdev grab failed"),
                     }
-                    Err(e) => warn!(error = %e, path = %path.display(), "evdev grab failed"),
                 }
             } else {
                 let _ = device.ungrab();
                 grabbed = false;
+                last_grab_attempt = None;
                 debug!(path = %path.display(), "evdev ungrabbed");
             }
         }
@@ -803,6 +852,11 @@ fn pump_device(
             Ok(it) => it,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "evdev fetch_events failed");
+                if broker.is_some() {
+                    // Dropping the broker releases local held keys and invalidates
+                    // readiness. Device loss must not leave a false ready marker.
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -904,6 +958,9 @@ fn pump_device(
                             info!("hotkey Ctrl+Alt+R — entering remote");
                             enter_remote();
                         }
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
@@ -921,6 +978,9 @@ fn pump_device(
                     {
                         info!("hotkey Ctrl+Shift+L — focused desktop lock");
                         super::toggle_focused_input_lock();
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
@@ -934,6 +994,9 @@ fn pump_device(
                     {
                         super::cycle_keyboard_target();
                         info!(target = ?super::keyboard_target(), "hotkey Ctrl+Alt+K — keyboard target");
+                        if let Some(broker) = broker.as_mut() {
+                            broker.routes.consume(key.0);
+                        }
                         continue;
                     }
 
@@ -960,22 +1023,64 @@ fn pump_device(
                         // with a stuck-down button after a cursor
                         // cross-back happens between press and
                         // release.
-                        if super::route_mouse_button(
-                            btn,
-                            value != 0,
-                            cursor_in_remote || super::is_game_driving(),
-                        ) {
+                        let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        let remote = !local_held
+                            && super::route_mouse_button(
+                                btn,
+                                value != 0,
+                                cursor_in_remote || super::is_game_driving(),
+                            );
+                        let forward = if let Some(broker) = broker.as_mut() {
+                            match broker.dispatch(key.0, value, remote) {
+                                Ok(forward) => forward && remote,
+                                Err(error) => {
+                                    warn!(%error, "local keyboard button proxy failed");
+                                    return;
+                                }
+                            }
+                        } else {
+                            remote
+                        };
+                        if forward {
                             sink(InputEvent::MouseButton {
                                 btn,
                                 down: value != 0,
                             });
                         }
-                    } else if super::route_keystroke(key.0, value != 0, cursor_in_remote) {
-                        sink(InputEvent::Key {
-                            code: KeyCode(key.0),
-                            down: value != 0,
-                        });
-                        super::note_key_forwarded_with_code(key.0, value != 0);
+                    } else {
+                        // A locally held key remains local even if a repeat arrives
+                        // after crossing. Remote routing keeps its existing held tracker.
+                        let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        let remote = !local_held
+                            && super::route_keystroke(key.0, value != 0, cursor_in_remote);
+                        let forward = if let Some(broker) = broker.as_mut() {
+                            match broker.dispatch(key.0, value, remote) {
+                                Ok(forward) => forward && remote,
+                                Err(error) => {
+                                    warn!(%error, path = %path.display(), "local keyboard proxy failed; releasing physical keyboard");
+                                    return;
+                                }
+                            }
+                        } else {
+                            remote
+                        };
+                        if matches!(key.0, 100 | 125 | 126) {
+                            info!(
+                                code = key.0,
+                                value,
+                                forward,
+                                broker = broker.is_some(),
+                                cursor_in_remote,
+                                "Linux modifier route"
+                            );
+                        }
+                        if forward {
+                            sink(InputEvent::Key {
+                                code: KeyCode(key.0),
+                                down: value != 0,
+                            });
+                            super::note_key_forwarded_with_code(key.0, value != 0);
+                        }
                     }
                     // In LOCAL we don't forward; they're already going to
                     // the OS via the un-grabbed kernel path.
