@@ -6,6 +6,7 @@
 - Linux captures physical devices with evdev and injects mouse/keyboard events through uinput. The Windows touch-suppressed-cursor recovery is Windows-only; it must not introduce Windows APIs into Linux builds.
 - Windows native Precision Touchpad contact injection is not implemented on Linux. Linux peers retain basic pointer, button, and scroll support; do not assume Windows multi-finger gestures are available there.
 - Native Windows clipboard revisions are Windows-only. Linux keeps the existing polling fallback.
+- On X11, automatic edge crossing confirms that the desktop pointer is actually at the configured boundary before accumulating edge pressure. Raw evdev deltas alone are not screen coordinates. The query is restricted to candidate edge reports; normal remote motion is unchanged. A failed X11 query pauses automatic crossing (Ctrl+Alt+R remains available). Wayland retains its existing estimated-position fallback; XWayland coordinates are not used as global Wayland pointer coordinates.
 - Game Lock is manual (`Ctrl+Shift+L`); other hotkeys retain Alt. Linux and Windows peers must use compatible protocol builds (currently control-v2).
 
 ## Before installing on Ubuntu

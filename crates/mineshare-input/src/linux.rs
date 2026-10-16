@@ -64,6 +64,167 @@ const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+mod pointer;
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn measured_111_pixels_inside_must_not_cross_or_precharge_pressure() {
+        let motion = local_motion(
+            (0, 500),
+            (-20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            pointer::Sample::Position(111, 500),
+        );
+        assert_eq!(
+            motion.overshoot, None,
+            "raw estimate crossed before real pointer reached edge"
+        );
+        assert!(
+            motion.cancel,
+            "interior motion must clear existing edge pressure"
+        );
+        assert_eq!(motion.position, (111, 500));
+    }
+
+    #[test]
+    fn actual_edge_still_accepts_outward_pressure_and_cancels_pullback() {
+        let size = (1920, 1080);
+        for (side, previous, delta, at_edge) in [
+            (super::super::PeerSide::Left, (0, 500), (-20, 0), (0, 500)),
+            (
+                super::super::PeerSide::Right,
+                (1919, 500),
+                (20, 0),
+                (1919, 500),
+            ),
+            (super::super::PeerSide::Top, (500, 0), (0, -20), (500, 0)),
+            (
+                super::super::PeerSide::Bottom,
+                (500, 1079),
+                (0, 20),
+                (500, 1079),
+            ),
+        ] {
+            let sample = pointer::Sample::Position(at_edge.0, at_edge.1);
+            assert_eq!(
+                local_motion(previous, delta, size, side, sample).overshoot,
+                Some(20)
+            );
+            assert!(local_motion(previous, (-delta.0, -delta.1), size, side, sample).cancel);
+            let interior = local_motion(
+                previous,
+                delta,
+                size,
+                side,
+                pointer::Sample::Position(500, 500),
+            );
+            assert_eq!(interior.overshoot, None);
+            assert!(interior.cancel);
+        }
+    }
+
+    #[test]
+    fn failed_x11_query_cannot_authorize_crossing_but_wayland_keeps_fallback() {
+        let motion = local_motion(
+            (0, 500),
+            (-20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            pointer::Sample::Unavailable,
+        );
+        assert_eq!(motion.overshoot, None);
+        assert!(motion.cancel);
+        assert_eq!(
+            local_motion(
+                (0, 500),
+                (-20, 0),
+                (1920, 1080),
+                super::super::PeerSide::Left,
+                pointer::Sample::Unsupported
+            )
+            .overshoot,
+            Some(20)
+        );
+    }
+
+    #[test]
+    #[ignore = "live X11 read-only latency check; needs the graphical session environment"]
+    fn live_x11_pointer_confirmation_latency() {
+        let mut timings = Vec::new();
+        for _ in 0..1000 {
+            let started = std::time::Instant::now();
+            assert!(matches!(pointer::sample(), pointer::Sample::Position(_, _)));
+            timings.push(started.elapsed());
+        }
+        timings.sort_unstable();
+        eprintln!(
+            "X11 pointer confirmation p99={:?} max={:?}",
+            timings[990], timings[999]
+        );
+        assert!(timings[990] < Duration::from_millis(8));
+    }
+}
+
+#[derive(Debug)]
+struct LocalMotion {
+    position: (i32, i32),
+    overshoot: Option<i32>,
+    cancel: bool,
+}
+
+fn local_motion(
+    previous: (i32, i32),
+    delta: (i32, i32),
+    size: (i32, i32),
+    side: super::PeerSide,
+    actual: pointer::Sample,
+) -> LocalMotion {
+    let (dx, dy) = delta;
+    let (w, h) = size;
+    let raw_x = previous.0.saturating_add(dx);
+    let raw_y = previous.1.saturating_add(dy);
+    let (overshoot, cancel) = match side {
+        super::PeerSide::Left => ((raw_x < 0).then(|| raw_x.saturating_neg()), dx > 0),
+        super::PeerSide::Right => ((raw_x >= w).then(|| raw_x.saturating_sub(w - 1)), dx < 0),
+        super::PeerSide::Top => ((raw_y < 0).then(|| raw_y.saturating_neg()), dy > 0),
+        super::PeerSide::Bottom => ((raw_y >= h).then(|| raw_y.saturating_sub(h - 1)), dy < 0),
+    };
+    let mut motion = LocalMotion {
+        position: (
+            raw_x.clamp(0, (w - 1).max(0)),
+            raw_y.clamp(0, (h - 1).max(0)),
+        ),
+        overshoot,
+        cancel,
+    };
+    let confirmed = match actual {
+        pointer::Sample::Position(x, y) => {
+            motion.position = (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)));
+            let in_bounds = (0..w).contains(&x) && (0..h).contains(&y);
+            in_bounds
+                && match side {
+                    super::PeerSide::Left => x == 0 && dx < 0,
+                    super::PeerSide::Right => x == w - 1 && dx > 0,
+                    super::PeerSide::Top => y == 0 && dy < 0,
+                    super::PeerSide::Bottom => y == h - 1 && dy > 0,
+                }
+        }
+        pointer::Sample::Unavailable => false,
+        pointer::Sample::Unsupported => true,
+    };
+    if !confirmed {
+        // Do not bank pressure while merely near the edge, even if the old
+        // estimate was already clamped. Re-anchor it to the visible cursor.
+        motion.overshoot = None;
+        motion.cancel = true;
+    }
+    motion
+}
+
 /// Common prefix for our two virtual input devices. The pump
 /// loop uses this to skip them during enumeration so we don't
 /// pump our own injected events back as captured input.
@@ -878,48 +1039,35 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             return;
         }
 
-        // Track an estimate of the real cursor X *and* Y. Wayland
-        // has no portable cursor-pos query, but the OS clamps at
-        // the screen edges — and evdev keeps reporting the
-        // overshoot. Mirroring with clamped CURSOR_X / CURSOR_Y
-        // means any time the user drags into a real screen edge our
-        // estimate self-syncs; drift can't accumulate beyond one
-        // screen.
+        // Track a coarse estimate, then confirm candidate overshoots against
+        // the real X11 pointer. Wayland retains the estimate fallback: global
+        // XWayland coordinates are not authoritative for a Wayland session.
         let screen_w = SCREEN_W.load(Ordering::Relaxed);
         let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
         let prev_y = CURSOR_Y.load(Ordering::Relaxed);
-        let raw_x = prev_x + dx;
-        let raw_y = prev_y + dy;
-        CURSOR_X.store(raw_x.clamp(0, (screen_w - 1).max(0)), Ordering::Relaxed);
-        CURSOR_Y.store(raw_y.clamp(0, (screen_h - 1).max(0)), Ordering::Relaxed);
-
-        // Edge press: which clamp signals "user is pushing into the
-        // boundary" depends on the layout. We pick one axis (X for
-        // left/right sides, Y for top/bottom) and detect overshoot
-        // past the configured edge of the screen. The opposite-
-        // direction motion cancels an in-flight press (user pulled
-        // back from the edge).
-        let (overshoot, cancel) = match super::peer_side() {
-            super::PeerSide::Left => (if raw_x < 0 { Some(-raw_x) } else { None }, dx > 0),
-            super::PeerSide::Right => (
-                if raw_x > screen_w - 1 {
-                    Some(raw_x - (screen_w - 1))
-                } else {
-                    None
-                },
-                dx < 0,
-            ),
-            super::PeerSide::Top => (if raw_y < 0 { Some(-raw_y) } else { None }, dy > 0),
-            super::PeerSide::Bottom => (
-                if raw_y > screen_h - 1 {
-                    Some(raw_y - (screen_h - 1))
-                } else {
-                    None
-                },
-                dy < 0,
-            ),
-        };
+        let mut motion = local_motion(
+            (prev_x, prev_y),
+            (dx, dy),
+            (screen_w, screen_h),
+            super::peer_side(),
+            pointer::Sample::Unsupported,
+        );
+        // Raw mickeys are not screen pixels: acceleration and handback can
+        // leave the estimate at the edge while the actual cursor is inside.
+        // Query X11 only on candidate edge reports, never the remote hot path.
+        if motion.overshoot.is_some() && !super::is_input_locked() {
+            motion = local_motion(
+                (prev_x, prev_y),
+                (dx, dy),
+                (screen_w, screen_h),
+                super::peer_side(),
+                pointer::sample(),
+            );
+        }
+        CURSOR_X.store(motion.position.0, Ordering::Relaxed);
+        CURSOR_Y.store(motion.position.1, Ordering::Relaxed);
+        let (overshoot, cancel) = (motion.overshoot, motion.cancel);
         if let Some(over) = overshoot {
             // Game-mode lock OR Game Drive: pretend the press never
             // happened. We still update CURSOR_X/Y above so the estimate
