@@ -5,11 +5,13 @@ import AdvancedPage from "./Advanced";
 import { useT } from "../i18n";
 import { ThemeSwitcher } from "../theme";
 import LockEffectSection from "./LockEffect";
+import StartupSection from "./Startup";
 
 export default function SettingsPage() {
   const { t } = useT();
   return (
     <div className="flex flex-col gap-10">
+      <StartupSection />
       <section>
         <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_appearance")}</h3>
         <ThemeSwitcher />

@@ -5,8 +5,25 @@
 //! installs (M4) keep working with the standalone daemon binary;
 //! the Tauri shell is for users who want a window.
 
+mod startup;
 mod state;
 mod tray;
+
+#[tauri::command]
+async fn get_startup_status() -> Result<startup::Status, String> {
+    tauri::async_runtime::spawn_blocking(startup::status)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_startup_enabled(enabled: bool) -> Result<startup::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || startup::set(enabled))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
 
 use mineshare_daemon::audio_status::AudioStatus;
 use mineshare_daemon::latency::LatencySnapshot;
@@ -303,6 +320,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_startup_status,
+            set_startup_enabled,
             get_status,
             get_layout,
             set_layout,

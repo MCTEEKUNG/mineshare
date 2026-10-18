@@ -25,6 +25,14 @@ export type Locale = "en" | "th";
 type Strings = Record<string, string>;
 
 const en: Strings = {
+  theme_system: "System (follow OS)",
+  theme_light: "Light",
+  theme_dark: "Dark",
+  startup_title: "Start with operating system",
+  startup_description: "Launch MineShare automatically when you sign in to this device.",
+  startup_loading: "Checking startup settings…",
+  startup_managed: "Startup is managed together with Typeless. Keep the ordered launcher to avoid keyboard conflicts.",
+  startup_enabled: "Start MineShare at sign-in",
   // Nav
   nav_status: "Status",
   nav_layout: "Layout",
@@ -135,6 +143,14 @@ const en: Strings = {
 };
 
 const th: Strings = {
+  theme_system: "System (ตามระบบ)",
+  theme_light: "สว่าง",
+  theme_dark: "มืด",
+  startup_title: "เริ่มพร้อมระบบปฏิบัติการ",
+  startup_description: "เปิด MineShare อัตโนมัติเมื่อลงชื่อเข้าใช้เครื่องนี้",
+  startup_loading: "กำลังตรวจการเริ่มพร้อมระบบ…",
+  startup_managed: "จัดลำดับ startup ร่วมกับ Typeless อยู่ ต้องเก็บ launcher นี้ไว้เพื่อป้องกันคีย์บอร์ดขัดแย้งกัน",
+  startup_enabled: "เปิด MineShare เมื่อลงชื่อเข้าใช้",
   nav_status: "สถานะ",
   nav_layout: "ตำแหน่งจอ",
   nav_devices: "อุปกรณ์",
