@@ -248,10 +248,8 @@ mod tests {
     fn windows_status_uses_trigger_enabled_not_current_process_state() {
         use std::os::windows::process::CommandExt;
         for (enabled, expected) in [("$true", "enabled"), ("$false", "disabled")] {
-            let fixture = format!(
-                "function Test-Path {{ return $false }}; function Get-ScheduledTask {{ [pscustomobject]@{{Actions=@([pscustomobject]@{{Execute=$env:MINESHARE_STARTUP_EXE}});State='Running';Settings=[pscustomobject]@{{Enabled={enabled}}}} }}; {}",
-                platform::SCRIPT
-            );
+            let fixture = "function Test-Path { return $false }; function Get-ScheduledTask { [pscustomobject]@{Actions=@([pscustomobject]@{Execute=$env:MINESHARE_STARTUP_EXE});State='Running';Settings=[pscustomobject]@{Enabled=__ENABLED__}} }; "
+                .replace("__ENABLED__", enabled) + platform::SCRIPT;
             let output = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", &fixture])
                 .env("MINESHARE_STARTUP_EXE", "C:\\fixture\\mineshare-app.exe")
