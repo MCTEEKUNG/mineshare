@@ -10,6 +10,12 @@
 
 set -e
 
+# dpkg also invokes postinst during error unwind; do not apply install changes then.
+case "${1:-}" in
+    configure) ;;
+    *) exit 0 ;;
+esac
+
 # Ensure the `input` group exists. Most distros ship it pre-
 # created, but minimal containers / chroots sometimes don't.
 getent group input >/dev/null 2>&1 || groupadd --system input
@@ -53,4 +59,6 @@ else
     echo
 fi
 
+# Included in the generated maintainer script; never run a desktop app as root.
+ms_resume_upgrade
 exit 0

@@ -56,7 +56,8 @@
         ],
         "section": "utility",
         "priority": "optional",
-        "postInstallScript": "../../installer/linux/deb-postinst",
+        "preInstallScript": "target/deb-hooks/preinst",
+        "postInstallScript": "target/deb-hooks/postinst",
         "preRemoveScript": "../../installer/linux/deb-prerm"
       }
     },

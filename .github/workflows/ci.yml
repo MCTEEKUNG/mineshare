@@ -43,6 +43,14 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - name: Linux installer lifecycle tests
+        if: runner.os == 'Linux'
+        run: |
+          node installer/linux/build-deb-hooks.mjs
+          bash -n ui/src-tauri/target/deb-hooks/preinst ui/src-tauri/target/deb-hooks/postinst installer/linux/deb-prerm
+          bash installer/linux/test-deb-lifecycle.sh
+          sudo --preserve-env=GITHUB_ACTIONS bash installer/linux/test-deb-upgrade.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
