@@ -54,7 +54,7 @@ mod platform {
         })
     }
 
-    const SCRIPT: &str = r#"
+    pub(super) const SCRIPT: &str = r#"
 $ErrorActionPreference='Stop'
 $exe=$env:MINESHARE_STARTUP_EXE
 $change=$env:MINESHARE_STARTUP_CHANGE
@@ -70,7 +70,7 @@ if($task){
   if($change -eq 'on'){Enable-ScheduledTask MineShareLaunch | Out-Null}else{Disable-ScheduledTask MineShareLaunch | Out-Null}
   if($run){Remove-ItemProperty $key -Name MineShare; $run=$null}
  }
- $enabled=(Get-ScheduledTask MineShareLaunch).State -ne 'Disabled' -or [bool]$run
+ $enabled=(Get-ScheduledTask MineShareLaunch).Settings.Enabled -or [bool]$run
 }else{
  if($run -and $run -ne $expected){throw 'Another MineShare startup command exists; it was not changed.'}
  if($change -eq 'on'){
@@ -243,6 +243,30 @@ fn toggle_entry(entry: &str, enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_status_uses_trigger_enabled_not_current_process_state() {
+        use std::os::windows::process::CommandExt;
+        for (enabled, expected) in [("$true", "enabled"), ("$false", "disabled")] {
+            let fixture = format!(
+                "function Test-Path {{ return $false }}; function Get-ScheduledTask {{ [pscustomobject]@{{Actions=@([pscustomobject]@{{Execute=$env:MINESHARE_STARTUP_EXE}});State='Running';Settings=[pscustomobject]@{{Enabled={enabled}}}} }}; {}",
+                platform::SCRIPT
+            );
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &fixture])
+                .env("MINESHARE_STARTUP_EXE", "C:\\fixture\\mineshare-app.exe")
+                .env("MINESHARE_STARTUP_CHANGE", "read")
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+    }
     #[test]
     fn linux_startup_reads_real_files_and_preserves_typeless_coordinator() {
         let root = std::env::temp_dir().join(format!(
