@@ -7,7 +7,7 @@ const {invoke} = vi.hoisted(() => ({invoke: vi.fn()}));
 vi.mock("@tauri-apps/api/core", () => ({invoke}));
 vi.mock("./i18n", () => ({useT: () => ({locale: "en"})}));
 const fresh: SetupStatus = {linux: true, session: "wayland", gnome_supported: true, wayland: true,
-  input_active: false, input_configured: false, uinput_available: true, typeless: true, broker_configured: false, broker_active: false,
+  input_active: false, input_configured: false, uinput_available: true, input_needs_repair: false, typeless: true, broker_configured: false, broker_active: false,
   extension_configured: false, extension_active: false, extensions_allowed: true, helpers_available: true, pending_login: false};
 beforeEach(() => { invoke.mockReset(); sessionStorage.clear(); invoke.mockResolvedValue(fresh); });
 afterEach(cleanup);
@@ -28,6 +28,19 @@ describe("Ubuntu first-run setup", () => {
   it("does not install broker without Typeless or extensions on X11", () => {
     expect(recommended({...fresh, typeless: false, wayland: false})).toEqual({input: true, broker: false, pointer: false});
     expect(needsSetup({...fresh, linux: false})).toBe(false);
+  });
+  it("offers repair instead of an endless login prompt when membership is already active", async () => {
+    invoke.mockResolvedValue({...fresh, input_configured: true, input_needs_repair: true});
+    render(<LinuxSetup/>); await screen.findByRole("dialog");
+    expect(screen.getByText("Device access needs repair")).toBeTruthy();
+    const input = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
+    expect(input.disabled).toBe(false); expect(input.checked).toBe(true);
+  });
+  it("blocks setup and explains missing authentication prerequisites", async () => {
+    invoke.mockResolvedValue({...fresh, helpers_available: false});
+    render(<LinuxSetup/>); await screen.findByRole("dialog");
+    expect(screen.getByRole("alert").textContent).toContain("authentication helper");
+    expect((screen.getByRole("button", {name: "Set up selected"}) as HTMLButtonElement).disabled).toBe(true);
   });
   it("allows Later without changing anything and can reopen from Settings", async () => {
     render(<LinuxSetup/>);

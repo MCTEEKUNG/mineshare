@@ -5,7 +5,7 @@ Scope: bundle the keyboard broker and read-only GNOME pointer extension in the
 GitHub user must not have to run setup scripts manually. Test before preparing a
 new public release; do not silently deploy or publish it.
 
-The `.deb` owns six helper files under `/usr/share/mineshare/setup/installer/linux`.
+The `.deb` owns seven helper/rule files under `/usr/share/mineshare/setup/installer/linux`.
 Detection changes nothing. The wizard opens for incomplete Linux setups and is
 also available in Settings → Ubuntu setup. Windows does not show the wizard.
 Users may defer, select individual features, retry errors or check again.

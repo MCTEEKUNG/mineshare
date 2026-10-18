@@ -11,6 +11,7 @@ getent group input >/dev/null || groupadd --system input
 usermod -aG input -- "$user"
 if [[ ! -c /dev/uinput ]]; then modprobe uinput; fi
 [[ -c /dev/uinput ]] || { echo 'Kernel uinput device is unavailable.' >&2; exit 1; }
-udevadm control --reload-rules || true
-udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+install -m 644 /usr/share/mineshare/setup/installer/linux/60-mineshare.rules /etc/udev/rules.d/60-mineshare.rules
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=misc --attr-match=name=uinput
 echo 'Input permissions configured. Log out and back in to apply group membership.'

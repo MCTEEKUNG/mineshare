@@ -51,6 +51,7 @@
           "/usr/share/mineshare/setup/installer/linux/start-typeless-after-mineshare.sh": "../../installer/linux/start-typeless-after-mineshare.sh",
           "/usr/share/mineshare/setup/installer/linux/install-gnome-pointer.sh": "../../installer/linux/install-gnome-pointer.sh",
           "/usr/share/mineshare/setup/installer/linux/enable-input.sh": "../../installer/linux/enable-input.sh",
+          "/usr/share/mineshare/setup/installer/linux/60-mineshare.rules": "../../installer/linux/60-mineshare.rules",
           "/usr/share/mineshare/setup/installer/linux/gnome-pointer/metadata.json": "../../installer/linux/gnome-pointer/metadata.json",
           "/usr/share/mineshare/setup/installer/linux/gnome-pointer/extension.js": "../../installer/linux/gnome-pointer/extension.js"
         },
@@ -60,7 +61,11 @@
           "libayatana-appindicator3-1",
           "libasound2",
           "libopus0",
-          "pulseaudio-utils"
+          "pulseaudio-utils",
+          "pkexec | policykit-1",
+          "libglib2.0-bin",
+          "kmod",
+          "udev"
         ],
         "section": "utility",
         "priority": "optional",

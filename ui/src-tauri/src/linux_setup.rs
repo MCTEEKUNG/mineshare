@@ -9,6 +9,7 @@ pub struct Status {
     pub wayland: bool,
     pub input_active: bool,
     pub uinput_available: bool,
+    pub input_needs_repair: bool,
     pub input_configured: bool,
     pub typeless: bool,
     pub broker_configured: bool,
@@ -147,7 +148,8 @@ mod linux {
             .to_lowercase()
             .contains("gnome");
         let wayland = session == "wayland" || std::env::var_os("WAYLAND_DISPLAY").is_some();
-        let input_active = has_group(&query("id", &["-nG"]).unwrap_or_default())
+        let group_active = has_group(&query("id", &["-nG"]).unwrap_or_default());
+        let input_active = group_active
             && std::fs::OpenOptions::new()
                 .write(true)
                 .open("/dev/uinput")
@@ -224,6 +226,7 @@ mod linux {
             wayland,
             input_active,
             uinput_available: Path::new("/dev/uinput").exists(),
+            input_needs_repair: group_active && !input_active,
             input_configured,
             typeless: Path::new("/opt/Typeless/typeless").is_file(),
             broker_configured,
@@ -231,14 +234,23 @@ mod linux {
             extension_configured,
             extension_active,
             extensions_allowed,
-            helpers_available: [
-                "install-typeless-compat.sh",
-                "install-gnome-pointer.sh",
-                "enable-input.sh",
-            ]
-            .iter()
-            .all(|name| helper(name).is_ok()),
-            pending_login: (input_configured && !input_active)
+            helpers_available: Path::new("/usr/bin/pkexec").is_file()
+                && [
+                    "install-typeless-compat.sh",
+                    "install-gnome-pointer.sh",
+                    "enable-input.sh",
+                    "start-typeless-after-mineshare.sh",
+                ]
+                .iter()
+                .all(|name| helper(name).is_ok())
+                && [
+                    "60-mineshare.rules",
+                    "gnome-pointer/metadata.json",
+                    "gnome-pointer/extension.js",
+                ]
+                .iter()
+                .all(|name| Path::new(ROOT).join(name).is_file()),
+            pending_login: (input_configured && !input_active && !group_active)
                 || (broker_configured && !broker_active)
                 || (extension_configured && !extension_active),
         })
@@ -265,7 +277,9 @@ mod linux {
                 "Typeless was not detected; keyboard broker is optional"
             );
         }
-        if options.input && (!before.input_configured || !before.uinput_available) {
+        if options.input
+            && (!before.input_configured || !before.uinput_available || before.input_needs_repair)
+        {
             let path = helper("enable-input.sh")?;
             // No usernames or executable paths accepted from the frontend.
             command(

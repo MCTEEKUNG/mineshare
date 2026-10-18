@@ -129,6 +129,7 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: ui/src-tauri
         run: |
+          sudo apt-get install -y pkexec
           cargo test --lib linux_setup:: --locked
           bash ../../installer/linux/test-setup-flow.sh
 

@@ -14,7 +14,7 @@ cleanup() {
 }
 trap cleanup EXIT
 sudo mkdir -p "$dest/installer/linux" /opt/Typeless
-sudo cp "$root/installer/linux/"{install-typeless-compat.sh,start-typeless-after-mineshare.sh,install-gnome-pointer.sh,enable-input.sh} "$dest/installer/linux/"
+sudo cp "$root/installer/linux/"{install-typeless-compat.sh,start-typeless-after-mineshare.sh,install-gnome-pointer.sh,enable-input.sh,60-mineshare.rules} "$dest/installer/linux/"
 sudo cp -r "$root/installer/linux/gnome-pointer" "$dest/installer/linux/"
 sudo ln -s /usr/bin/true /usr/bin/mineshare-app
 sudo ln -s /usr/bin/true /opt/Typeless/typeless
