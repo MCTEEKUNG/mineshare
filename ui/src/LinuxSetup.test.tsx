@@ -32,7 +32,7 @@ describe("Ubuntu first-run setup", () => {
   it("offers repair instead of an endless login prompt when membership is already active", async () => {
     invoke.mockResolvedValue({...fresh, input_configured: true, input_needs_repair: true});
     render(<LinuxSetup/>); await screen.findByRole("dialog");
-    expect(screen.getByText("Device access needs repair")).toBeTruthy();
+    expect(screen.getByText(/Device access needs repair/)).toBeTruthy();
     const input = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
     expect(input.disabled).toBe(false); expect(input.checked).toBe(true);
   });
