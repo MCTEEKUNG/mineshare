@@ -13,11 +13,10 @@
 //!
 //!   * `LOCAL` — events flow to the OS unchanged. We integrate the
 //!     `REL_X` deltas into a clamped `CURSOR_X` estimate; the OS
-//!     clamps the real cursor at the screen edge while evdev keeps
-//!     reporting the overshoot, so any time the user drags into the
-//!     real left edge our estimate self-syncs to 0. Sustained leftward
-//!     overshoot past 0 (≥ `ENTER_PRESSURE_PX`) is the signal that the
-//!     user is actively pushing into the edge → enter `REMOTE`. Any
+//!     estimate is only a candidate detector. X11 or the read-only GNOME
+//!     Wayland extension must confirm the real cursor is at that edge.
+//!     Without authoritative coordinates automatic crossing fails closed.
+//!     Sustained outward pressure at a confirmed edge enters `REMOTE`. Any
 //!     rightward dx cancels an in-flight press.
 //!   * `REMOTE` — every relevant device is `EVIOCGRAB`-ed so the OS no
 //!     longer sees motion or keystrokes; we forward them to the peer
@@ -130,7 +129,7 @@ mod edge_tests {
     }
 
     #[test]
-    fn failed_x11_query_cannot_authorize_crossing_but_wayland_keeps_fallback() {
+    fn missing_position_cannot_authorize_crossing_on_any_backend() {
         let motion = local_motion(
             (0, 500),
             (-20, 0),
@@ -149,7 +148,57 @@ mod edge_tests {
                 pointer::Sample::Unsupported
             )
             .overshoot,
-            Some(20)
+            None
+        );
+    }
+
+    #[test]
+    fn wayland_logical_geometry_overrides_physical_size_and_drift() {
+        let actual = pointer::Sample::Desktop {
+            x: 800,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        let motion = local_motion(
+            (0, 350),
+            (-400, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            actual,
+        );
+        assert_eq!(motion.overshoot, None);
+        assert!(motion.cancel);
+        assert_eq!(motion.position, (800, 350));
+        let edge = pointer::Sample::Desktop {
+            x: 1279,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        let motion = local_motion(
+            (1279, 350),
+            (20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Right,
+            edge,
+        );
+        assert_eq!(motion.overshoot, Some(20));
+        let outside = pointer::Sample::Desktop {
+            x: 1400,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        assert!(
+            local_motion(
+                (1279, 350),
+                (20, 0),
+                (1920, 1080),
+                super::super::PeerSide::Right,
+                outside
+            )
+            .cancel
         );
     }
 
@@ -185,6 +234,21 @@ fn local_motion(
     side: super::PeerSide,
     actual: pointer::Sample,
 ) -> LocalMotion {
+    if let pointer::Sample::Desktop {
+        x,
+        y,
+        width,
+        height,
+    } = actual
+    {
+        return local_motion(
+            previous,
+            delta,
+            (width, height),
+            side,
+            pointer::Sample::Position(x, y),
+        );
+    }
     let (dx, dy) = delta;
     let (w, h) = size;
     let raw_x = previous.0.saturating_add(dx);
@@ -216,7 +280,8 @@ fn local_motion(
                 }
         }
         pointer::Sample::Unavailable => false,
-        pointer::Sample::Unsupported => true,
+        pointer::Sample::Unsupported => false,
+        pointer::Sample::Desktop { .. } => unreachable!(),
     };
     if !confirmed {
         // Do not bank pressure while merely near the edge, even if the old
@@ -1144,9 +1209,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             return;
         }
 
-        // Track a coarse estimate, then confirm candidate overshoots against
-        // the real X11 pointer. Wayland retains the estimate fallback: global
-        // XWayland coordinates are not authoritative for a Wayland session.
+        // Raw mickeys are just a cheap candidate detector, never proof of an edge.
         let screen_w = SCREEN_W.load(Ordering::Relaxed);
         let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
@@ -1160,14 +1223,25 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         );
         // Raw mickeys are not screen pixels: acceleration and handback can
         // leave the estimate at the edge while the actual cursor is inside.
-        // Query X11 only on candidate edge reports, never the remote hot path.
-        if motion.overshoot.is_some() && !super::is_input_locked() {
+        // Unsupported samples fail closed. Calculate the candidate independently.
+        let candidate = match super::peer_side() {
+            super::PeerSide::Left => prev_x.saturating_add(dx) < 0,
+            super::PeerSide::Right => prev_x.saturating_add(dx) >= screen_w,
+            super::PeerSide::Top => prev_y.saturating_add(dy) < 0,
+            super::PeerSide::Bottom => prev_y.saturating_add(dy) >= screen_h,
+        };
+        if candidate && !super::is_input_locked() {
+            let actual = pointer::sample();
+            if let pointer::Sample::Desktop { width, height, .. } = actual {
+                SCREEN_W.store(width, Ordering::Relaxed);
+                SCREEN_H.store(height, Ordering::Relaxed);
+            }
             motion = local_motion(
                 (prev_x, prev_y),
                 (dx, dy),
                 (screen_w, screen_h),
                 super::peer_side(),
-                pointer::sample(),
+                actual,
             );
         }
         CURSOR_X.store(motion.position.0, Ordering::Relaxed);

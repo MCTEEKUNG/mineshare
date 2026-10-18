@@ -5,8 +5,9 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 config=${XDG_CONFIG_HOME:-$HOME/.config}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
-[[ -x "$HOME/.local/bin/mineshare-app" && -x /opt/Typeless/typeless ]]
-[[ -f "$config/autostart/MineShare.desktop" ]]
+launcher="${1:-/usr/bin/mineshare-app}"
+if [[ ! -x $launcher ]]; then launcher="$HOME/.local/bin/mineshare-app"; fi
+[[ -x "$launcher" ]]
 backup="$data/MineShare/backups/typeless-compat-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$backup" "$config/MineShare" "$config/autostart" "$HOME/.local/bin"
 mkdir -p "$data/MineShare"
@@ -21,6 +22,7 @@ if [[ ! -f "$original" ]]; then
     else
         source=/usr/share/applications/typeless.desktop
     fi
+    [[ -r $source ]] || { echo 'Typeless desktop entry not found.' >&2; exit 1; }
     install -m 644 "$source" "$original"
 fi
 for name in MineShare.desktop typeless.desktop; do
@@ -29,6 +31,8 @@ for name in MineShare.desktop typeless.desktop; do
     fi
 done
 install -m 755 "$root/installer/linux/start-typeless-after-mineshare.sh" "$HOME/.local/bin/mineshare-typeless-start"
+# Remember the selected executable (path only, never a shell command).
+printf '%s\n' "$launcher" > "$data/MineShare/keyboard-broker-launcher"
 printf 'enabled\n' > "$config/MineShare/keyboard-broker.enabled"
 exec_path="$HOME/.local/bin/mineshare-typeless-start"
 exec_path=${exec_path//\\/\\\\}

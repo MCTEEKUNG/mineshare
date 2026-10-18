@@ -49,6 +49,8 @@ jobs:
           node installer/linux/build-deb-hooks.mjs
           bash -n ui/src-tauri/target/deb-hooks/preinst ui/src-tauri/target/deb-hooks/postinst installer/linux/deb-prerm
           bash installer/linux/test-deb-lifecycle.sh
+          node installer/linux/test-gnome-pointer.mjs
+          bash installer/linux/test-typeless-startup.sh
           sudo --preserve-env=GITHUB_ACTIONS bash installer/linux/test-deb-upgrade.sh
 
       - name: cargo clippy
@@ -56,6 +58,10 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-targets --locked
+
+      - name: Private Wayland pointer bridge transport test
+        if: runner.os == 'Linux'
+        run: env -u DISPLAY -u WAYLAND_DISPLAY MINESHARE_TEST_PRIVATE_BUS=1 dbus-run-session -- cargo test -p mineshare-input private_bus_roundtrip_and_timeout --locked -- --ignored
 
   ui:
     name: ui (tauri) / ${{ matrix.os }}

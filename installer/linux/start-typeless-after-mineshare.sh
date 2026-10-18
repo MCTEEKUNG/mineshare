@@ -14,7 +14,12 @@ is_ready() {
     [[ $(readlink "/proc/$pid/exe" 2>/dev/null) == *mineshare-app* ]]
 }
 if ! is_ready; then
-    "$HOME/.local/bin/mineshare-app" >>"$XDG_RUNTIME_DIR/mineshare-startup.log" 2>&1 9>&- &
+    launcher=/usr/bin/mineshare-app
+    selected="${XDG_DATA_HOME:-$HOME/.local/share}/MineShare/keyboard-broker-launcher"
+    if [[ -r $selected ]]; then IFS= read -r launcher < "$selected"; fi
+    if [[ ! -x $launcher ]]; then launcher="$HOME/.local/bin/mineshare-app"; fi
+    [[ $launcher == /* && -x $launcher ]] || { echo 'Missing MineShare executable.' >&2; exit 1; }
+    "$launcher" >>"$XDG_RUNTIME_DIR/mineshare-startup.log" 2>&1 9>&- &
     for ((attempt=0; attempt<150; attempt++)); do
         is_ready && break
         sleep 0.2

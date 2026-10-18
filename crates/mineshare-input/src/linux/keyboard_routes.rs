@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn right_alt_and_super_only_reach_selected_destination() {
-        for code in [100, 125, 126] {
+        for code in [56, 100, 125, 126] {
             let mut routes = Routes::default();
             assert_eq!(routes.edge(code, 1, true), Some(Destination::Remote));
             assert_eq!(routes.edge(code, 0, true), Some(Destination::Remote));

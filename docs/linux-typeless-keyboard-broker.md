@@ -11,6 +11,13 @@ settings are modified. The original Typeless desktop command and its login flags
 are preserved and launched through GIO. Log out/in once after installation; do not launch Typeless
 first. Its normal Launch at login toggle must not overwrite the coordinator.
 
+On a `.deb` installation the setup now selects `/usr/bin/mineshare-app` and can
+create the coordinator without any pre-existing MineShare autostart entry. The
+older standalone `~/.local/bin/mineshare-app` is only a fallback. An explicit
+executable path can be passed as the first argument (no shell command is stored).
+After reinstalling Ubuntu, these **per-user** broker/startup files must be set up
+again; installing the app package alone intentionally does not opt users in.
+
 The broker acquires all physical keyboard devices before advertising readiness.
 It keeps them grabbed in LOCAL and REMOTE, and creates a separate local uinput
 proxy for each device. Typeless can monitor the proxies while MineShare exclusively
