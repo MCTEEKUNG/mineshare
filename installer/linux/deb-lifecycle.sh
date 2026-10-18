@@ -14,10 +14,10 @@ ms_identity() {
     ms_valid_exe "$exe" || return 1
     while read -r key real rest; do
         if [[ $key == Uid: ]]; then uid=$real; break; fi
-    done < "/proc/$pid/status" 2>/dev/null || return 1
+    done 2>/dev/null < "/proc/$pid/status" || return 1
     [[ $uid =~ ^[0-9]+$ && $uid != 0 ]] || return 1
     # Field 22 is process start time. Removing the final ') ' handles spaces in comm.
-    statline=$(<"/proc/$pid/stat") || return 1
+    IFS= read -r statline 2>/dev/null < "/proc/$pid/stat" || return 1
     rest=${statline##*) }
     local fields=()
     read -r -a fields <<< "$rest"

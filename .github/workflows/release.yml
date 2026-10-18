@@ -85,6 +85,18 @@ jobs:
         if: runner.os == 'Windows'
         run: node installer/windows/build-bootstrapper.mjs
 
+      - name: Audit Linux upgrade hooks in the actual package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          control=$(mktemp -d)
+          deb=$(find ui/src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)
+          dpkg-deb --control "$deb" "$control"
+          cmp ui/src-tauri/target/deb-hooks/preinst "$control/preinst"
+          cmp ui/src-tauri/target/deb-hooks/postinst "$control/postinst"
+          bash -n "$control/preinst" "$control/postinst" "$control/prerm"
+          bash installer/linux/test-deb-lifecycle.sh
+
       - name: Audit Windows MSI update support
         if: runner.os == 'Windows'
         shell: pwsh
