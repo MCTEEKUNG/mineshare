@@ -96,6 +96,7 @@ jobs:
           cmp ui/src-tauri/target/deb-hooks/postinst "$control/postinst"
           bash -n "$control/preinst" "$control/postinst" "$control/prerm"
           bash installer/linux/test-deb-lifecycle.sh
+          bash installer/linux/test-setup-package.sh "$deb"
 
       - name: Audit Windows MSI update support
         if: runner.os == 'Windows'

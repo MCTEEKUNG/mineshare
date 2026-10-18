@@ -100,7 +100,7 @@ ms_resume_one() {
         echo "==> MineShare not restarted for user $uid: no graphical session."
         return 0
     fi
-    ms_user_command "$uid" systemd-run --user --collect --property=Type=exec \
+    ms_user_command "$uid" systemd-run --user --collect --property=Type=exec --property=PartOf=graphical-session.target \
         "--unit=mineshare-package-resume-$$-$uid" -- /usr/bin/mineshare-app
 }
 

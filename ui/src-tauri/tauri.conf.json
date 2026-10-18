@@ -46,6 +46,14 @@
     ],
     "linux": {
       "deb": {
+        "files": {
+          "/usr/share/mineshare/setup/installer/linux/install-typeless-compat.sh": "../../installer/linux/install-typeless-compat.sh",
+          "/usr/share/mineshare/setup/installer/linux/start-typeless-after-mineshare.sh": "../../installer/linux/start-typeless-after-mineshare.sh",
+          "/usr/share/mineshare/setup/installer/linux/install-gnome-pointer.sh": "../../installer/linux/install-gnome-pointer.sh",
+          "/usr/share/mineshare/setup/installer/linux/enable-input.sh": "../../installer/linux/enable-input.sh",
+          "/usr/share/mineshare/setup/installer/linux/gnome-pointer/metadata.json": "../../installer/linux/gnome-pointer/metadata.json",
+          "/usr/share/mineshare/setup/installer/linux/gnome-pointer/extension.js": "../../installer/linux/gnome-pointer/extension.js"
+        },
         "depends": [
           "libwebkit2gtk-4.1-0",
           "libgtk-3-0",

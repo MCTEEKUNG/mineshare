@@ -12,6 +12,7 @@ export default function SettingsPage() {
   return (
     <div className="flex flex-col gap-10">
       <StartupSection />
+      <UbuntuSetupButton />
       <section>
         <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_appearance")}</h3>
         <ThemeSwitcher />
@@ -31,6 +32,15 @@ export default function SettingsPage() {
       </section>
     </div>
   );
+}
+
+function UbuntuSetupButton() {
+  const [linux, setLinux] = useState(false);
+  const {locale} = useT();
+  useEffect(() => { invoke<{linux: boolean}>("get_linux_setup_status").then(s => setLinux(s.linux)).catch(() => {}); }, []);
+  if (!linux) return null;
+  return <section><h3 className="text-sm font-semibold mb-3">{locale === "th" ? "ตั้งค่า Ubuntu" : "Ubuntu setup"}</h3>
+    <button className="rounded-lg border border-ds-border px-4 py-2 text-sm" onClick={() => window.dispatchEvent(new Event("mineshare-linux-setup"))}>{locale === "th" ? "ตรวจระบบและตั้งค่า" : "Check system and set up"}</button></section>;
 }
 
 type MouseRateStats = { set_hz: number; fwd_total: number; inj_total: number };

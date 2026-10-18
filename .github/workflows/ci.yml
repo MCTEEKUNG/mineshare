@@ -125,6 +125,13 @@ jobs:
         working-directory: ui/src-tauri
         run: cargo check --all-targets --locked
 
+      - name: Ubuntu setup backend tests
+        if: runner.os == 'Linux'
+        working-directory: ui/src-tauri
+        run: |
+          cargo test --lib linux_setup:: --locked
+          bash ../../installer/linux/test-setup-flow.sh
+
       - name: Windows installer helper checks
         if: runner.os == 'Windows'
         run: |

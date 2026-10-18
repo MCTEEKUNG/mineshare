@@ -7,6 +7,7 @@ import HomePage from "./pages/Home";
 import AudioDevicesPage from "./pages/AudioDevices";
 import SettingsPage from "./pages/Settings";
 import PairingModal from "./PairingModal";
+import LinuxSetup from "./LinuxSetup";
 import { LanguageToggle, useT } from "./i18n";
 import appIcon from "./assets/mineshare-app-icon.svg";
 import {
@@ -210,6 +211,7 @@ export default function App() {
   return (
     <div className="app-marble h-screen flex bg-ds-bg text-ds-text overflow-hidden">
       <PairingModal />
+      <LinuxSetup />
       <DropOverlay visible={dropOverlay} />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <ActiveTransfersBadge count={activeTransfers} onClick={() => setTab("files")} />

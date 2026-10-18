@@ -5,9 +5,27 @@
 //! installs (M4) keep working with the standalone daemon binary;
 //! the Tauri shell is for users who want a window.
 
+mod linux_setup;
 mod startup;
 mod state;
 mod tray;
+
+#[tauri::command]
+async fn get_linux_setup_status() -> Result<linux_setup::Status, String> {
+    tauri::async_runtime::spawn_blocking(linux_setup::status)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn configure_linux_setup(
+    options: linux_setup::Options,
+) -> Result<linux_setup::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || linux_setup::configure(options))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 async fn get_startup_status() -> Result<startup::Status, String> {
@@ -320,6 +338,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_linux_setup_status,
+            configure_linux_setup,
             get_startup_status,
             set_startup_enabled,
             get_status,
