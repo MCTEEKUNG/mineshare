@@ -6,7 +6,7 @@ protocol/scancode change cannot recover input the source never receives.
 
 `installer/linux/install-typeless-compat.sh` enables the broker for the graphical
 user and installs a per-user, readiness-gated autostart coordinator. Install the
-normal desktop launcher first. No vendor files, Typeless shortcuts, or Windows
+app first (a `.deb` or the standalone desktop launcher). No vendor files, Typeless shortcuts, or Windows
 settings are modified. The original Typeless desktop command and its login flags
 are preserved and launched through GIO. Log out/in once after installation; do not launch Typeless
 first. Its normal Launch at login toggle must not overwrite the coordinator.
