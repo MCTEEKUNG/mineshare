@@ -159,6 +159,10 @@ mod linux {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
         let broker_configured = root.join("MineShare/keyboard-broker.enabled").is_file()
+            && crate::startup::entry_enabled(
+                &std::fs::read_to_string(root.join("autostart/MineShare.desktop"))
+                    .unwrap_or_default(),
+            )
             && same_file(
                 &root.join("autostart/MineShare.desktop"),
                 &root.join("autostart/typeless.desktop"),

@@ -189,7 +189,7 @@ fn desktop_value<'a>(entry: &'a str, key: &str) -> Option<&'a str> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn entry_enabled(entry: &str) -> bool {
+pub(crate) fn entry_enabled(entry: &str) -> bool {
     desktop_value(entry, "Hidden") != Some("true")
         && desktop_value(entry, "X-GNOME-Autostart-enabled") != Some("false")
 }
