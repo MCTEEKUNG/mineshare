@@ -2041,15 +2041,10 @@ fn notify_hidden_terminal_of_peer_motion() {
     {
         return;
     }
-    // Posting is nonblocking even when Terminal is busy. Bound retries if a
-    // future Terminal version no longer accepts this visibility notification.
-    static LAST_NOTICE: Mutex<Option<Instant>> = Mutex::new(None);
-    let mut last = LAST_NOTICE.lock();
-    let now = Instant::now();
-    if last.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(50)) {
-        return;
-    }
-    *last = Some(now);
+    // Posting is nonblocking even when Terminal is busy. Do not time-throttle:
+    // a key can hide it again immediately after restoration, and a single new
+    // mouse movement must still restore it. Only actual hidden peer motion
+    // posts a notice; visible motion and idle time never do.
     let point = (ci.ptScreenPos.x as u16 as u32) | ((ci.ptScreenPos.y as u16 as u32) << 16);
     // Pointer ID zero deliberately supplies no client pointer to dispatch;
     // Terminal's host uses only the message kind to balance its hidden state.
