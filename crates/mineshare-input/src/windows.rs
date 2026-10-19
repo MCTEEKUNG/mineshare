@@ -2010,6 +2010,59 @@ fn cursor_flags_need_motion_packet(flags: u32) -> bool {
     flags & CURSOR_SHOWING.0 == 0 || flags & CURSOR_SUPPRESSED.0 != 0
 }
 
+fn terminal_needs_pointer_notification(flags: u32, class: &str) -> bool {
+    flags == 0 && class == "CASCADIA_HOSTING_WINDOW_CLASS"
+}
+
+fn notify_hidden_terminal_of_peer_motion() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, PostMessageW, WM_NCPOINTERUPDATE,
+    };
+    let mut ci = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetCursorInfo(&mut ci) }.is_err() || ci.flags.0 != 0 {
+        return;
+    }
+    // Windows Terminal hides via its own ShowCursor count, and restores only
+    // on pointer updates or activation, not legacy WM_MOUSEMOVE (IslandWindow::
+    // ShowCursorMaybe). Notify its host, not its content/input child: there is
+    // no button, activation, selection, or fabricated client-area pointer input.
+    // Source: microsoft/terminal/src/cascadia/WindowsTerminal/IslandWindow.cpp.
+    let target = unsafe { GetAncestor(WindowFromPoint(ci.ptScreenPos), GA_ROOT) };
+    let mut class = [0u16; 128];
+    let len = unsafe { GetClassNameW(target, &mut class) };
+    if len <= 0
+        || !terminal_needs_pointer_notification(
+            ci.flags.0,
+            &String::from_utf16_lossy(&class[..len as usize]),
+        )
+    {
+        return;
+    }
+    // Posting is nonblocking even when Terminal is busy. Bound retries if a
+    // future Terminal version no longer accepts this visibility notification.
+    static LAST_NOTICE: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST_NOTICE.lock();
+    let now = Instant::now();
+    if last.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(50)) {
+        return;
+    }
+    *last = Some(now);
+    let point = (ci.ptScreenPos.x as u16 as u32) | ((ci.ptScreenPos.y as u16 as u32) << 16);
+    // Pointer ID zero deliberately supplies no client pointer to dispatch;
+    // Terminal's host uses only the message kind to balance its hidden state.
+    let _ = unsafe {
+        PostMessageW(
+            Some(target),
+            WM_NCPOINTERUPDATE,
+            WPARAM(0),
+            LPARAM(point as isize),
+        )
+    };
+}
+
 impl InputInject for EnigoInject {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> Result<()> {
         let game_foreground = game_foreground();
@@ -2038,6 +2091,7 @@ impl InputInject for EnigoInject {
             // Send the requested movement once, without clicks, extra motion,
             // foreground changes, or an unbalanced ShowCursor call.
             send_desktop_mouse_move(dx, dy)?;
+            notify_hidden_terminal_of_peer_motion();
         } else {
             // An already-visible desktop deliberately avoids SendInput. Every SendInput
             // call traverses the machine-wide low-level-hook chain; on the
@@ -2369,10 +2423,31 @@ mod tests {
     }
 
     #[test]
+    fn pointer_visibility_notice_is_scoped_to_hidden_windows_terminal() {
+        assert!(terminal_needs_pointer_notification(
+            0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            CURSOR_SHOWING.0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            CURSOR_SUPPRESSED.0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            0,
+            "ConsoleWindowClass"
+        ));
+        assert!(!terminal_needs_pointer_notification(0, "Roblox"));
+    }
+
+    #[test]
     #[ignore = "live Windows desktop: reopen OpenCode to hide cursor; moves cursor one pixel"]
     fn live_peer_motion_restores_terminal_hidden_cursor() {
         let inject = EnigoInject::new().unwrap();
-        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = Instant::now() + std::time::Duration::from_secs(180);
         loop {
             let mut ci = CURSORINFO {
                 cbSize: std::mem::size_of::<CURSORINFO>() as u32,
