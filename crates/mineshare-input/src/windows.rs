@@ -2015,9 +2015,7 @@ fn terminal_needs_pointer_notification(flags: u32, class: &str) -> bool {
 }
 
 fn notify_hidden_terminal_of_peer_motion() {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, PostMessageW, WM_NCPOINTERUPDATE,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, PostMessageW, WM_POINTERUPDATE};
     let mut ci = CURSORINFO {
         cbSize: std::mem::size_of::<CURSORINFO>() as u32,
         ..Default::default()
@@ -2028,7 +2026,8 @@ fn notify_hidden_terminal_of_peer_motion() {
     // Windows Terminal hides via its own ShowCursor count, and restores only
     // on pointer updates or activation, not legacy WM_MOUSEMOVE (IslandWindow::
     // ShowCursorMaybe). Notify its host, not its content/input child: there is
-    // no button, activation, selection, or fabricated client-area pointer input.
+    // no button or activation. Avoid WM_NCPOINTERUPDATE, whose default handling
+    // can select a non-client window-resize cursor over terminal content.
     // Source: microsoft/terminal/src/cascadia/WindowsTerminal/IslandWindow.cpp.
     let target = unsafe { GetAncestor(WindowFromPoint(ci.ptScreenPos), GA_ROOT) };
     let mut class = [0u16; 128];
@@ -2051,7 +2050,7 @@ fn notify_hidden_terminal_of_peer_motion() {
     let _ = unsafe {
         PostMessageW(
             Some(target),
-            WM_NCPOINTERUPDATE,
+            WM_POINTERUPDATE,
             WPARAM(0),
             LPARAM(point as isize),
         )
@@ -2472,6 +2471,16 @@ mod tests {
             0,
             "peer movement left terminal cursor hidden"
         );
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW,
+        };
+        for resize in [IDC_SIZEWE, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZENESW] {
+            assert_ne!(
+                ci.hCursor,
+                unsafe { LoadCursorW(None, resize) }.unwrap(),
+                "recovery left a resize cursor; reproduce over terminal content"
+            );
+        }
         assert_eq!(
             unsafe { GetForegroundWindow() },
             foreground,
