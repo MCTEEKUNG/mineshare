@@ -1988,22 +1988,26 @@ fn should_emit_mouse_motion_packet(
     game_foreground: bool,
     game_drive: super::GameDrive,
     mouse_button_held: bool,
-    cursor_suppressed: bool,
+    cursor_needs_motion_packet: bool,
 ) -> bool {
     should_use_true_relative_injection(game_foreground, game_drive)
         || mouse_button_held
-        || cursor_suppressed
+        || cursor_needs_motion_packet
 }
 
-fn desktop_cursor_suppressed() -> bool {
+fn desktop_cursor_needs_motion_packet() -> bool {
     let mut info = CURSORINFO {
         cbSize: std::mem::size_of::<CURSORINFO>() as u32,
         ..Default::default()
     };
-    // Touch/pen suppression is distinct from a game or application choosing
-    // to hide its pointer. Never change ShowCursor's per-thread display count
-    // or steal foreground to recover this OS-owned state.
-    unsafe { GetCursorInfo(&mut info) }.is_ok() && info.flags.0 & CURSOR_SUPPRESSED.0 != 0
+    // A terminal may hide the pointer without touch/pen suppression (flags=0).
+    // Let the foreground app see mouse motion and decide whether to restore it;
+    // never force ShowCursor's per-thread count or change foreground ownership.
+    unsafe { GetCursorInfo(&mut info) }.is_ok() && cursor_flags_need_motion_packet(info.flags.0)
+}
+
+fn cursor_flags_need_motion_packet(flags: u32) -> bool {
+    flags & CURSOR_SHOWING.0 == 0 || flags & CURSOR_SUPPRESSED.0 != 0
 }
 
 impl InputInject for EnigoInject {
@@ -2023,13 +2027,14 @@ impl InputInject for EnigoInject {
             game_foreground,
             game_drive,
             mouse_button_held,
-            !mouse_button_held && desktop_cursor_suppressed(),
+            !mouse_button_held && desktop_cursor_needs_motion_packet(),
         ) {
             // Drag-sensitive Windows surfaces (notably the Win+Shift+S
             // snipping overlay) require real mouse-move packets while a
             // button is held. A touch-first desktop (including after boot)
-            // also needs a mouse packet to exit CURSOR_SUPPRESSED. SetCursorPos
-            // only moves the position; it cannot restore the input modality.
+            // also needs a mouse packet to exit CURSOR_SUPPRESSED. Terminals
+            // hiding the pointer need motion notification too: SetCursorPos
+            // alone changes position without restoring their hidden pointer.
             // Send the requested movement once, without clicks, extra motion,
             // foreground changes, or an unbalanced ShowCursor call.
             send_desktop_mouse_move(dx, dy)?;
@@ -2356,6 +2361,54 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hidden_terminal_cursor_needs_motion_without_a_click() {
+        assert!(cursor_flags_need_motion_packet(0));
+        assert!(cursor_flags_need_motion_packet(CURSOR_SUPPRESSED.0));
+        assert!(!cursor_flags_need_motion_packet(CURSOR_SHOWING.0));
+    }
+
+    #[test]
+    #[ignore = "live Windows desktop: reopen OpenCode to hide cursor; moves cursor one pixel"]
+    fn live_peer_motion_restores_terminal_hidden_cursor() {
+        let inject = EnigoInject::new().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let mut ci = CURSORINFO {
+                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                ..Default::default()
+            };
+            unsafe { GetCursorInfo(&mut ci) }.unwrap();
+            if ci.flags.0 == 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "precondition: terminal-hidden cursor not reproduced"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!game_foreground(), "test requires a non-game foreground");
+        let foreground = unsafe { GetForegroundWindow() };
+        inject.mouse_move_rel(1, 0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetCursorInfo(&mut ci) }.unwrap();
+        assert_ne!(
+            ci.flags.0 & CURSOR_SHOWING.0,
+            0,
+            "peer movement left terminal cursor hidden"
+        );
+        assert_eq!(
+            unsafe { GetForegroundWindow() },
+            foreground,
+            "motion stole foreground"
+        );
+    }
+
     #[test]
     #[ignore = "live Windows desktop: touch the screen first; moves cursor one pixel"]
     fn live_peer_motion_restores_touch_suppressed_cursor() {
