@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useT } from "../i18n";
 
 type Direction = "sending" | "receiving";
 type Status =
@@ -32,6 +33,7 @@ type Transfer = {
  * because the peer is already in the trust list.
  */
 export default function FilesPage() {
+  const { t } = useT();
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -68,9 +70,7 @@ export default function FilesPage() {
   async function cancel(id: number) {
     try {
       await invoke("cancel_transfer", { id });
-    } catch {
-      /* swallow — cancel is best-effort */
-    }
+    } catch (e) { setErr(String(e)); }
   }
 
   async function openDownloads() {
@@ -90,19 +90,12 @@ export default function FilesPage() {
 
   return (
     <section>
-      <p className="text-sm text-ds-text-muted mb-5 max-w-prose leading-relaxed">
-        Drag any file onto this window to send it to the paired peer. Files
-        arrive in <code className="font-mono text-[11px] text-ds-text">Downloads/MineShare/</code>{" "}
-        on the other machine, integrity-checked with SHA-256 before being
-        renamed into place.
-      </p>
-
       <div
         className={
-          "rounded-xl border-2 border-dashed p-10 text-center transition-all duration-150 " +
+          "panel border border-dashed p-12 text-center transition-colors " +
           (dragOver
-            ? "border-ds-accent-border bg-ds-accent-soft scale-[1.01]"
-            : "border-ds-border bg-ds-hover")
+            ? "border-ds-accent-border bg-ds-accent-soft"
+            : "border-ds-border")
         }
       >
         <div className={
@@ -115,10 +108,10 @@ export default function FilesPage() {
           }
         </div>
         <p className={"text-sm font-medium " + (dragOver ? "text-ds-accent" : "text-ds-text")}>
-          {dragOver ? "Drop to send" : "Drag a file anywhere on this window"}
+          {t(dragOver ? "drop_title" : "files_subtitle")}
         </p>
         <p className="text-xs text-ds-text-muted mt-1">
-          Auto-sends to the paired peer · multi-file drop OK · multi-GB OK
+          {t("drop_hint")}
         </p>
       </div>
 
@@ -128,16 +121,16 @@ export default function FilesPage() {
           className="text-xs text-ds-text-muted hover:text-ds-text transition-colors flex items-center gap-1.5"
         >
           <IconFolder className="size-3.5" />
-          Open Downloads/MineShare folder
+          {t("files_open")}
         </button>
       </div>
 
-      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
+      {err ? <p role="alert" className="text-xs text-ds-danger mt-3">{err}</p> : null}
 
       {active.length > 0 && (
         <>
-          <h3 className="text-[10px] uppercase tracking-widest text-ds-text-muted mt-8 mb-2">
-            In progress
+          <h3 className="text-sm font-medium text-ds-text-muted mt-8 mb-3">
+            {t("files_active")}
           </h3>
           <div className="space-y-2">
             {active.map((t) => (
@@ -149,8 +142,8 @@ export default function FilesPage() {
 
       {recent.length > 0 && (
         <>
-          <h3 className="text-[10px] uppercase tracking-widest text-ds-text-muted mt-8 mb-2">
-            Recent
+          <h3 className="text-sm font-medium text-ds-text-muted mt-8 mb-3">
+            {t("files_recent")}
           </h3>
           <div className="space-y-2">
             {recent.map((t) => (
@@ -161,7 +154,7 @@ export default function FilesPage() {
       )}
 
       {active.length === 0 && recent.length === 0 ? (
-        <p className="text-xs text-ds-text-muted mt-8 text-center">No transfers yet.</p>
+        <p className="text-sm text-ds-text-muted mt-8 text-center">{t("files_empty")}</p>
       ) : null}
     </section>
   );
@@ -174,19 +167,20 @@ function TransferRow({
   t: Transfer;
   onCancel?: () => void;
 }) {
+  const { locale } = useT();
   const pct =
     t.size_bytes === 0
       ? 0
       : Math.min(100, Math.floor((t.bytes_so_far / t.size_bytes) * 100));
   const dirIcon = t.direction === "sending"
     ? <IconArrowUpRight className="size-3.5 text-ds-accent shrink-0" />
-    : <IconArrowDownLeft className="size-3.5 text-blue-400 shrink-0" />;
+    : <IconArrowDownLeft className="size-3.5 text-ds-info shrink-0" />;
 
   const statusTone =
     t.status === "done"
       ? "text-ds-accent"
       : t.status === "failed" || t.status === "cancelled"
-        ? "text-red-400"
+        ? "text-ds-danger"
         : "text-ds-text-muted";
   const inFlight = ["pending", "active", "verifying"].includes(t.status);
   const rate =
@@ -205,16 +199,16 @@ function TransferRow({
               {formatBytes(t.bytes_so_far)} / {formatBytes(t.size_bytes)}
               {inFlight && ` · ${rate}`}
               <span className={" ml-2 font-medium " + statusTone}>· {t.status}</span>
-              {t.error ? <span className="text-red-400"> — {t.error}</span> : null}
+              {t.error ? <span className="text-ds-danger"> — {t.error}</span> : null}
             </p>
           </div>
         </div>
         {inFlight && onCancel ? (
           <button
             onClick={onCancel}
-            className="text-[11px] text-ds-text-muted hover:text-red-400 px-2 py-1 rounded-lg border border-ds-border hover:border-red-500/30 transition-colors shrink-0"
+            className="text-[11px] text-ds-text-muted hover:text-ds-danger px-2 py-1 rounded-lg border border-ds-border hover:border-ds-danger-border transition-colors shrink-0"
           >
-            Cancel
+            {locale === "th" ? "ยกเลิก" : "Cancel"}
           </button>
         ) : null}
       </div>
@@ -223,7 +217,7 @@ function TransferRow({
           <div
             className={
               "h-full transition-all " +
-              (t.direction === "sending" ? "bg-ds-accent" : "bg-blue-500")
+              (t.direction === "sending" ? "bg-ds-accent" : "bg-ds-info")
             }
             style={{ width: `${pct}%` }}
           />

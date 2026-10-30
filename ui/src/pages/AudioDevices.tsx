@@ -5,13 +5,12 @@ import { useT } from "../i18n";
 export default function AudioDevicesPage() {
   const { t } = useT();
   return (
-    <div className="flex flex-col gap-10">
+    <div className="settings-stack gap-6">
       <section>
-        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_audio")}</h3>
+        <h2 className="section-title">{t("section_audio")}</h2>
         <AudioPage />
       </section>
       <section>
-        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_devices")}</h3>
         <DevicesPage />
       </section>
     </div>

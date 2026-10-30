@@ -23,7 +23,7 @@ export default function StartupSection() {
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   }
-  return <section className="rounded-xl border border-ds-border bg-ds-surface p-5">
+  return <section className="panel p-5">
     <h3 className="text-sm font-semibold text-ds-text">{t("startup_title")}</h3>
     <p className="text-xs text-ds-text-muted mt-2">{t("startup_description")}</p>
     {state ? <label className="flex items-center gap-3 mt-4 text-sm text-ds-text">
@@ -32,6 +32,6 @@ export default function StartupSection() {
       {t("startup_enabled")}
     </label> : !error ? <p className="text-xs text-ds-text-muted mt-3">{t("startup_loading")}</p> : null}
     {state?.managed ? <p className="text-xs text-ds-text-muted mt-3">{t("startup_managed")}</p> : null}
-    {error ? <p role="alert" className="text-xs text-red-400 mt-3">{error}</p> : null}
+    {error ? <p role="alert" className="text-xs text-ds-danger mt-3">{error}</p> : null}
   </section>;
 }

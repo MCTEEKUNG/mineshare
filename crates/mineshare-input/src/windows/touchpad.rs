@@ -527,7 +527,9 @@ fn apply_capture_active(requested: bool) {
     }
 
     if let Some(controller) = CONTROLLER.get()
-        && let Err(e) = controller.SetEnabled(active && actions)
+        // The controller supplies three/four-finger contact frames as well as
+        // Windows action shortcuts. Linux accepts frames without those actions.
+        && let Err(e) = controller.SetEnabled(active)
     {
         warn!(error = %e, active, "failed to change touchpad gesture capture");
         CAPTURE_ENABLED.store(false, Ordering::Release);
@@ -1291,6 +1293,7 @@ fn setup_global_controller() -> Result<TouchpadGesturesController> {
         TouchpadGlobalActionEventArgs,
     >::new(|_, args| {
         if CAPTURE_ENABLED.load(Ordering::Acquire)
+            && crate::peer_touchpad_capabilities() & TOUCHPAD_CAP_ACTION_INJECT != 0
             && let Some(event) = action_event(args.ok()?.Action()?)
         {
             super::sink_send(InputEvent::Touchpad(event));

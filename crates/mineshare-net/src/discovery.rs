@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use mineshare_core::DeviceId;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 pub const SERVICE_TYPE: &str = "_mineshare._tcp.local.";
@@ -20,6 +20,8 @@ pub struct PeerAdvert {
     pub os: String,
     pub control_port: u16,
     pub addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub pairing_protocol: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -34,39 +36,39 @@ pub struct Discovery {
     /// Fully-qualified service name we registered (`<instance>.<type>`),
     /// needed to unregister (broadcast an mDNS goodbye) on shutdown.
     fullname: String,
+    refresh: watch::Sender<u64>,
 }
 
 impl Discovery {
     pub fn new() -> Result<Self> {
         let daemon = ServiceDaemon::new().context("failed to start mDNS daemon")?;
+        daemon
+            .set_ip_check_interval(2)
+            .context("configure mDNS interface recovery")?;
+        let (refresh, _) = watch::channel(0);
         Ok(Self {
             daemon,
             instance_name: String::new(),
             fullname: String::new(),
+            refresh,
         })
+    }
+
+    /// Reset discovery's exponential query backoff while the bridge is down.
+    /// The single browse task owns receiver replacement, avoiding duplicate
+    /// subscriptions or reconnect workers on each recovery tick.
+    pub fn refresh_browse(&self) {
+        self.refresh
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     /// Announce ourselves on the LAN. Re-callable to update info.
     pub fn announce(&mut self, advert: &PeerAdvert) -> Result<()> {
-        let host = format!("{}.local.", short_id(&advert.device_id));
         let instance = format!("{}-{}", advert.display_name, short_id(&advert.device_id));
         self.instance_name = instance.clone();
         self.fullname = format!("{instance}.{SERVICE_TYPE}");
 
-        let mut props: HashMap<String, String> = HashMap::new();
-        props.insert("device_id".into(), advert.device_id.to_string());
-        props.insert("display_name".into(), advert.display_name.clone());
-        props.insert("os".into(), advert.os.clone());
-
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            advert.addresses.as_slice(),
-            advert.control_port,
-            Some(props),
-        )
-        .context("invalid mDNS service info")?;
+        let info = service_info(advert)?;
 
         self.daemon
             .register(info)
@@ -87,12 +89,14 @@ impl Discovery {
     /// `ServiceResolved` event so we can dispatch a proper `PeerOffline` when
     /// the last fullname entry for a device disappears.
     pub fn browse(&self, tx: mpsc::Sender<DiscoveryEvent>) -> Result<()> {
-        let receiver = self
+        let mut receiver = self
             .daemon
             .browse(SERVICE_TYPE)
             .context("failed to start mDNS browse")?;
 
         let me = self.instance_name.clone();
+        let daemon = self.daemon.clone();
+        let mut refresh = self.refresh.subscribe();
         tokio::spawn(async move {
             // fullname → DeviceId  (populated on ServiceResolved)
             let mut fullname_to_id: HashMap<String, DeviceId> = HashMap::new();
@@ -108,15 +112,26 @@ impl Discovery {
             let mut last_advert: HashMap<DeviceId, PeerAdvert> = HashMap::new();
 
             loop {
-                let evt = match tokio::task::spawn_blocking({
-                    let receiver = receiver.clone();
-                    move || receiver.recv_timeout(Duration::from_secs(3600))
-                })
-                .await
-                {
-                    Ok(Ok(e)) => e,
-                    Ok(Err(_)) => continue, // timeout
-                    Err(_) => break,
+                let evt = tokio::select! {
+                    _ = tx.closed() => break,
+                    changed = refresh.changed() => {
+                        if changed.is_err() { break; }
+                        // Stop cancels old query timers before replacing their
+                        // receiver, so a long outage cannot accumulate browsers.
+                        match daemon.stop_browse(SERVICE_TYPE).and_then(|_| daemon.browse(SERVICE_TYPE)) {
+                            Ok(next) => receiver = next,
+                            Err(e) => warn!(error = %e, "failed to refresh mDNS browse; will retry"),
+                        }
+                        continue;
+                    }
+                    event = receiver.recv_async() => match event {
+                        Ok(event) => event,
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if let Ok(next) = daemon.browse(SERVICE_TYPE) { receiver = next; }
+                            continue;
+                        }
+                    },
                 };
 
                 match evt {
@@ -206,12 +221,39 @@ impl Discovery {
     }
 }
 
+fn service_info(advert: &PeerAdvert) -> Result<ServiceInfo> {
+    let host = format!("{}.local.", short_id(&advert.device_id));
+    let instance = format!("{}-{}", advert.display_name, short_id(&advert.device_id));
+    let mut props: HashMap<String, String> = HashMap::new();
+    props.insert("device_id".into(), advert.device_id.to_string());
+    props.insert("display_name".into(), advert.display_name.clone());
+    props.insert("os".into(), advert.os.clone());
+    props.insert(
+        "pairing_protocol".into(),
+        advert.pairing_protocol.to_string(),
+    );
+    ServiceInfo::new(
+        SERVICE_TYPE,
+        &instance,
+        &host,
+        advert.addresses.as_slice(),
+        advert.control_port,
+        Some(props),
+    )
+    .context("invalid mDNS service info")
+    .map(ServiceInfo::enable_addr_auto)
+}
+
 /// True when two adverts point at the same reachable endpoint — same
 /// control port and the same set of addresses (order-independent).
 /// `mdns-sd` can briefly union the old + new A records during an IP
 /// change, so comparing as sorted sets avoids spurious "changed" churn
 /// from address reordering while still detecting a real IP add/remove.
 fn same_endpoint(a: &PeerAdvert, b: &PeerAdvert) -> bool {
+    if a.display_name != b.display_name || a.os != b.os || a.pairing_protocol != b.pairing_protocol
+    {
+        return false;
+    }
     if a.control_port != b.control_port {
         return false;
     }
@@ -244,6 +286,10 @@ fn peer_from_info(info: &mdns_sd::ServiceInfo) -> Result<PeerAdvert> {
         .unwrap_or("(unknown)")
         .to_string();
     let os = props.get_property_val_str("os").unwrap_or("?").to_string();
+    let pairing_protocol = props
+        .get_property_val_str("pairing_protocol")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     let control_port = info.get_port();
     let addresses: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
 
@@ -253,6 +299,7 @@ fn peer_from_info(info: &mdns_sd::ServiceInfo) -> Result<PeerAdvert> {
         os,
         control_port,
         addresses,
+        pairing_protocol,
     })
 }
 
@@ -260,12 +307,22 @@ fn peer_from_info(info: &mdns_sd::ServiceInfo) -> Result<PeerAdvert> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn service_tracks_interfaces_when_network_returns_or_dhcp_changes_ip() {
+        let info = service_info(&advert(5000, &[])).unwrap();
+        assert!(
+            info.is_addr_auto(),
+            "advertisement is frozen at its startup IP addresses"
+        );
+    }
+
     fn advert(port: u16, addrs: &[&str]) -> PeerAdvert {
         PeerAdvert {
             device_id: DeviceId(uuid::Uuid::nil()),
             display_name: "test".into(),
             os: "test".into(),
             control_port: port,
+            pairing_protocol: 1,
             addresses: addrs.iter().map(|a| a.parse().unwrap()).collect(),
         }
     }
@@ -277,6 +334,20 @@ mod tests {
             &advert(5000, &["192.168.1.5"]),
             &advert(5000, &["192.168.1.5"])
         ));
+    }
+
+    #[test]
+    fn request_pairing_capability_roundtrips_and_updates_the_nearby_list() {
+        let mut new = advert(5000, &["192.168.1.5"]);
+        assert_eq!(
+            peer_from_info(&service_info(&new).unwrap())
+                .unwrap()
+                .pairing_protocol,
+            1
+        );
+        let old = new.clone();
+        new.pairing_protocol = 0;
+        assert!(!same_endpoint(&old, &new));
     }
 
     #[test]

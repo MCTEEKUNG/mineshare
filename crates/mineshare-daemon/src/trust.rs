@@ -39,6 +39,8 @@ pub struct TrustedPeer {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct TrustList {
     trusted: Vec<TrustedPeer>,
+    #[serde(default)]
+    selected_device_id: Option<String>,
 }
 
 static CACHED: Mutex<Option<TrustList>> = Mutex::new(None);
@@ -92,6 +94,39 @@ pub fn is_trusted(noise_static: &[u8]) -> bool {
         .any(|p| p.noise_static_hex == hex)
 }
 
+pub fn matches_identity(device_id: &str, noise_static: &[u8]) -> bool {
+    let key = encode_hex(noise_static);
+    list_trusted()
+        .iter()
+        .any(|peer| peer.device_id == device_id && peer.noise_static_hex == key)
+}
+
+fn selected(list: &TrustList) -> Option<String> {
+    list.selected_device_id
+        .clone()
+        .filter(|id| list.trusted.iter().any(|peer| &peer.device_id == id))
+        .or_else(|| (list.trusted.len() == 1).then(|| list.trusted[0].device_id.clone()))
+}
+pub fn selected_peer() -> Option<String> {
+    let mut g = CACHED.lock();
+    ensure_loaded(&mut g);
+    selected(g.as_ref().unwrap())
+}
+pub fn select_peer(device_id: &str) -> Result<()> {
+    let mut g = CACHED.lock();
+    ensure_loaded(&mut g);
+    let mut next = g.as_ref().unwrap().clone();
+    anyhow::ensure!(
+        next.trusted.iter().any(|peer| peer.device_id == device_id),
+        "computer is not paired"
+    );
+    if next.selected_device_id.as_deref() != Some(device_id) {
+        next.selected_device_id = Some(device_id.into());
+        persist_then_cache(&mut g, next, save)?;
+    }
+    Ok(())
+}
+
 /// Insert (or replace) a trusted peer. De-duplicated by `device_id`
 /// — a peer that re-issues their identity (lost the keypair, etc.)
 /// gets their entry replaced with the new pubkey when they pair
@@ -108,6 +143,7 @@ pub fn add_trusted(device_id: &str, display_name: &str, noise_static: &[u8]) -> 
         noise_static_hex: hex,
         paired_at: now_unix(),
     });
+    list.selected_device_id = Some(device_id.into());
     persist_then_cache(&mut g, list, save)?;
     tracing::info!(device_id, display_name, "trusted peer recorded");
     Ok(())
@@ -125,6 +161,9 @@ pub fn revoke(device_id: &str) -> Result<()> {
     let mut list = g.as_ref().unwrap().clone();
     let before = list.trusted.len();
     list.trusted.retain(|p| p.device_id != device_id);
+    if list.selected_device_id.as_deref() == Some(device_id) {
+        list.selected_device_id = None;
+    }
     if list.trusted.len() != before {
         persist_then_cache(&mut g, list, save)?;
         tracing::info!(device_id, "trusted peer revoked");
@@ -153,9 +192,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_single_peer_reconnects_but_multiple_peers_need_an_explicit_choice() {
+        let single: TrustList = serde_json::from_str(r#"{"trusted":[{"device_id":"a","display_name":"A","noise_static_hex":"key-a","paired_at":1}]}"#).unwrap();
+        assert_eq!(selected(&single).as_deref(), Some("a"));
+        let mut multiple = single;
+        multiple.trusted.push(TrustedPeer {
+            device_id: "b".into(),
+            display_name: "B".into(),
+            noise_static_hex: "key-b".into(),
+            paired_at: 2,
+        });
+        assert_eq!(selected(&multiple), None);
+        multiple.selected_device_id = Some("b".into());
+        assert_eq!(selected(&multiple).as_deref(), Some("b"));
+    }
+
+    #[test]
     fn failed_persistence_does_not_authorize_a_peer_in_memory() {
         let mut cached = Some(TrustList::default());
         let next = TrustList {
+            selected_device_id: Some("peer".into()),
             trusted: vec![TrustedPeer {
                 device_id: "peer".into(),
                 display_name: "peer".into(),

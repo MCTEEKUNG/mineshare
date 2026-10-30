@@ -79,7 +79,30 @@ jobs:
 
       - name: Build installers
         working-directory: ui
-        run: npm run tauri -- build --ci -- --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          # Force a fresh binary invocation so the effective flags are auditable,
+          # including workflow_dispatch runs that restore a fully warm cache.
+          touch src-tauri/src/main.rs
+          npm run tauri -- build --ci -- --locked -vv 2>&1 | tee ../release-build.log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify effective production compiler flags
+        run: python tools/performance/check-release-profile.py --log release-build.log --crate mineshare_app --symbols-dir ui/src-tauri/target/release
+
+      - name: Preserve matching debug symbols and compiler evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-mineshare-${{ matrix.label }}
+          path: |
+            ui/src-tauri/target/release/*.pdb
+            ui/src-tauri/target/release/*.dwp
+            release-build.log
+          if-no-files-found: error
 
       - name: Build unified Windows EXE bootstrapper
         if: runner.os == 'Windows'

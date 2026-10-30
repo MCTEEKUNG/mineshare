@@ -8,11 +8,13 @@
 //! The `main.rs` next door is a thin clap entry point that calls
 //! into [`runtime::run`] / [`collect::run`].
 
+pub mod audio_pipeline;
 pub mod audio_status;
 pub mod clipboard;
 pub mod collect;
 pub mod files;
 pub mod identity;
+pub mod input_pipeline;
 pub mod latency;
 pub mod layout;
 pub mod logs;
@@ -25,7 +27,7 @@ pub mod status;
 pub mod trust;
 
 use std::sync::OnceLock;
-pub const CONTROL_PROTOCOL: &str = "control-v2";
+pub const CONTROL_PROTOCOL: &str = "control-v3";
 
 pub fn compatible_control_build(version: &str) -> bool {
     version.rsplit(" · ").next() == Some(CONTROL_PROTOCOL)

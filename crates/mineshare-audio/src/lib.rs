@@ -25,8 +25,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+mod audio_thread_win;
 pub mod codec;
 pub mod cpal_mic;
+pub mod mic_pcm;
 pub mod playback;
 #[cfg(target_os = "windows")]
 mod process_loopback_win;
@@ -396,17 +399,47 @@ pub fn make_playback() -> anyhow::Result<Box<dyn AudioPlayback>> {
     Ok(Box::new(playback::CpalPlayback::new()?))
 }
 
-/// Bounded hand-off from a capture thread to the async runtime, plus a cheap
-/// demand probe. Capture backends release their hardware/COM resources when
-/// there is no connected peer or the user disabled that stream.
+/// Local capture timing is deliberately outside the serialized audio frame.
+/// Decoding a peer's AudioFrame therefore keeps the existing wire format.
+#[derive(Debug)]
+pub struct CapturedAudio {
+    pub frame: AudioFrame,
+    /// Timestamp at encoded-frame handoff, not the hardware capture clock.
+    pub captured_at: Instant,
+}
+
+impl std::ops::Deref for CapturedAudio {
+    type Target = AudioFrame;
+    fn deref(&self) -> &AudioFrame {
+        &self.frame
+    }
+}
+
+impl std::ops::DerefMut for CapturedAudio {
+    fn deref_mut(&mut self) -> &mut AudioFrame {
+        &mut self.frame
+    }
+}
+
 #[derive(Clone)]
+/// Bounded handoff to the runtime with a dynamic capture-demand probe.
 pub struct CaptureSink {
-    tx: tokio::sync::mpsc::Sender<AudioFrame>,
+    tx: tokio::sync::mpsc::Sender<CapturedAudio>,
     active: std::sync::Arc<dyn Fn() -> bool + Send + Sync + 'static>,
 }
 
+static SYSOUT_CAPTURE_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
+static MIC_CAPTURE_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+pub fn capture_queue_drops() -> (u64, u64) {
+    (
+        SYSOUT_CAPTURE_QUEUE_DROPS.load(Ordering::Relaxed),
+        MIC_CAPTURE_QUEUE_DROPS.load(Ordering::Relaxed),
+    )
+}
+
 impl CaptureSink {
-    pub fn new<F>(tx: tokio::sync::mpsc::Sender<AudioFrame>, active: F) -> Self
+    pub fn new<F>(tx: tokio::sync::mpsc::Sender<CapturedAudio>, active: F) -> Self
     where
         F: Fn() -> bool + Send + Sync + 'static,
     {
@@ -427,8 +460,19 @@ impl CaptureSink {
     /// Returns false only when the runtime receiver has closed. A full queue is
     /// an intentional lossy drop: stale real-time audio must not accumulate.
     pub fn send_lossy(&self, frame: AudioFrame) -> bool {
-        match self.tx.try_send(frame) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+        match self.tx.try_send(CapturedAudio {
+            frame,
+            captured_at: Instant::now(),
+        }) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(frame)) => {
+                match frame.stream {
+                    StreamKind::SysOut => &SYSOUT_CAPTURE_QUEUE_DROPS,
+                    StreamKind::Mic => &MIC_CAPTURE_QUEUE_DROPS,
+                }
+                .fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
         }
     }

@@ -370,7 +370,7 @@ fn run_demand_session(
     }
     let capture: IAudioCaptureClient =
         unsafe { client.GetService() }.context("get process-loopback IAudioCaptureClient")?;
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, StreamKind::SysOut)?;
     let mut pending = VecDeque::<f32>::with_capacity(FRAME_SAMPLES_INTERLEAVED * 2);
 
     unsafe { client.Start() }.context("start process-loopback capture")?;
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn exact_process_silence_never_reaches_opus() {
-        let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false).unwrap();
+        let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, StreamKind::SysOut).unwrap();
         let result =
             encode_process_frame(&mut encoder, &vec![0.0; crate::FRAME_SAMPLES_INTERLEAVED])
                 .unwrap();

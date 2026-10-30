@@ -23,7 +23,7 @@ describe("Ubuntu first-run setup", () => {
     await screen.findByRole("status");
     expect(screen.getByRole("status").textContent).toContain("sign out");
     expect(screen.getAllByText(/Configured · sign out/).length).toBe(3);
-    expect((screen.getByRole("button", {name: "Set up selected"}) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", {name: "Continue to workspace"}) as HTMLButtonElement).disabled).toBe(false);
   });
   it("does not install broker without Typeless or extensions on X11", () => {
     expect(recommended({...fresh, typeless: false, wayland: false})).toEqual({input: true, broker: false, pointer: false});
@@ -49,6 +49,24 @@ describe("Ubuntu first-run setup", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent(window, new Event("mineshare-linux-setup"));
     await screen.findByRole("dialog");
+    expect(invoke.mock.calls.some(([name]) => name === "configure_linux_setup")).toBe(false);
+  });
+  it("shows existing permissions as selected and lets an upgraded user continue without configuring again", async () => {
+    // The real Tee upgrade keeps all permissions, while Typeless compatibility
+    // needs the next ordered login to become active in the restarted process.
+    invoke.mockResolvedValue({...fresh, input_active: true, input_configured: true,
+      broker_configured: true, broker_active: false, extension_configured: true,
+      extension_active: true, pending_login: true});
+    render(<LinuxSetup/>);
+    await screen.findByRole("dialog");
+    for (const checkbox of screen.getAllByRole("checkbox") as HTMLInputElement[]) {
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(true);
+    }
+    const proceed = screen.getByRole("button", {name: "Continue to workspace"}) as HTMLButtonElement;
+    expect(proceed.disabled).toBe(false);
+    fireEvent.click(proceed);
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(invoke.mock.calls.some(([name]) => name === "configure_linux_setup")).toBe(false);
   });
   it("shows cancellation errors and rechecks partially applied state", async () => {

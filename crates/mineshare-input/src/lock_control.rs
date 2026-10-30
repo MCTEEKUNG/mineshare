@@ -129,6 +129,8 @@ fn publish_local(locked: bool, notify: bool, route: &Route) {
         tracing::info!(locked, "input lock toggled on controlled desktop");
         #[cfg(target_os = "windows")]
         super::windows::lock_feedback::show(locked);
+        #[cfg(target_os = "linux")]
+        super::preview_lock_effect(locked, super::current_lock_effect());
     }
     if notify {
         let epoch = route.peer_epoch;

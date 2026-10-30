@@ -35,11 +35,15 @@ use crate::{
 /// 200 ms. Generous enough to absorb network jitter, tight enough not
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
-/// Start playback only after 80 ms is buffered. This is isolated to the audio
-/// plane: mouse/keyboard packets retain their existing low-latency path. The
-/// previous 40 ms reserve was smaller than observed 50–60 ms SoundWire/USB
-/// scheduling stalls and produced zero-filled callbacks (audible crackle).
-const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 4;
+/// Three 20 ms frames reserve 60 ms against delivery jitter. A smaller 40 ms
+/// reserve previously underran during device scheduling stalls. Native audio
+/// acceptance, including quiet/sparse sounds, gates this intermediate setting.
+const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 3;
+/// A burst must not turn the 200 ms safety capacity into steady audio delay.
+/// Return to the 60 ms reserve once decoded audio exceeds 80 ms.
+/// A 120 ms plateau still added a device period in the real Wi-Fi measurement.
+const JITTER_MAX_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 4;
+
 /// Keep one ring-buffer's worth of ingress slack. Production logs showed the
 /// Windows playback worker occasionally being descheduled for 80–160 ms while
 /// the UDP receiver continued delivering a steady 50 frames/s. A four-frame
@@ -50,12 +54,30 @@ const PLAYBACK_QUEUE_CAPACITY: usize = 8;
 const PLAYBACK_HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
 const DEFAULT_DEVICE_PROBE_INTERVAL: Duration = Duration::from_millis(500);
-/// Two Opus frames at 48 kHz. A 40 ms device period leaves enough scheduler
-/// headroom when GPU-heavy WebView applications are active, while remaining
-/// below the jitter buffer's 80 ms startup target.
+/// MMCSS protects the decoder/callback threads, and device discovery runs on
+/// a separate worker. The 20 ms device request does not reduce the separate
+/// 80 ms PCM reserve used to absorb network delivery stalls.
+#[cfg(target_os = "windows")]
+const PLAYBACK_BUFFER_FRAMES: u32 = 960;
+#[cfg(not(target_os = "windows"))]
 const PLAYBACK_BUFFER_FRAMES: u32 = 1_920;
 
 static PLAYBACK_UNDERRUN_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static PLAYBACK_CATCHUP_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static PLAYBACK_EXPIRED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+fn queued_frame_expired(queued_at: Instant, built_at: Option<Instant>, now: Instant) -> bool {
+    // Device creation may take longer than one jitter reserve. Preserve the
+    // initial short cue, with a bounded cold-start grace; steady playback must
+    // not replay frames retained while the decoder was descheduled.
+    let active = built_at.is_some_and(|built| queued_at >= built);
+    let limit = if active {
+        Duration::from_millis(80)
+    } else {
+        Duration::from_millis(300)
+    };
+    now.saturating_duration_since(queued_at) > limit
+}
 
 fn effective_playback_idle(route_active: bool, elapsed: Duration) -> Duration {
     if route_active {
@@ -180,6 +202,7 @@ pub struct CpalPlayback {
 struct QueuedAudioFrame {
     session: PlaybackSession,
     frame: AudioFrame,
+    queued_at: Instant,
 }
 
 fn publish_current_session_frame(
@@ -196,6 +219,7 @@ fn publish_current_session_frame(
     match tx.try_send(QueuedAudioFrame {
         session: session.clone(),
         frame,
+        queued_at: Instant::now(),
     }) {
         Ok(()) => {
             session.note_accepted_frame();
@@ -397,6 +421,79 @@ impl Drop for PlaybackWorkerStatusGuard {
     }
 }
 
+/// Device discovery can block inside the OS audio service. Neither submitting
+/// a request nor reading its result may wait on the decoder thread.
+struct DefaultDeviceProbe {
+    requests: mpsc::SyncSender<()>,
+    results: mpsc::Receiver<Option<String>>,
+}
+
+#[cfg(target_os = "windows")]
+struct ProbeComApartment;
+
+#[cfg(target_os = "windows")]
+impl ProbeComApartment {
+    fn initialize() -> Result<Self> {
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .context("initialize default device probe COM apartment")?;
+        Ok(Self)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ProbeComApartment {
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+}
+
+impl DefaultDeviceProbe {
+    fn spawn<F>(mut query: F) -> Result<Self>
+    where
+        F: FnMut() -> Option<String> + Send + 'static,
+    {
+        let (requests, pending) = mpsc::sync_channel(1);
+        let (completed, results) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("audio-default-probe".into())
+            .spawn(move || {
+                #[cfg(target_os = "windows")]
+                let _com_apartment = match ProbeComApartment::initialize() {
+                    Ok(apartment) => apartment,
+                    Err(error) => {
+                        warn!(%error, "default audio endpoint probe COM unavailable");
+                        return;
+                    }
+                };
+                while pending.recv().is_ok() {
+                    let started = Instant::now();
+                    let current = query();
+                    if started.elapsed() >= Duration::from_millis(50) {
+                        info!(
+                            elapsed_ms = started.elapsed().as_millis(),
+                            "default audio endpoint probe delayed outside decoder"
+                        );
+                    }
+                    if completed.send(current).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("spawn default audio endpoint probe")?;
+        Ok(Self { requests, results })
+    }
+
+    fn request(&self) -> bool {
+        self.requests.try_send(()).is_ok()
+    }
+
+    fn poll(&self) -> Option<String> {
+        self.results.try_recv().ok().flatten()
+    }
+}
+
 fn run_playback_thread(
     rx: mpsc::Receiver<QueuedAudioFrame>,
     queue_dropped_frames: Arc<AtomicU64>,
@@ -406,6 +503,8 @@ fn run_playback_thread(
     session_active: Arc<AtomicBool>,
     status: BackendStatus,
 ) {
+    #[cfg(target_os = "windows")]
+    crate::audio_thread_win::enter();
     let mut decoder = match OpusDecoder::new() {
         Ok(d) => d,
         Err(e) => {
@@ -420,6 +519,8 @@ fn run_playback_thread(
     // arithmetic handles natural u32 wrap-around; the explicit session epoch
     // handles a peer process restart that begins its counter at zero.
     let mut sequence = PlaybackSequence::default();
+    #[cfg(target_os = "windows")]
+    let mut reported_mmcss_threads = (0, 0, 0);
     // The worker can start after begin_session(). Starting at the published
     // epoch would swallow that first transition and skip output prewarming.
     let mut observed_session_epoch = 0;
@@ -432,6 +533,13 @@ fn run_playback_thread(
     let mut last_version = crate::output_device_version();
     let mut next_build_attempt = Instant::now();
     let mut last_default_probe = Instant::now() - DEFAULT_DEVICE_PROBE_INTERVAL;
+    let default_probe = match DefaultDeviceProbe::spawn(crate::default_output_device_name) {
+        Ok(probe) => Some(probe),
+        Err(error) => {
+            warn!(%error, "default audio endpoint probing unavailable");
+            None
+        }
+    };
     const RETRY_BACKOFF: Duration = Duration::from_secs(3);
     let mut dropped_frames_since_warn: u64 = 0;
     let mut last_drop_warn = Instant::now();
@@ -510,19 +618,24 @@ fn run_playback_thread(
         // watchdog cannot detect that, so compare the active endpoint with the
         // current default at a low-frequency internal seam and rebuild when it
         // changes. Explicit device selections never follow this path.
-        let default_change = if crate::selected_output_device().is_none()
+        let follows_default = crate::selected_output_device().is_none();
+        if follows_default
+            && stream_ctx.is_some()
             && last_default_probe.elapsed() >= DEFAULT_DEVICE_PROBE_INTERVAL
         {
             last_default_probe = Instant::now();
-            stream_ctx.as_ref().and_then(|ctx| {
-                crate::default_output_device_name().and_then(|current| {
-                    default_device_changed(true, Some(&ctx.device_name), Some(&current))
+            if let Some(probe) = default_probe.as_ref() {
+                probe.request();
+            }
+        }
+        let default_change = default_probe.as_ref().and_then(|probe| {
+            probe.poll().and_then(|current| {
+                stream_ctx.as_ref().and_then(|ctx| {
+                    default_device_changed(follows_default, Some(&ctx.device_name), Some(&current))
                         .then(|| (ctx.device_name.clone(), current))
                 })
             })
-        } else {
-            None
-        };
+        });
 
         // (Re)build the stream when we need one:
         //   * a peer frame arrived while no stream exists, OR
@@ -661,6 +774,17 @@ fn run_playback_thread(
                         "cpal playback invalidated by new-session frame"
                     );
                 }
+                if queued_frame_expired(
+                    queued.queued_at,
+                    stream_ctx.as_ref().map(|ctx| ctx.built_at),
+                    Instant::now(),
+                ) {
+                    // Advance ordering even for intentionally discarded audio:
+                    // never rewind on late packets or recreate this backlog as PLC.
+                    sequence.accept(queued.frame.seq);
+                    PLAYBACK_EXPIRED_FRAMES.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 record_current_frame_demand(
                     stream_ctx.is_some(),
                     current_session_epoch,
@@ -695,14 +819,9 @@ fn run_playback_thread(
                     // this one. Cap the fill so a large gap (long stall,
                     // seq reset) doesn't blast a burst of synthetic
                     // frames into the ring.
-                    let lost = crate::codec::frames_lost(previous_seq, frame.seq).min(5);
-                    // Always reserve one complete frame for the real packet.
-                    // Concealment is useful only while the ring has room; PLC
-                    // must never evict current audio or amplify a catch-up
-                    // burst after the Tokio receiver was briefly delayed.
-                    let conceal_room = (ctx.producer.vacant_len() / FRAME_SAMPLES_INTERLEAVED)
-                        .saturating_sub(1) as u32;
-                    let conceal = lost.min(conceal_room);
+                    let lost = crate::codec::frames_lost(previous_seq, frame.seq);
+                    let conceal =
+                        concealment_frames(previous_seq, frame.seq, ctx.producer.occupied_len());
                     if frame.stream == StreamKind::Mic && lost == 1 && conceal == 1 {
                         // Single-frame voice gap: try to *recover* the
                         // missing frame from the in-band FEC carried by
@@ -799,6 +918,30 @@ fn run_playback_thread(
         }
 
         if last_health_report.elapsed() >= PLAYBACK_HEALTH_REPORT_INTERVAL {
+            #[cfg(target_os = "windows")]
+            {
+                let threads = crate::audio_thread_win::registered_threads();
+                if threads != reported_mmcss_threads {
+                    info!(
+                        threads = threads.0,
+                        pro_audio = threads.1,
+                        high_priority = threads.2,
+                        "playback MMCSS audio tasks"
+                    );
+                    reported_mmcss_threads = threads;
+                }
+            }
+            let catchup = PLAYBACK_CATCHUP_SAMPLES.swap(0, Ordering::Relaxed);
+            let expired = PLAYBACK_EXPIRED_FRAMES.swap(0, Ordering::Relaxed);
+            if expired > 0 {
+                info!(frames = expired, "cpal discarded expired ingress frames");
+            }
+            if catchup > 0 {
+                info!(
+                    samples = catchup,
+                    "cpal playback caught up after delivery burst"
+                );
+            }
             let samples = PLAYBACK_UNDERRUN_SAMPLES.swap(0, Ordering::Relaxed);
             if samples > 0 {
                 debug!(samples, "cpal playback underrun summary");
@@ -830,6 +973,7 @@ fn run_playback_thread(
 /// only after post-build epoch validation and retained for its drop semantics.
 struct StreamCtx {
     stream: cpal::Stream,
+    built_at: Instant,
     device_name: String,
     producer: ringbuf::HeapProd<f32>,
     /// Bumped by the cpal data callback every time the device pulls
@@ -850,7 +994,11 @@ fn build_stream(stream_epoch: u64, session_epoch: Arc<AtomicU64>) -> Result<Stre
     let device_name = device.name().unwrap_or_else(|_| "?".to_string());
 
     let config = pick_config(&device)?;
-    let stream_config = playback_stream_config(&config);
+    #[cfg(target_os = "windows")]
+    let low_latency_available = crate::audio_thread_win::enter();
+    #[cfg(not(target_os = "windows"))]
+    let low_latency_available = false;
+    let stream_config = playback_stream_config(&config, low_latency_available);
     info!(
         device = %device_name,
         sample_rate = config.sample_rate().0,
@@ -880,8 +1028,10 @@ fn build_stream(stream_epoch: u64, session_epoch: Arc<AtomicU64>) -> Result<Stre
         SampleFormat::F32 => device.build_output_stream(
             &stream_config,
             {
-                let mut playback_started = false;
+                let mut playback_started = PlayoutState::default();
                 move |out: &mut [f32], _| {
+                    #[cfg(target_os = "windows")]
+                    crate::audio_thread_win::enter();
                     ticks_f32.fetch_add(1, Ordering::Relaxed);
                     fill_callback_for_epoch(
                         out,
@@ -897,10 +1047,12 @@ fn build_stream(stream_epoch: u64, session_epoch: Arc<AtomicU64>) -> Result<Stre
         ),
         SampleFormat::I16 => {
             let mut tmp = vec![0f32; 0];
-            let mut playback_started = false;
+            let mut playback_started = PlayoutState::default();
             device.build_output_stream(
                 &stream_config,
                 move |out: &mut [i16], _| {
+                    #[cfg(target_os = "windows")]
+                    crate::audio_thread_win::enter();
                     ticks_i16.fetch_add(1, Ordering::Relaxed);
                     tmp.resize(out.len(), 0.0);
                     fill_callback_for_epoch(
@@ -923,6 +1075,7 @@ fn build_stream(stream_epoch: u64, session_epoch: Arc<AtomicU64>) -> Result<Stre
     .context("build cpal output stream")?;
     Ok(StreamCtx {
         stream,
+        built_at: Instant::now(),
         device_name,
         producer,
         callback_ticks,
@@ -930,28 +1083,72 @@ fn build_stream(stream_epoch: u64, session_epoch: Arc<AtomicU64>) -> Result<Stre
     })
 }
 
-fn playback_stream_config(config: &SupportedStreamConfig) -> StreamConfig {
+fn playback_stream_config(
+    config: &SupportedStreamConfig,
+    low_latency_available: bool,
+) -> StreamConfig {
     let mut stream_config = config.config();
+    let frames = if low_latency_available {
+        PLAYBACK_BUFFER_FRAMES
+    } else {
+        1_920
+    };
     stream_config.buffer_size = match *config.buffer_size() {
-        SupportedBufferSize::Range { min, max } => {
-            BufferSize::Fixed(PLAYBACK_BUFFER_FRAMES.clamp(min, max))
-        }
+        SupportedBufferSize::Range { min, max } => BufferSize::Fixed(frames.clamp(min, max)),
         SupportedBufferSize::Unknown => BufferSize::Default,
     };
     stream_config
 }
 
-fn fill_callback(
+#[derive(Default)]
+struct PlayoutState {
+    started: bool,
+    buffering_since: Option<Instant>,
+}
+
+fn fill_callback(out: &mut [f32], consumer: &mut ringbuf::HeapCons<f32>, state: &mut PlayoutState) {
+    fill_callback_at(out, consumer, state, Instant::now());
+}
+
+fn fill_callback_at(
     out: &mut [f32],
     consumer: &mut ringbuf::HeapCons<f32>,
-    playback_started: &mut bool,
+    state: &mut PlayoutState,
+    now: Instant,
 ) {
-    if !*playback_started {
-        if consumer.occupied_len() < JITTER_TARGET_SAMPLES {
+    // Only the consumer advances the read cursor: the producer remains SPSC.
+    // Dropping oldest PCM here keeps new Wi-Fi bursts close to live instead
+    // of rejecting newer audio while a full ring slowly plays old samples.
+    let buffered = consumer.occupied_len();
+    let target = JITTER_TARGET_SAMPLES.max(out.len());
+    // A callback may legitimately consume 40 ms at once. Keep one callback
+    // quantum above the target so a normal steady cycle is not called a burst.
+    if buffered > JITTER_MAX_SAMPLES.max(target + out.len()) {
+        let skip = (buffered - target) / CHANNELS as usize * CHANNELS as usize;
+        let skipped = consumer.skip(skip);
+        PLAYBACK_CATCHUP_SAMPLES.fetch_add(skipped as u64, Ordering::Relaxed);
+    }
+    if consumer.is_empty() {
+        out.fill(0.0);
+        if state.started {
+            PLAYBACK_UNDERRUN_SAMPLES.fetch_add(out.len() as u64, Ordering::Relaxed);
+        }
+        *state = PlayoutState::default();
+        return;
+    }
+    if !state.started {
+        // DTX/sparse audio may contain less than 60 ms in total. Bound the
+        // wait in wall time instead of retaining a short sound until the next
+        // sound arrives. Continuous audio builds the normal 60 ms reserve.
+        let since = state.buffering_since.get_or_insert(now);
+        if consumer.occupied_len() < JITTER_TARGET_SAMPLES
+            && now.saturating_duration_since(*since) < Duration::from_millis(60)
+        {
             out.fill(0.0);
             return;
         }
-        *playback_started = true;
+        state.started = true;
+        state.buffering_since = None;
     }
     let popped = consumer.pop_slice(out);
     for s in &mut out[popped..] {
@@ -959,23 +1156,36 @@ fn fill_callback(
     }
     if popped < out.len() {
         PLAYBACK_UNDERRUN_SAMPLES.fetch_add((out.len() - popped) as u64, Ordering::Relaxed);
-        *playback_started = false;
+        *state = PlayoutState::default();
     }
 }
 
 fn fill_callback_for_epoch(
     out: &mut [f32],
     consumer: &mut ringbuf::HeapCons<f32>,
-    playback_started: &mut bool,
+    state: &mut PlayoutState,
     stream_epoch: u64,
     session_epoch: &AtomicU64,
 ) {
     if session_epoch.load(Ordering::Acquire) != stream_epoch {
         out.fill(0.0);
-        *playback_started = false;
+        *state = PlayoutState::default();
         return;
     }
-    fill_callback(out, consumer, playback_started);
+    fill_callback(out, consumer, state);
+}
+
+/// Recover small losses only while buffered audio can still preserve continuity.
+/// Long Wi-Fi stalls have already elapsed in wall time; replaying up to 100 ms
+/// of PLC after that stall would put current video audio further behind.
+fn concealment_frames(previous: Option<u32>, seq: u32, buffered: usize) -> u32 {
+    let lost = crate::codec::frames_lost(previous, seq);
+    if buffered == 0 || lost > 2 {
+        return 0;
+    }
+    let room = (JITTER_MAX_SAMPLES.saturating_sub(buffered) / FRAME_SAMPLES_INTERLEAVED)
+        .saturating_sub(1) as u32;
+    lost.min(room)
 }
 
 fn push_samples(producer: &mut ringbuf::HeapProd<f32>, samples: &[f32], dropped_samples: &mut u64) {
@@ -1039,6 +1249,53 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_default_device_query_does_not_block_decoder_or_queue_requests() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut first = true;
+        let probe = DefaultDeviceProbe::spawn(move || {
+            if first {
+                first = false;
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+            Some("new endpoint".to_string())
+        })
+        .unwrap();
+        assert!(probe.request());
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The injected OS query is still blocked. The audio worker must be
+        // able to poll and continue decoding, with at most one queued query.
+        assert_eq!(probe.poll(), None);
+        assert!(probe.request());
+        assert!(!probe.request());
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            probe.results.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some("new endpoint".to_string())
+        );
+    }
+
+    #[test]
+    fn default_device_probe_shutdown_does_not_wait_for_os_query() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let probe = DefaultDeviceProbe::spawn(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            finished_tx.send(()).unwrap();
+            Some("endpoint".to_string())
+        })
+        .unwrap();
+        assert!(probe.request());
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(probe);
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
 
     #[test]
     fn session_started_before_worker_is_still_a_prewarm_transition() {
@@ -1129,7 +1386,7 @@ mod tests {
             JITTER_TARGET_SAMPLES
         );
         let mut out = vec![f32::NAN; FRAME_SAMPLES_INTERLEAVED];
-        let mut playback_started = false;
+        let mut playback_started = PlayoutState::default();
         let session_epoch = AtomicU64::new(8);
 
         fill_callback_for_epoch(
@@ -1270,6 +1527,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(PLAYBACK_QUEUE_CAPACITY);
         tx.send(QueuedAudioFrame {
             session: stale_session,
+            queued_at: Instant::now(),
             frame: AudioFrame {
                 stream: StreamKind::SysOut,
                 seq: 1,
@@ -1493,7 +1751,7 @@ mod tests {
 
     #[test]
     fn new_session_resets_opus_predictive_history() {
-        let mut encoder = OpusEncoder::new(96_000, false).unwrap();
+        let mut encoder = OpusEncoder::new(96_000, StreamKind::SysOut).unwrap();
         let tone = (0..FRAME_SAMPLES_INTERLEAVED)
             .map(|sample| (std::f32::consts::TAU * 1_000.0 * sample as f32 / 48_000.0).sin())
             .collect::<Vec<_>>();
@@ -1516,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_buffer_uses_forty_ms_when_supported() {
+    fn playback_buffer_uses_the_platform_period_when_supported() {
         let supported = SupportedStreamConfig::new(
             2,
             cpal::SampleRate(48_000),
@@ -1527,8 +1785,12 @@ mod tests {
             SampleFormat::F32,
         );
         assert_eq!(
-            playback_stream_config(&supported).buffer_size,
-            BufferSize::Fixed(1_920)
+            playback_stream_config(&supported, true).buffer_size,
+            BufferSize::Fixed(if cfg!(target_os = "windows") {
+                960
+            } else {
+                1_920
+            })
         );
     }
 
@@ -1544,8 +1806,25 @@ mod tests {
             SampleFormat::F32,
         );
         assert_eq!(
-            playback_stream_config(&supported).buffer_size,
+            playback_stream_config(&supported, true).buffer_size,
             BufferSize::Fixed(2_048)
+        );
+    }
+
+    #[test]
+    fn playback_keeps_the_forty_ms_device_cushion_without_audio_scheduling() {
+        let supported = SupportedStreamConfig::new(
+            2,
+            cpal::SampleRate(48_000),
+            SupportedBufferSize::Range {
+                min: 128,
+                max: 2048,
+            },
+            SampleFormat::F32,
+        );
+        assert_eq!(
+            playback_stream_config(&supported, false).buffer_size,
+            BufferSize::Fixed(1920)
         );
     }
 
@@ -1582,6 +1861,170 @@ mod tests {
     }
 
     #[test]
+    fn concealment_does_not_replay_elapsed_wifi_outages() {
+        assert_eq!(concealment_frames(Some(1), 10, 0), 0);
+        assert_eq!(
+            concealment_frames(Some(1), 10, FRAME_SAMPLES_INTERLEAVED * 2),
+            0
+        );
+        assert_eq!(
+            concealment_frames(Some(1), 3, FRAME_SAMPLES_INTERLEAVED * 2),
+            1
+        );
+        assert_eq!(
+            concealment_frames(Some(1), 4, FRAME_SAMPLES_INTERLEAVED * 5),
+            0
+        );
+    }
+
+    #[test]
+    fn catchup_preserves_stereo_alignment_and_normal_reserve() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let stereo: Vec<_> = (0..RING_CAPACITY / 2).flat_map(|_| [0.25, -0.5]).collect();
+        producer.push_slice(&stereo);
+        let mut started = PlayoutState {
+            started: true,
+            buffering_since: None,
+        };
+        let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+        fill_callback(&mut out, &mut consumer, &mut started);
+        assert!(out.chunks_exact(2).all(|pair| pair == [0.25, -0.5]));
+        assert_eq!(consumer.occupied_len(), JITTER_TARGET_SAMPLES - out.len());
+    }
+
+    #[test]
+    fn empty_audio_resets_the_short_sound_deadline() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let now = Instant::now();
+        let mut state = PlayoutState {
+            started: false,
+            buffering_since: Some(now - Duration::from_secs(1)),
+        };
+        let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED * 2];
+        fill_callback_at(&mut out, &mut consumer, &mut state, now);
+        producer.push_slice(&vec![0.25; out.len()]);
+        fill_callback_at(&mut out, &mut consumer, &mut state, now);
+        assert!(out.iter().all(|&sample| sample == 0.0));
+        fill_callback_at(
+            &mut out,
+            &mut consumer,
+            &mut state,
+            now + Duration::from_millis(60),
+        );
+        assert!(out.iter().all(|&sample| sample == 0.25));
+    }
+
+    #[test]
+    fn a_short_sound_does_not_wait_for_the_next_sound_to_start_playing() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        producer.push_slice(&vec![0.25; FRAME_SAMPLES_INTERLEAVED * 2]);
+        let mut started = PlayoutState::default();
+        let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED * 2];
+        let now = Instant::now();
+        fill_callback_at(&mut out, &mut consumer, &mut started, now);
+        assert!(out.iter().all(|&sample| sample == 0.0));
+        fill_callback_at(
+            &mut out,
+            &mut consumer,
+            &mut started,
+            now + Duration::from_millis(60),
+        );
+        assert!(
+            out.iter().all(|&sample| sample == 0.25),
+            "40 ms sound is still waiting after the jitter reserve's 60 ms deadline"
+        );
+    }
+
+    #[test]
+    fn normal_forty_ms_callbacks_do_not_skip_audio_at_the_high_water_mark() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let mut dropped = 0;
+        let mut next_frame = 0;
+        let mut enqueue = |producer: &mut ringbuf::HeapProd<f32>, count: usize| {
+            for _ in 0..count {
+                push_samples(
+                    producer,
+                    &vec![next_frame as f32; FRAME_SAMPLES_INTERLEAVED],
+                    &mut dropped,
+                );
+                next_frame += 1;
+            }
+        };
+        enqueue(&mut producer, 5);
+        let mut started = PlayoutState {
+            started: true,
+            buffering_since: None,
+        };
+        for callback in 0..50 {
+            let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED * 2];
+            fill_callback(&mut out, &mut consumer, &mut started);
+            assert!(
+                out[..FRAME_SAMPLES_INTERLEAVED]
+                    .iter()
+                    .all(|&v| v == (callback * 2) as f32)
+            );
+            assert!(
+                out[FRAME_SAMPLES_INTERLEAVED..]
+                    .iter()
+                    .all(|&v| v == (callback * 2 + 1) as f32)
+            );
+            enqueue(&mut producer, 2);
+        }
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn a_six_frame_delivery_burst_returns_to_the_normal_reserve() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let mut dropped = 0;
+        for frame in 0..6 {
+            push_samples(
+                &mut producer,
+                &vec![frame as f32; FRAME_SAMPLES_INTERLEAVED],
+                &mut dropped,
+            );
+        }
+        let mut started = PlayoutState {
+            started: true,
+            buffering_since: None,
+        };
+        let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED * 2];
+        fill_callback(&mut out, &mut consumer, &mut started);
+        let audible_age_ms = (5.0 - out[0]) * 20.0;
+        assert!(
+            audible_age_ms <= 80.0,
+            "moderate Wi-Fi burst left {audible_age_ms} ms of queued age"
+        );
+    }
+
+    #[test]
+    fn wifi_delivery_burst_does_not_keep_playing_old_audio() {
+        // 200 ms of packets can arrive together after a Wi-Fi scheduling stall.
+        // Samples carry capture-frame markers, so this checks audible age on
+        // the real producer -> device callback path, without an audio device.
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let mut dropped = 0;
+        for frame in 0..10 {
+            push_samples(
+                &mut producer,
+                &vec![frame as f32; FRAME_SAMPLES_INTERLEAVED],
+                &mut dropped,
+            );
+        }
+        let mut started = PlayoutState {
+            started: true,
+            buffering_since: None,
+        };
+        let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+        fill_callback(&mut out, &mut consumer, &mut started);
+        let audible_age_ms = (9.0 - out[0]) * 20.0;
+        assert!(
+            audible_age_ms <= 100.0,
+            "Wi-Fi catch-up audio is {audible_age_ms} ms behind the newest received frame"
+        );
+    }
+
+    #[test]
     fn jitter_reserve_survives_a_sixty_millisecond_delivery_gap() {
         // SoundWire/USB drivers can delay the decoder thread for 50–60 ms
         // without reporting a device error. Once playback has started, the
@@ -1592,7 +2035,7 @@ mod tests {
         let tone = vec![0.25; JITTER_TARGET_SAMPLES];
         assert_eq!(producer.push_slice(&tone), tone.len());
 
-        let mut playback_started = false;
+        let mut playback_started = PlayoutState::default();
         let callback_samples = SAMPLE_RATE as usize / 100 * CHANNELS as usize; // 10 ms
         for callback in 0..6 {
             let mut out = vec![f32::NAN; callback_samples];
@@ -1602,6 +2045,56 @@ mod tests {
                 "callback {callback} underruns before a 60 ms scheduling gap ends"
             );
         }
+    }
+
+    #[test]
+    fn decoder_stalls_expire_old_ingress_but_not_normal_delivery() {
+        let queued = Instant::now();
+        let built = queued - Duration::from_secs(1);
+        for delay in [20, 50] {
+            assert!(!super::queued_frame_expired(
+                queued,
+                Some(built),
+                queued + Duration::from_millis(delay)
+            ));
+        }
+        for delay in [100, 160] {
+            assert!(super::queued_frame_expired(
+                queued,
+                Some(built),
+                queued + Duration::from_millis(delay)
+            ));
+        }
+    }
+
+    #[test]
+    fn cold_device_creation_preserves_the_first_short_sound_with_a_finite_grace() {
+        let queued = Instant::now();
+        let ready = queued + Duration::from_millis(160);
+        assert!(!super::queued_frame_expired(queued, Some(ready), ready));
+        assert!(super::queued_frame_expired(
+            queued,
+            Some(ready),
+            queued + Duration::from_millis(301)
+        ));
+        assert!(super::queued_frame_expired(
+            queued,
+            None,
+            queued + Duration::from_millis(301)
+        ));
+    }
+
+    #[test]
+    fn expired_frames_advance_ordering_without_concealing_the_discarded_backlog() {
+        let mut sequence = super::PlaybackSequence::default();
+        assert!(sequence.accept(10));
+        assert!(sequence.accept(11)); // expired; advance without decoding
+        assert!(sequence.accept(12)); // expired
+        assert!(!sequence.accept(9)); // late UDP cannot rewind after expiry
+        assert_eq!(
+            super::concealment_frames(sequence.last(), 13, FRAME_SAMPLES_INTERLEAVED),
+            0
+        );
     }
 
     #[test]

@@ -43,6 +43,13 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check GUI and CLI production profiles
+        run: python tools/performance/check-release-profile.py
+
       - name: Linux installer lifecycle tests
         if: runner.os == 'Linux'
         run: |

@@ -32,16 +32,30 @@ has been published after acquisition; two autostart entries are serialized by
 flock. A conflict times out visibly rather than silently launching two competing
 exclusive readers. It does not terminate or suspend an already-running Typeless.
 
+On GNOME/systemd, setup also installs the per-user drop-in
+`app-typeless@autostart.service.d/50-mineshare-order.conf`. Its negated
+`ConditionPathExists` skips the independent Typeless login unit while the broker
+opt-in marker exists. Typeless can remove its own user desktop override, exposing
+the system-wide desktop entry again; relying on that override alone caused the
+2026-10-27 regression. The separate unit guard survives that removal. It does not
+block manual Typeless launches or change vendor files. Validate the condition
+without quotes around the path: this systemd condition treats quotes literally.
+
 Limitations requiring acceptance testing: physical hotplug is not rediscovered by
 the existing capture backend; replugged devices require a new ordered login.
 Virtual keyboards/remappers are excluded in broker mode. Bluetooth UHID devices
 may be excluded by the physical-only filter. If MineShare crashes, the kernel
 releases hardware grabs, but Typeless re-acquisition behavior must be checked.
 This is not yet certified for secure-login screens or Wayland session-lock UIs.
+Quitting/restarting MineShare while Typeless is already open can also release
+first ownership; the login guard does not implement a persistent broker process.
 
 Rollback: remove `~/.config/MineShare/keyboard-broker.enabled`, restore the two
 autostart entries from the printed backup folder (remove typeless.desktop if it
 did not exist before), and log out/in. Do not run the old and new capture at once.
+Also remove the MineShare-owned `50-mineshare-order.conf` user drop-in and run
+`systemctl --user daemon-reload`. Removing the broker marker already makes its
+condition allow normal Typeless login startup.
 
 Acceptance, with Typeless open on both machines: PC physical mouse crosses to
 Laptop, PC Right Alt activates Laptop only; Super / Win+Shift+S work on Laptop;

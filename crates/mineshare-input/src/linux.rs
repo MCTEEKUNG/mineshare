@@ -63,9 +63,15 @@ const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+mod capture_start;
 mod keyboard_broker;
 mod keyboard_routes;
 mod pointer;
+mod touchpad;
+
+pub(super) fn touchpad_capabilities() -> u32 {
+    touchpad::capabilities()
+}
 
 #[cfg(test)]
 mod edge_tests {
@@ -764,29 +770,23 @@ impl InputCapture for EvdevCapture {
         // doesn't strand pending motion in the coalescer. Idempotent —
         // safe to call across reconnects.
         start_flush_watchdog(sink.clone());
-        // Acquire all physical keyboards synchronously before publishing readiness.
-        // On any failure the prepared devices drop and release their grabs.
+        // Acquire the complete keyboard group before publishing readiness.
+        // A keyboard conflict releases its partial grabs and leaves mice usable.
         let broker_enabled = keyboard_broker::enabled();
         if broker_enabled {
             keyboard_broker::clear_readiness();
         }
-        let mut prepared = Vec::new();
-        let mut keyboard_count = 0;
-        for (path, mut device) in self.devices.drain(..) {
-            let broker = if broker_enabled && !is_pointer_device(&device) {
-                let broker = keyboard_broker::Broker::prepare(&mut device)
-                    .with_context(|| format!("prepare keyboard broker for {}", path.display()))?;
-                keyboard_count += 1;
-                Some(broker)
-            } else {
-                None
-            };
-            prepared.push((path, device, broker));
+        let prepared = capture_start::prepare(
+            self.devices.drain(..).collect(),
+            broker_enabled,
+            is_pointer_device,
+            keyboard_broker::Broker::prepare,
+        )?;
+        let keyboard_count = prepared.keyboard_count;
+        if let Some(error) = prepared.broker_error {
+            warn!(error = %format!("{error:#}"), "keyboard broker unavailable; skipping keyboard capture");
         }
-        if broker_enabled && keyboard_count == 0 {
-            anyhow::bail!("keyboard broker found no physical keyboard; Typeless startup must wait");
-        }
-        for (path, device, broker) in prepared {
+        for (path, device, broker) in prepared.devices {
             let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
@@ -801,7 +801,7 @@ impl InputCapture for EvdevCapture {
                 .spawn(move || pump_device(path, device, is_pointer, broker, sink))
                 .context("spawn evdev thread")?;
         }
-        if broker_enabled {
+        if broker_enabled && keyboard_count > 0 {
             keyboard_broker::ready(keyboard_count)?;
             info!(
                 keyboard_count,
@@ -1403,6 +1403,8 @@ enum HeldKey {
 pub struct UinputInject {
     mouse: parking_lot::Mutex<VirtualDevice>,
     keyboard: parking_lot::Mutex<VirtualDevice>,
+    touchpad: parking_lot::Mutex<Option<touchpad::Touchpad>>,
+    scroll_residue: parking_lot::Mutex<[f32; 2]>,
     /// Set of codes the peer has injected `down` without a matching
     /// `up`. Maintained per inject call; drained on
     /// `release_all_held` at session teardown.
@@ -1456,6 +1458,17 @@ impl UinputInject {
         Ok(Self {
             mouse: parking_lot::Mutex::new(mouse),
             keyboard: parking_lot::Mutex::new(keyboard),
+            touchpad: parking_lot::Mutex::new(match touchpad::Touchpad::new() {
+                Ok(device) => {
+                    info!("uinput virtual touchpad ready");
+                    Some(device)
+                }
+                Err(error) => {
+                    warn!(%error, "virtual touchpad unavailable; using wheel fallback");
+                    None
+                }
+            }),
+            scroll_residue: parking_lot::Mutex::new([0.0; 2]),
             held: parking_lot::Mutex::new(HashSet::new()),
         })
     }
@@ -1531,9 +1544,15 @@ impl InputInject for UinputInject {
     }
 
     fn release_all_held(&self) -> Result<()> {
+        *self.scroll_residue.lock() = [0.0; 2];
+        let touchpad_result = self
+            .touchpad
+            .lock()
+            .as_mut()
+            .map_or(Ok(()), |pad| pad.release());
         let drained: Vec<HeldKey> = self.held.lock().drain().collect();
         if drained.is_empty() {
-            return Ok(());
+            return touchpad_result;
         }
         let count = drained.len();
         for h in drained {
@@ -1553,23 +1572,26 @@ impl InputInject for UinputInject {
             count,
             "released stale held keys at session end (preventing stuck-key after peer disconnect)"
         );
-        Ok(())
+        touchpad_result
     }
 
     fn scroll(&self, dx: f32, dy: f32) -> Result<()> {
+        let mut residue = self.scroll_residue.lock();
+        let dx = touchpad::scroll_step(dx, &mut residue[0]);
+        let dy = touchpad::scroll_step(dy, &mut residue[1]);
         let mut events = Vec::new();
-        if dy != 0.0 {
+        if dy != 0 {
             events.push(evdev::InputEvent::new(
                 EventType::RELATIVE.0,
                 RelativeAxisCode::REL_WHEEL.0,
-                dy.round() as i32,
+                dy,
             ));
         }
-        if dx != 0.0 {
+        if dx != 0 {
             events.push(evdev::InputEvent::new(
                 EventType::RELATIVE.0,
                 RelativeAxisCode::REL_HWHEEL.0,
-                dx.round() as i32,
+                dx,
             ));
         }
         if !events.is_empty() {
@@ -1577,4 +1599,14 @@ impl InputInject for UinputInject {
         }
         Ok(())
     }
+
+    fn touchpad(&self, event: super::TouchpadEvent) -> Result<()> {
+        self.touchpad
+            .lock()
+            .as_mut()
+            .context("Linux touchpad receiver unavailable")?
+            .inject(event)
+    }
 }
+
+pub(crate) mod lock_feedback;

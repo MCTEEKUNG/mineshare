@@ -7,7 +7,8 @@
   <a href="#the-desk-workflow">See the workflow</a> ·
   <a href="#what-it-does">Explore features</a> ·
   <a href="#install">Set up MineShare</a> ·
-  <a href="docs/ubuntu-readiness.md">Ubuntu support</a>
+  <a href="docs/ubuntu-readiness.md">Ubuntu support</a> ·
+  <a href="Design.md">Design guideline</a>
   <br /><br />
 
   <img alt="Platforms: Windows 11 and Ubuntu" src="https://img.shields.io/badge/Windows_11_+_Ubuntu-LAN_bridge-bd9653?style=flat-square" />
@@ -24,7 +25,17 @@
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
 
-**Development snapshot:** `0.0.14` · resilient Windows keyboard capture and file-clipboard replay prevention. See [release notes](docs/releases/0.0.14.md). Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Check the release tag when downloading; development changes are not necessarily published yet.
+**Development snapshot:** `0.0.16` · request-based pairing (`control-v3`), connection controls, microphone continuity fixes, and bounded audio/input queues. See [release notes](docs/releases/0.0.16.md) and [connection controls](docs/connection-controls.md). Both computers need a compatible build. Development changes are not necessarily published as installers.
+
+### Performance work: current status
+
+Round A was validated on Windows ↔ Windows and includes microphone sample continuity fixes and production build/symbol checks. The GUI retains its tested release profile; a ThinLTO candidate was rejected after audio quality testing.
+
+Round B adds bounded, age-limited audio queues, fair scheduling between input and audio, safer pointer coalescing, and input overload recovery. The latest recorded Rust verification passed **275 tests**, with **14 ignored**; Clippy and the production installer checks also passed. These checks establish code behavior, not measured physical input latency.
+
+**Round B is awaiting installation and hardware validation.** The all-users Windows installer requires administrator confirmation (Error 1925). Both test computers still run the Round A build. Before/after audio results and physical mouse/keyboard acceptance in both directions remain pending, so no Round B latency improvement is claimed yet. See the [performance roadmap](docs/performance-roadmap-2026-10-27.md) and [measurement tools](tools/performance/README.md).
+
+Ubuntu Typeless coexistence remains opt-in and awaits post-login physical acceptance. See [setup and limitations](docs/linux-typeless-keyboard-broker.md).
 
 ---
 
@@ -59,6 +70,14 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 | 📊 **Latency telemetry** | Round-trip Ping/Pong every 500 ms with rolling histogram in the GUI. |
 
 **Non-goals:** macOS, internet/NAT traversal, video mirroring.
+
+MineShare connects one peer at a time. On **Home**, use **Choose a computer** to
+see devices on the LAN, select one, and confirm **Send request**. The other
+computer must accept before a first-time PIN exchange begins. Discovery never
+pairs new computers automatically. Your selected paired computer reconnects
+after an outage; **Disconnect & pause** blocks reconnection until you resume.
+Both computers need the request-based `control-v3` build.
+See [connection controls](docs/connection-controls.md).
 
 ---
 

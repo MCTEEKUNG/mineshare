@@ -10,20 +10,14 @@
 //! `get_status` on a timer.
 
 use anyhow::Result;
+use mineshare_daemon::runtime;
 use mineshare_daemon::status::{StatusSnapshot, snapshot};
-use mineshare_daemon::{logs, runtime};
 use tracing::error;
 
-/// Bootstraps logging and spawns the daemon runtime as a background
+/// Spawns the daemon runtime as a background
 /// task. Returns immediately so the UI window opens without
 /// blocking on the long-running runtime future.
 pub fn bootstrap_runtime() -> Result<()> {
-    // Logs go to the same `%APPDATA%\MineShare\logs\` (Win) /
-    // `~/.config/MineShare/logs/` (Linux) directory the standalone
-    // daemon writes to — same `logs::init` does the right thing on
-    // both.
-    let _ = logs::init();
-
     tauri::async_runtime::spawn(async move {
         let capture = std::env::var_os("MINESHARE_DISABLE_CAPTURE").is_none();
         let audio = std::env::var_os("MINESHARE_DISABLE_AUDIO").is_none();

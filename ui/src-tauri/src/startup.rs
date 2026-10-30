@@ -67,7 +67,17 @@ if($task){
  if($task.Actions.Count -ne 1 -or $task.Actions[0].Execute.Trim('"') -ne $exe){throw 'Startup task uses another installation. Keep one MineShare installation.'}
  if($change -ne 'read'){
   if($run -and $run -ne $expected){throw 'Another MineShare startup command exists; it was not changed.'}
-  if($change -eq 'on'){Enable-ScheduledTask MineShareLaunch | Out-Null}else{Disable-ScheduledTask MineShareLaunch | Out-Null}
+  if($change -eq 'on'){
+   $arguments=[string]$task.Actions[0].Arguments
+   if($arguments.Trim() -notin @('', '--mineshare-autostart')){throw 'Startup task has custom arguments; they were not changed.'}
+   $task.Actions[0].Arguments='--mineshare-autostart'
+   # The app launcher owns the retry budget; an OS retry would multiply it.
+   $task.Settings.RestartCount=0
+   $task.Settings.RestartInterval=$null
+   $task.Settings.StartWhenAvailable=$true
+   Set-ScheduledTask -TaskName MineShareLaunch -Action $task.Actions -Settings $task.Settings | Out-Null
+   Enable-ScheduledTask MineShareLaunch | Out-Null
+  }else{Disable-ScheduledTask MineShareLaunch | Out-Null}
   if($run){Remove-ItemProperty $key -Name MineShare; $run=$null}
  }
  $enabled=(Get-ScheduledTask MineShareLaunch).Settings.Enabled -or [bool]$run
@@ -75,10 +85,10 @@ if($task){
  if($run -and $run -ne $expected){throw 'Another MineShare startup command exists; it was not changed.'}
  if($change -eq 'on'){
   $user=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $action=New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
+  $action=New-ScheduledTaskAction -Execute $exe -Argument '--mineshare-autostart' -WorkingDirectory (Split-Path $exe)
   $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user
   $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-  $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+  $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
   Register-ScheduledTask -TaskName MineShareLaunch -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
   if($run){Remove-ItemProperty $key -Name MineShare}
   'enabled'; exit 0
@@ -243,6 +253,96 @@ fn toggle_entry(entry: &str, enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_enabling_uses_guard_without_multiplying_retry_budget() {
+        use std::os::windows::process::CommandExt;
+        let fixture = r#"
+$script:originalSettings=[pscustomobject]@{Enabled=$false;RestartCount=3;RestartInterval='PT1M';StartWhenAvailable=$false;DisallowStartIfOnBatteries=$false;ExecutionTimeLimit='PT0S'}
+$script:task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute=$env:MINESHARE_STARTUP_EXE;Arguments=$env:MINESHARE_FIXTURE_ARGS;WorkingDirectory='C:\fixture'});Settings=$script:originalSettings;Principal='existing elevated user';Triggers=@('existing logon trigger')}
+$script:updated=$false
+function Test-Path { return $false }
+function Get-ScheduledTask { return $script:task }
+function Set-ScheduledTask {
+ param($TaskName,$Action,$Settings)
+ if($TaskName -ne 'MineShareLaunch' -or -not [object]::ReferenceEquals($Settings,$script:originalSettings)){throw 'Existing task settings were replaced'}
+ if($Settings.RestartCount -ne 0 -or $null -ne $Settings.RestartInterval -or -not $Settings.StartWhenAvailable){throw 'OS retry would multiply the app retry budget'}
+ if($Settings.DisallowStartIfOnBatteries -or $Settings.ExecutionTimeLimit -ne 'PT0S'){throw 'Unrelated task settings changed'}
+ if($Action[0].Arguments -ne '--mineshare-autostart' -or $Action[0].WorkingDirectory -ne 'C:\fixture'){throw 'Login launcher action is incorrect'}
+ $script:updated=$true
+}
+function Enable-ScheduledTask { if(-not $script:updated){throw 'Retry settings must be saved first'}; $script:task.Settings.Enabled=$true }
+function Disable-ScheduledTask { throw 'Unexpected disable' }
+function Register-ScheduledTask { throw 'Must not recreate the existing task' }
+"#;
+        let checks = r#"
+if(-not $script:updated){throw 'Retry settings were not saved'}
+if($script:task.Actions[0].Execute -ne $env:MINESHARE_STARTUP_EXE -or $script:task.Principal -ne 'existing elevated user' -or $script:task.Triggers[0] -ne 'existing logon trigger'){throw 'Task identity changed'}
+"#;
+        for arguments in ["", "--mineshare-autostart"] {
+            let output = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &(fixture.to_owned() + platform::SCRIPT + checks),
+                ])
+                .env("MINESHARE_STARTUP_EXE", "C:\\fixture\\mineshare-app.exe")
+                .env("MINESHARE_STARTUP_CHANGE", "on")
+                .env("MINESHARE_FIXTURE_ARGS", arguments)
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "enabled");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_custom_startup_arguments_are_not_overwritten() {
+        use std::os::windows::process::CommandExt;
+        let fixture = r#"
+$script:task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute=$env:MINESHARE_STARTUP_EXE;Arguments='--custom-option'});Settings=[pscustomobject]@{Enabled=$false;RestartCount=0;RestartInterval='PT0S';StartWhenAvailable=$false}}
+$script:mutated=$false
+function Test-Path { return $false }
+function Get-ScheduledTask { return $script:task }
+function Set-ScheduledTask { $script:mutated=$true }
+function Enable-ScheduledTask { $script:mutated=$true }
+try {
+"#;
+        let checks = r#"
+ throw 'Expected rejection was missing'
+} catch {
+ if($_.Exception.Message -notlike '*custom arguments*'){throw}
+ if($script:mutated -or $script:task.Actions[0].Arguments -ne '--custom-option' -or $script:task.Settings.RestartCount -ne 0){throw 'Custom task changed'}
+ 'preserved'
+}
+"#;
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &(fixture.to_owned() + platform::SCRIPT + checks),
+            ])
+            .env("MINESHARE_STARTUP_EXE", "C:\\fixture\\mineshare-app.exe")
+            .env("MINESHARE_STARTUP_CHANGE", "on")
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "preserved");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_status_uses_trigger_enabled_not_current_process_state() {

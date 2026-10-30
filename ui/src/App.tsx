@@ -1,18 +1,19 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import LayoutPage from "./pages/Layout";
 import FilesPage from "./pages/Files";
 import HomePage from "./pages/Home";
 import AudioDevicesPage from "./pages/AudioDevices";
 import SettingsPage from "./pages/Settings";
 import PairingModal from "./PairingModal";
 import LinuxSetup from "./LinuxSetup";
+import { useConnectionControl } from "./connectionState";
+import WorkspaceIcon from "./components/WorkspaceIcon";
 import { LanguageToggle, useT } from "./i18n";
 import appIcon from "./assets/mineshare-app-icon.svg";
 import {
-  IconActivity, IconVolume, IconFile, IconSliders,
-  IconArrowDown, IconArrowUp, IconArrowUpRight, IconArrowDownLeft,
+  IconVolume, IconFile, IconSliders,
+  IconArrowDown, IconArrowUpRight, IconArrowDownLeft,
   IconX, IconAlertTriangle,
 } from "./icons";
 import type { Status, Latency, Transfer, ToastEntry } from "./types";
@@ -28,6 +29,8 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const [activeTransfers, setActiveTransfers] = useState(0);
   const { t } = useT();
+  const { control } = useConnectionControl();
+  const paused = control?.paused ?? false;
 
   // Status poll — paused when the window is hidden to tray so
   // we don't churn IPC + React renders for an invisible UI. The
@@ -209,29 +212,27 @@ export default function App() {
   const tabTitle = t(`nav_${tab}`);
 
   return (
-    <div className="app-marble h-screen flex bg-ds-bg text-ds-text overflow-hidden">
+    <div className="app-shell">
       <PairingModal />
       <LinuxSetup />
       <DropOverlay visible={dropOverlay} />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      <ActiveTransfersBadge count={activeTransfers} onClick={() => setTab("files")} />
 
       {/* Sidebar */}
-      <aside className="w-[220px] shrink-0 bg-ds-sidebar border-r border-ds-border flex flex-col py-5">
+      <aside className="app-sidebar">
         {/* Logo */}
-        <div className="px-4 mb-7">
+        <div className="px-2 mb-8 mt-3">
           <div className="flex items-center gap-2.5">
-            <img src={appIcon} alt="" className="size-9 shrink-0 drop-shadow-sm" />
+            <img src={appIcon} alt="" className="size-7 shrink-0" />
             <div>
-              <span className="block text-sm font-semibold text-ds-text tracking-tight">MineShare</span>
-              <span className="block text-[9px] uppercase tracking-[0.22em] text-ds-accent">Seamless control</span>
+              <span className="block text-lg font-semibold text-ds-text tracking-tight">MineShare</span>
             </div>
           </div>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 px-2 flex flex-col gap-0.5">
-          <NavItem active={tab === "home"} onClick={() => setTab("home")} icon={<IconActivity className="size-4" />}>
+        <nav aria-label={t("nav_home")} className="flex-1 flex flex-col gap-1">
+          <NavItem active={tab === "home"} onClick={() => setTab("home")} icon={<WorkspaceIcon kind="home" className="size-4" />}>
             {t("nav_home")}
           </NavItem>
           <NavItem active={tab === "audio_devices"} onClick={() => setTab("audio_devices")} icon={<IconVolume className="size-4" />}>
@@ -246,32 +247,30 @@ export default function App() {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 pt-4 border-t border-ds-border">
-          <LanguageToggle />
+        <div className="sidebar-session mb-5">
+          <span className="flex items-center gap-2 text-xs"><span className="status-dot" style={paused || !status?.peer_connected ? { background: "var(--ds-text-muted)" } : undefined} />{t(paused ? "sidebar_paused" : status?.peer_connected ? "sidebar_connected" : "sidebar_waiting")}</span>
+          <p className="text-xs text-ds-text-muted leading-relaxed mt-2">{t(paused ? "connections_paused_hint" : "sidebar_hint")}</p>
+        </div>
+        <div className="px-2 pt-4 border-t border-ds-border">
+          <div className="flex items-center justify-between"><LanguageToggle /><span className="text-[11px] text-ds-text-muted">v{status?.local_version.split(" · ")[0] || "…"}</span></div>
           <VersionFooter status={status} />
         </div>
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
-        <div className="px-8 py-6">
-          <header className="mb-6 flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-ds-text">{tabTitle}</h2>
-            <ConnectionPill status={status} error={error} />
+      <main className="app-main" key={tab}>
+        <div className="page-content">
+          <header className="mb-7">
+            <div className="flex items-center justify-between gap-4"><h1 className="page-heading">{tab === "home" ? t("home_headline") : tabTitle}</h1><ConnectionPill status={status} error={error} paused={paused} /></div>
+            <p className="page-subtitle">{t(tab === "home" ? "home_subtitle" : tab === "audio_devices" ? "audio_subtitle" : `${tab}_subtitle`)}</p>
           </header>
 
           {tab === "home" ? (
-            <>
-              <p className="text-xs font-semibold uppercase tracking-widest text-ds-text-muted mb-4">{t("nav_layout")}</p>
-              <LayoutPage />
-              <div className="my-8 border-t border-ds-border" />
-              <p className="text-xs font-semibold uppercase tracking-widest text-ds-text-muted mb-4">{t("home_status_section")}</p>
-              {status ? <HomePage status={status} latency={latency} /> : null}
-            </>
+            status ? <HomePage status={status} latency={latency} onNavigate={setTab} /> : <div role="status" className="panel p-6"><p className="font-medium">{t(error ? "workspace_unavailable" : "loading_workspace")}</p>{error ? <p className="muted mt-2">{t("workspace_unavailable_hint")}</p> : null}</div>
           ) : null}
           {tab === "audio_devices" ? <AudioDevicesPage /> : null}
           {tab === "files" ? <FilesPage /> : null}
-          {tab === "settings" ? <SettingsPage /> : null}
+          {tab === "settings" ? <SettingsPage status={status} /> : null}
         </div>
       </main>
     </div>
@@ -285,22 +284,25 @@ function VersionFooter({ status }: { status: Status | null }) {
   const connected = status?.peer_connected ?? false;
   const same = connected && peer != null && peer === local;
   return (
-    <div className="mt-3 text-[10px] leading-snug text-ds-text-muted select-text break-all">
-      <div title={local}>MineShare {local || "…"}</div>
+    <div className="mt-3 text-[10px] leading-relaxed text-ds-text-muted select-text break-words">
+      {connected && peer && !same ? <p className="text-ds-warning mb-2">⚠ {t("ver_diff_build")}</p> : null}
+      <details><summary className="cursor-pointer hover:text-ds-text">{t("build_details")}</summary>
+      <p className="mt-2 break-all">MineShare {local || "…"}</p>
       {connected && peer ? (
         same ? (
-          <div className="text-emerald-500">✓ {t("ver_same_build")}</div>
+          <div className="text-ds-success">✓ {t("ver_same_build")}</div>
         ) : (
-          <div className="text-amber-500" title={peer}>
-            ⚠ {t("ver_diff_build")} ({t("ver_peer")}: {peer})
+          <div className="mt-1 break-all" title={peer}>
+            {t("ver_peer")}: {peer}
           </div>
         )
-      ) : null}
+      ) : null}</details>
     </div>
   );
 }
 
 function DropOverlay({ visible }: { visible: boolean }) {
+  const { t } = useT();
   if (!visible) return null;
   return (
     <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center bg-ds-accent-soft">
@@ -309,31 +311,11 @@ function DropOverlay({ visible }: { visible: boolean }) {
           <IconArrowDown className="size-7 text-ds-accent" />
         </div>
         <div className="text-center">
-          <p className="text-base font-semibold text-ds-accent">Drop to send to peer</p>
-          <p className="text-xs text-ds-text-muted mt-1">Encrypted · auto-saves to Downloads/MineShare</p>
+          <p className="text-base font-semibold text-ds-accent">{t("drop_title")}</p>
+          <p className="text-xs text-ds-text-muted mt-1">{t("drop_hint")}</p>
         </div>
       </div>
     </div>
-  );
-}
-
-function ActiveTransfersBadge({
-  count,
-  onClick,
-}: {
-  count: number;
-  onClick: () => void;
-}) {
-  if (count === 0) return null;
-  return (
-    <button
-      onClick={onClick}
-      className="fixed bottom-4 left-4 z-30 flex items-center gap-2 rounded-full bg-ds-accent hover:bg-ds-accent-strong text-ds-on-accent px-3 py-1.5 shadow-lg text-xs font-medium transition-all duration-150"
-    >
-      <span className="inline-block size-1.5 rounded-full bg-white" />
-      <IconArrowUp className="size-3.5" />
-      {count} transfer{count === 1 ? "" : "s"}
-    </button>
   );
 }
 
@@ -374,23 +356,23 @@ function Toast({
   const tone =
     entry.status === "done"
       ? entry.direction === "sending"
-        ? "border-emerald-500/30 bg-emerald-500/10"
-        : "border-blue-500/30 bg-blue-500/10"
+        ? "border-ds-success-border bg-ds-success-soft"
+        : "border-ds-info-border bg-ds-info-soft"
       : entry.status === "cancelled"
         ? "border-ds-border bg-ds-surface"
-        : "border-red-500/30 bg-red-500/10";
+        : "border-ds-danger-border bg-ds-danger-soft";
 
   const iconEl =
     entry.status === "done" ? (
       entry.direction === "sending" ? (
-        <IconArrowUpRight className="size-4 text-emerald-400" />
+        <IconArrowUpRight className="size-4 text-ds-success" />
       ) : (
-        <IconArrowDownLeft className="size-4 text-blue-400" />
+        <IconArrowDownLeft className="size-4 text-ds-info" />
       )
     ) : entry.status === "cancelled" ? (
       <IconX className="size-4 text-ds-text-muted" />
     ) : (
-      <IconAlertTriangle className="size-4 text-red-400" />
+      <IconAlertTriangle className="size-4 text-ds-danger" />
     );
 
   const title =
@@ -441,39 +423,18 @@ function Toast({
 function ConnectionPill({
   status,
   error,
+  paused,
 }: {
   status: Status | null;
   error: string | null;
+  paused: boolean;
 }) {
   const { t } = useT();
-  if (error) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-red-400 bg-red-500/10 border border-red-500/25 rounded-full px-2.5 py-1">
-        <span className="size-1.5 rounded-full bg-red-400" />
-        {t("conn_offline")}
-      </span>
-    );
-  }
-  if (!status) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-ds-text-muted">
-        <span className="size-1.5 rounded-full bg-slate-500" />
-        {t("conn_connecting")}
-      </span>
-    );
-  }
-  if (!status.peer_connected) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-ds-text-muted bg-ds-hover border border-ds-border rounded-full px-2.5 py-1">
-        <span className="size-1.5 rounded-full bg-slate-500" />
-        {t("conn_no_peer")}
-      </span>
-    );
-  }
+  const connected = Boolean(status?.peer_connected && !paused && !error);
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 rounded-full px-2.5 py-1">
-      <span className="size-1.5 rounded-full bg-emerald-400" />
-      {t("conn_paired_with")} {status.peer_addr}
+    <span className="quiet-badge shrink-0 whitespace-nowrap" role="status">
+      <span className="status-dot" aria-hidden="true" style={!connected ? { background: "var(--ds-text-muted)" } : undefined} />
+      {t(connected ? "workspace_connected" : "workspace_disconnected")}
     </span>
   );
 }
@@ -494,16 +455,14 @@ function NavItem({
   return (
     <button
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
       className={
         "relative w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-150 text-sm group " +
         (active
-          ? "bg-ds-hover text-ds-text font-medium"
+          ? "bg-ds-accent-soft text-ds-accent font-medium"
           : "text-ds-text-muted hover:bg-ds-hover hover:text-ds-text")
       }
     >
-      {active && (
-        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-ds-accent rounded-r-full" />
-      )}
       <span className={active ? "text-ds-accent" : "group-hover:text-ds-text transition-colors"}>
         {icon}
       </span>

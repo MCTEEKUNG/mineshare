@@ -1,322 +1,142 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useT } from "../i18n";
+import type { Status } from "../types";
+import { screenDropSide, screenGeometry, screenPosition, screenSides, type PeerSide, type Point } from "../screenLayoutModel";
 
-type PeerSide = "left" | "right" | "top" | "bottom";
 type Layout = { peer_side: PeerSide };
-type Status = { peer_connected: boolean; peer_addr: string | null };
+type Drag = { center: Point; side: PeerSide | null };
 
-/**
- * Display Settings-style layout editor.
- *
- * Renders a draggable peer-monitor tile around a fixed local-monitor
- * tile. While the user drags, the peer tile floats free under the
- * cursor; on release we project the offset onto the dominant axis
- * (whichever of `|dx|` and `|dy|` is larger) and snap the peer to
- * that side of the local tile. The resulting `PeerSide` round-trips
- * through `set_layout`, which persists to disk and pushes the new
- * side to `mineshare-input` so the bridge picks it up immediately.
- */
-export default function LayoutPage() {
-  const [layout, setLayout] = useState<Layout | null>(null);
-  const [status, setStatus] = useState<Status | null>(null);
-  const [pending, setPending] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+/** Drag the paired display onto an edge; the runtime mirrors the other end. */
+export default function LayoutPage({ peerName, connected = false, status }: { peerName?: string; connected?: boolean; status?: Status | null }) {
   const { t } = useT();
+  const [layout, setLayout] = useState<Layout | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [pollError, setPollError] = useState("");
+  const [width, setWidth] = useState(360);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const canvas = useRef<HTMLDivElement>(null);
+  const dragSession = useRef<{ pointerId: number; offset: Point; center: Point } | null>(null);
+  const pendingRef = useRef(false);
+  const revision = useRef(0);
+  const hintId = useId();
+  const geometry = screenGeometry(width);
+  const peer = peerName ?? t("workspace_peer");
 
-  useEffect(() => {
-    invoke<Layout>("get_layout").then(setLayout).catch((e) => setErr(String(e)));
-    const tick = () => invoke<Status>("get_status").then(setStatus).catch(() => {});
-    tick();
-    const id = setInterval(tick, 1500);
-    return () => clearInterval(id);
+  useLayoutEffect(() => {
+    const element = canvas.current;
+    if (!element) return;
+    const measure = () => {
+      const next = element.getBoundingClientRect().width;
+      if (next > 0) setWidth(next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
-  async function setSide(next: PeerSide) {
-    if (!layout || layout.peer_side === next) return;
-    setPending(true);
-    setErr(null);
-    try {
-      await invoke("set_layout", { cfg: { peer_side: next } });
-      setLayout({ peer_side: next });
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  if (!layout) {
-    return (
-      <p className="text-sm text-ds-text-muted">
-        {err ? `${err}` : t("layout_loading")}
-      </p>
-    );
-  }
-
-  return (
-    <section>
-      <p className="text-sm text-ds-text-muted mb-6 max-w-prose leading-relaxed">
-        {t("layout_intro")}
-      </p>
-
-      <DragCanvas
-        side={layout.peer_side}
-        status={status}
-        disabled={pending}
-        onChoose={setSide}
-      />
-
-      <div className="mt-6 flex items-center justify-between text-sm">
-        <p>
-          <span className="text-ds-text-muted">{t("layout_summary_prefix")} </span>
-          <span className="font-semibold text-ds-text">{layout.peer_side}</span>
-          <span className="text-ds-text-muted"> {t("layout_summary_suffix")}</span>
-        </p>
-        {pending ? <span className="text-xs text-ds-text-muted">{t("layout_saving")}</span> : null}
-      </div>
-      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
-    </section>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-
-const LOCAL_W = 200;
-const LOCAL_H = 125;
-const PEER_W = 170;
-const PEER_H = 106;
-const GAP = 16;
-const MARGIN = 24;
-const CANVAS_W = LOCAL_W + 2 * GAP + 2 * PEER_W + 2 * MARGIN; // 580
-const CANVAS_H = LOCAL_H + 2 * GAP + 2 * PEER_H + 2 * MARGIN; // 417
-/** Pixels of free-drag distance from the local tile's center
- *  beyond which we treat the gesture as "moving toward an edge". */
-const SNAP_THRESHOLD = 40;
-
-function DragCanvas({
-  side,
-  status,
-  disabled,
-  onChoose,
-}: {
-  side: PeerSide;
-  status: Status | null;
-  disabled?: boolean;
-  onChoose: (side: PeerSide) => void;
-}) {
-  const { t } = useT();
-  const localCx = CANVAS_W / 2;
-  const localCy = CANVAS_H / 2;
-  const localBox = {
-    x: localCx - LOCAL_W / 2,
-    y: localCy - LOCAL_H / 2,
-    w: LOCAL_W,
-    h: LOCAL_H,
-  };
-
-  function restingPeerCenter(s: PeerSide): { cx: number; cy: number } {
-    switch (s) {
-      case "left":
-        return { cx: localBox.x - GAP - PEER_W / 2, cy: localCy };
-      case "right":
-        return { cx: localBox.x + localBox.w + GAP + PEER_W / 2, cy: localCy };
-      case "top":
-        return { cx: localCx, cy: localBox.y - GAP - PEER_H / 2 };
-      case "bottom":
-        return { cx: localCx, cy: localBox.y + localBox.h + GAP + PEER_H / 2 };
-    }
-  }
-
-  const [center, setCenter] = useState(restingPeerCenter(side));
-  const [hover, setHover] = useState<PeerSide | null>(null);
-  const dragRef = useRef<{ startMx: number; startMy: number; startCx: number; startCy: number } | null>(null);
-  const canvasRef = useRef<HTMLDivElement | null>(null);
-
+  useEffect(() => { dragSession.current = null; setDrag(null); }, [width]);
   useEffect(() => {
-    if (!dragRef.current) setCenter(restingPeerCenter(side));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [side]);
-
-  function projectToSide(cx: number, cy: number): PeerSide | null {
-    const dx = cx - localCx;
-    const dy = cy - localCy;
-    if (Math.abs(dx) < SNAP_THRESHOLD && Math.abs(dy) < SNAP_THRESHOLD) return null;
-    if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? "right" : "left";
-    return dy > 0 ? "bottom" : "top";
-  }
-
-  function onPointerDown(e: React.PointerEvent) {
-    if (disabled) return;
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    dragRef.current = {
-      startMx: e.clientX,
-      startMy: e.clientY,
-      startCx: center.cx,
-      startCy: center.cy,
-    };
-  }
-
-  function onPointerMove(e: React.PointerEvent) {
-    if (!dragRef.current) return;
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const nx = dragRef.current.startCx + (e.clientX - dragRef.current.startMx);
-    const ny = dragRef.current.startCy + (e.clientY - dragRef.current.startMy);
-    setCenter({
-      cx: clamp(nx, PEER_W / 2, CANVAS_W - PEER_W / 2),
-      cy: clamp(ny, PEER_H / 2, CANVAS_H - PEER_H / 2),
-    });
-    setHover(projectToSide(nx, ny));
-  }
-
-  function onPointerUp() {
-    if (!dragRef.current) return;
-    const projected = projectToSide(center.cx, center.cy);
-    dragRef.current = null;
-    setHover(null);
-    if (projected && projected !== side) {
-      onChoose(projected);
-      setCenter(restingPeerCenter(projected));
-    } else {
-      setCenter(restingPeerCenter(side));
-    }
-  }
-
-  return (
-    <div
-      ref={canvasRef}
-      className="relative mx-auto rounded-xl border border-ds-border bg-ds-surface select-none"
-      style={{ width: CANVAS_W, height: CANVAS_H }}
-    >
-      <EdgeHint visible={hover === "left"} side="left" box={localBox} />
-      <EdgeHint visible={hover === "right"} side="right" box={localBox} />
-      <EdgeHint visible={hover === "top"} side="top" box={localBox} />
-      <EdgeHint visible={hover === "bottom"} side="bottom" box={localBox} />
-
-      <Tile
-        x={localBox.x}
-        y={localBox.y}
-        w={localBox.w}
-        h={localBox.h}
-        label={t("layout_local")}
-        sub={t("layout_local_sub")}
-        accent
-      />
-
-      <div
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        className={
-          "absolute touch-none " +
-          (disabled ? "cursor-not-allowed opacity-50" : "cursor-grab active:cursor-grabbing")
+    let active = true;
+    const tick = async () => {
+      if (pendingRef.current || dragSession.current || document.hidden) return;
+      const requestedAt = revision.current;
+      try {
+        const value = await invoke<Layout>("get_layout");
+        if (active && requestedAt === revision.current && !pendingRef.current && !dragSession.current) {
+          setLayout(value); setPollError("");
         }
-        style={{
-          left: center.cx - PEER_W / 2,
-          top: center.cy - PEER_H / 2,
-          width: PEER_W,
-          height: PEER_H,
-        }}
-      >
-        <Tile
-          x={0}
-          y={0}
-          w={PEER_W}
-          h={PEER_H}
-          label={status?.peer_addr ? "peer" : t("layout_no_peer")}
-          sub={status?.peer_addr ?? "—"}
-          muted={!status?.peer_connected}
-          relative
-        />
-      </div>
-    </div>
-  );
-}
+      } catch (e) { if (active) setPollError(String(e)); }
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
 
-function Tile({
-  label,
-  sub,
-  x,
-  y,
-  w,
-  h,
-  accent,
-  muted,
-  relative,
-}: {
-  label: string;
-  sub: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  accent?: boolean;
-  muted?: boolean;
-  relative?: boolean;
-}) {
-  return (
-    <div
-      className={
-        (relative ? "relative " : "absolute ") +
-        "rounded-lg border-2 flex flex-col items-center justify-center pointer-events-none select-none transition-colors " +
-        (accent
-          ? "border-ds-accent-border bg-ds-accent-soft"
-          : muted
-            ? "border-dashed border-ds-border bg-ds-hover text-ds-text-muted"
-            : "border-ds-border bg-ds-elevated")
-      }
-      style={
-        relative ? { width: w, height: h } : { left: x, top: y, width: w, height: h }
-      }
-    >
-      <p className={"text-sm font-medium " + (accent ? "text-ds-accent" : muted ? "text-ds-text-muted" : "text-ds-text")}>
-        {label}
-      </p>
-      <p className={"text-[11px] " + (accent ? "text-ds-accent" : "text-ds-text-muted")}>
-        {sub}
-      </p>
-    </div>
-  );
-}
-
-function EdgeHint({
-  visible,
-  side,
-  box,
-}: {
-  visible: boolean;
-  side: PeerSide;
-  box: { x: number; y: number; w: number; h: number };
-}) {
-  if (!visible) return null;
-  const T = 6;
-  let style: React.CSSProperties;
-  switch (side) {
-    case "left":
-      style = { left: box.x - T, top: box.y, width: T, height: box.h };
-      break;
-    case "right":
-      style = { left: box.x + box.w, top: box.y, width: T, height: box.h };
-      break;
-    case "top":
-      style = { left: box.x, top: box.y - T, width: box.w, height: T };
-      break;
-    case "bottom":
-      style = { left: box.x, top: box.y + box.h, width: box.w, height: T };
-      break;
+  async function setSide(peer_side: PeerSide) {
+    if (!layout || pendingRef.current || peer_side === layout.peer_side) return;
+    const previous = layout;
+    revision.current++;
+    pendingRef.current = true;
+    setPending(true); setError("");
+    setLayout({ peer_side });
+    try { await invoke("set_layout", { cfg: { peer_side } }); }
+    catch (e) { setLayout(previous); setError(String(e)); }
+    finally { pendingRef.current = false; setPending(false); }
   }
-  return (
-    <div
-      className="absolute rounded-full bg-ds-accent pointer-events-none transition-opacity"
-      style={style}
-    />
-  );
-}
 
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
+  function cancelDrag() { dragSession.current = null; setDrag(null); }
+  function startDrag(event: PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0 || !layout || pendingRef.current || dragSession.current) return;
+    const rect = canvas.current?.getBoundingClientRect();
+    if (!rect) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const center = screenPosition(layout.peer_side, geometry);
+    dragSession.current = { pointerId: event.pointerId, center, offset: { x: event.clientX - rect.left - center.x, y: event.clientY - rect.top - center.y } };
+    setDrag({ center, side: layout.peer_side }); setError("");
+  }
+  function moveDrag(event: PointerEvent<HTMLButtonElement>) {
+    const session = dragSession.current;
+    const rect = canvas.current?.getBoundingClientRect();
+    if (!session || session.pointerId !== event.pointerId || !rect) return;
+    const center = { x: event.clientX - rect.left - session.offset.x, y: event.clientY - rect.top - session.offset.y };
+    session.center = center;
+    setDrag({ center, side: screenDropSide(center, geometry) });
+  }
+  function finishDrag(event: PointerEvent<HTMLButtonElement>) {
+    const session = dragSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    const side = screenDropSide(session.center, geometry);
+    cancelDrag();
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (side) void setSide(side);
+  }
+
+  const side = layout?.peer_side ?? "right";
+  const center = drag?.center ?? screenPosition(side, geometry);
+  const localLocked = status?.input_locked ?? false;
+  const peerLocked = connected && (status?.peer_lock_visual?.locked ?? status?.remote_input_locked ?? false);
+  const effect = status?.lock_effect;
+  const lockStyle = { "--lock-color": `rgb(${(effect?.color ?? [40, 210, 190]).join(", ")})` } as CSSProperties;
+  const peerEffect = status?.peer_lock_visual?.effect ?? effect;
+  const peerLockStyle = { "--lock-color": `rgb(${(peerEffect?.color ?? [40, 210, 190]).join(", ")})` } as CSSProperties;
+  const peerLockClass = peerEffect?.rainbow ? " display-lock-rainbow" : "";
+  const lockClass = effect?.rainbow ? " display-lock-rainbow" : "";
+  const lockMark = <span className="display-lock-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V6a4 4 0 0 1 8 0v4" /></svg></span>;
+  const tileStyle = (point: Point) => ({ left: point.x, top: point.y, width: geometry.tileWidth, height: geometry.tileHeight });
+  return <div>
+    <p id={hintId} className="text-xs text-ds-text-muted mb-4 leading-relaxed">{t("layout_drag_hint")}</p>
+    <div ref={canvas} className="layout-canvas" role="group" aria-label={t("settings_screens")} style={{ height: geometry.height }}>
+      {layout ? <>
+        {drag && screenSides.map(target => <div key={target} aria-hidden="true" className={"display-drop-slot " + (drag.side === target ? "is-target" : "")} data-drop-side={target} style={tileStyle(screenPosition(target, geometry))}>
+          <span>{t(`layout_${target}`)}</span>
+        </div>)}
+        <div className={"display-tile display-local" + lockClass} data-locked={localLocked} style={{ ...tileStyle(geometry.local), ...lockStyle }}>
+          {localLocked && <>{lockMark}<span className="sr-only">{t("workspace_screen_locked")}</span></>}
+          <span className="display-number" aria-hidden="true">1</span><span className="display-name">{t("workspace_local")}</span>
+        </div>
+        <button type="button" className={"display-tile display-peer " + (drag ? "is-dragging" : "") + peerLockClass} data-locked={peerLocked} style={{ ...tileStyle(center), ...peerLockStyle }}
+          disabled={pending} data-peer-side={side} aria-label={`${t("layout_drag_screen")}: ${peer}`} aria-describedby={hintId + (peerLocked ? ` ${hintId}-lock` : "")} aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight" title={peer}
+          onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
+          onKeyDown={event => {
+            if (event.key === "Escape") { event.preventDefault(); cancelDrag(); return; }
+            const target: Record<string, PeerSide> = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "top", ArrowDown: "bottom" };
+            if (target[event.key]) { event.preventDefault(); if (!event.repeat && !dragSession.current) void setSide(target[event.key]); }
+          }}>
+          {peerLocked && <>{lockMark}<span id={`${hintId}-lock`} className="sr-only">{t("workspace_screen_locked")}</span></>}
+          <span className="display-number" aria-hidden="true">2</span><span className="display-name">{peer}</span>
+          <span className="sr-only">{t(connected ? "workspace_ready" : "workspace_waiting_short")}</span>
+        </button>
+      </> : <p role="status" className="absolute inset-0 flex items-center justify-center text-sm text-ds-text-muted">{t("layout_loading")}</p>}
+    </div>
+    <div className="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-ds-text-muted">
+      <span>{t("layout_keyboard_hint")}</span>
+      <span role="status" aria-live="polite">{pending ? t("layout_saving") : layout ? `${t("layout_position_label")} ${t(`layout_${side}`)}` : ""}</span>
+    </div>
+    {(error || pollError) && <p role="alert" className="text-sm text-ds-danger mt-3">{error || pollError}</p>}
+  </div>;
 }

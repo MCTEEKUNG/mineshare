@@ -40,7 +40,6 @@ export default function AdvancedPage() {
 
   return (
     <section className="grid gap-6">
-      <InputPrefsCard />
 
       <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
         <p className="text-base font-semibold text-ds-text mb-4">Traffic</p>
@@ -89,7 +88,7 @@ export default function AdvancedPage() {
           </li>
           <li>
             Layout side auto-syncs across the encrypted control
-            channel — drag the peer tile on either machine and the
+            channel — choose the peer side on either machine and the
             other side flips its mirror automatically.
           </li>
           <li>
@@ -112,7 +111,7 @@ export default function AdvancedPage() {
  * before being forwarded to the peer. Sub-pixel residue is retained
  * in the input crate so 0.5x doesn't drop alternating 1-pixel motions.
  */
-function InputPrefsCard() {
+export function InputPrefsCard() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -248,7 +247,12 @@ function InputPrefsCard() {
         onChange={(v) => update({ ...settings, auto_focus_on_take_control: v })}
       />
 
-      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
+      <label className="block text-sm mt-5">Mouse update rate · {settings.mouse_rate_hz} Hz
+        <input aria-label="Mouse update rate" type="range" min={60} max={1000} step={5} value={settings.mouse_rate_hz}
+          onChange={e => update({ ...settings, mouse_rate_hz: Number(e.target.value) })} className="w-full mt-3 [accent-color:var(--ds-accent)]" />
+      </label>
+
+      {err ? <p className="text-xs text-ds-danger mt-3">{err}</p> : null}
     </div>
   );
 }
@@ -294,7 +298,7 @@ function Row({ k, v, alert }: { k: string; v: string; alert?: boolean }) {
   return (
     <div>
       <dt className="text-[10px] uppercase tracking-widest text-ds-text-muted mb-1">{k}</dt>
-      <dd className={"text-sm font-medium " + (alert ? "text-red-400" : "text-ds-text")}>
+      <dd className={"text-sm font-medium " + (alert ? "text-ds-danger" : "text-ds-text")}>
         {v}
       </dd>
     </div>

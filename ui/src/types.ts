@@ -14,6 +14,8 @@ export type Status = {
   peer_in_remote: boolean;
   input_locked: boolean;
   remote_input_locked?: boolean;
+  lock_effect?: import("./pages/LockEffect").LockEffectConfig;
+  peer_lock_visual?: { locked: boolean; effect: import("./pages/LockEffect").LockEffectConfig } | null;
   game_drive: "off" | "driving" | "receiving";
   anticheat_warning: string | null;
   keys_forwarded: number;

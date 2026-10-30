@@ -53,6 +53,20 @@ X-GNOME-Autostart-enabled=true
 StartupNotify=false
 EOF
 done
+# Typeless can delete its per-user desktop override when its own login setting
+# is off. GNOME then falls back to the system-wide desktop entry and races our
+# coordinator. Keep a separate, conditional user-unit guard: only the opt-in
+# broker disables that duplicate autostart; manual launches remain untouched.
+guard="$config/systemd/user/app-typeless@autostart.service.d/50-mineshare-order.conf"
+mkdir -p "$(dirname "$guard")"
+[[ ! -e "$guard" ]] || cp -a -- "$guard" "$backup/50-mineshare-order.conf"
+condition="$config/MineShare/keyboard-broker.enabled"
+[[ "$condition" != *$'\n'* && "$condition" != *$'\r'* ]]
+condition=${condition//%/%%}
+printf '[Unit]\nConditionPathExists=!%s\n' "$condition" > "$guard"
+if [[ -n ${XDG_RUNTIME_DIR:-} && -S $XDG_RUNTIME_DIR/bus ]] && command -v systemctl >/dev/null; then
+    systemctl --user daemon-reload
+fi
 if command -v desktop-file-validate >/dev/null; then
     desktop-file-validate "$config/autostart/MineShare.desktop" "$config/autostart/typeless.desktop"
 fi

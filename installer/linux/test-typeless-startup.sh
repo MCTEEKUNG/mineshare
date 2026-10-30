@@ -34,6 +34,13 @@ done
 bash "$root/installer/linux/install-typeless-compat.sh" "$HOME/.local/bin/mineshare-app"
 [[ -f "$XDG_CONFIG_HOME/MineShare/keyboard-broker.enabled" ]]
 cmp "$XDG_CONFIG_HOME/autostart/MineShare.desktop" "$XDG_CONFIG_HOME/autostart/typeless.desktop"
+guard="$XDG_CONFIG_HOME/systemd/user/app-typeless@autostart.service.d/50-mineshare-order.conf"
+grep -Fq "ConditionPathExists=!$XDG_CONFIG_HOME/MineShare/keyboard-broker.enabled" "$guard"
+# Vendor removal of its desktop override must not remove the independent guard.
+rm "$XDG_CONFIG_HOME/autostart/typeless.desktop"
+[[ -f "$guard" ]]
+bash "$root/installer/linux/install-typeless-compat.sh" "$HOME/.local/bin/mineshare-app"
+cmp "$XDG_CONFIG_HOME/autostart/MineShare.desktop" "$XDG_CONFIG_HOME/autostart/typeless.desktop"
 find "$XDG_DATA_HOME/MineShare/backups" -name typeless.desktop -exec grep -q 'original Typeless' {} \;
 # Pretend Typeless is already open. A vendor app must NEVER start in this test.
 printf '#!/bin/sh\nexit 0\n' > "$work/bin/pgrep"

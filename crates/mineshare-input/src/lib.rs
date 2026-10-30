@@ -251,7 +251,9 @@ pub trait InputCapture: Send {
 /// (observed ~64), so 200 leaves generous headroom while neutralising the
 /// half-screen artifact regardless of which layer produced it. Tunable; a
 /// future handover-suppression fix can make this purely a safety net.
-pub(crate) const MAX_INJECT_DELTA_PX: i32 = 200;
+/// Safety bound for one untrusted relative-motion event. Coalescers must not
+/// create a wire event beyond this bound or the receiver would lose distance.
+pub const MAX_INJECT_DELTA_PX: i32 = 200;
 
 pub trait InputInject: Send + Sync {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> anyhow::Result<()>;
@@ -298,7 +300,11 @@ pub fn local_touchpad_capabilities() -> u32 {
     {
         windows::touchpad_capabilities()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::touchpad_capabilities()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         0
     }
@@ -460,13 +466,18 @@ static LOCK_EFFECT: parking_lot::Mutex<LockEffect> = parking_lot::Mutex::new(Loc
     duration_ms: 1150,
     thickness: 6,
 });
+pub fn current_lock_effect() -> LockEffect {
+    *LOCK_EFFECT.lock()
+}
 pub fn set_lock_effect(effect: LockEffect) {
     *LOCK_EFFECT.lock() = effect.clamped();
 }
 pub fn preview_lock_effect(locked: bool, effect: LockEffect) {
     #[cfg(target_os = "windows")]
     windows::lock_feedback::show_configured(locked, effect.clamped());
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    linux::lock_feedback::show_configured(locked, effect.clamped());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let _ = (locked, effect);
 }
 

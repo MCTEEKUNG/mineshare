@@ -1,146 +1,73 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import HotkeysPage from "./Hotkeys";
-import AdvancedPage from "./Advanced";
+import AdvancedPage, { InputPrefsCard } from "./Advanced";
 import { useT } from "../i18n";
 import { ThemeSwitcher } from "../theme";
 import LockEffectSection from "./LockEffect";
 import StartupSection from "./Startup";
+import LayoutPage from "./Layout";
+import Disclosure from "../components/Disclosure";
+import type { Status } from "../types";
+import { useConnectionControl } from "../connectionState";
 
-export default function SettingsPage() {
+export default function SettingsPage({ status }: { status: Status | null }) {
   const { t } = useT();
-  return (
-    <div className="flex flex-col gap-10">
-      <StartupSection />
+  const { control } = useConnectionControl();
+  return <div className="settings-stack">
+    <section className="panel p-5"><h2 className="section-title">{t("settings_screens")}</h2><LayoutPage peerName={(status?.peer_connected && !control?.paused ? status.peer_name : control?.selected_peer?.display_name) ?? undefined} connected={status?.peer_connected && !control?.paused} status={status} /></section>
+    <section className="panel p-5 flex flex-wrap justify-between items-center gap-4">
+      <h2 className="text-sm font-semibold">{t("section_appearance")}</h2><ThemeSwitcher />
+    </section>
+    <StartupSection />
+    <Disclosure title={t("settings_input")}><InputPrefsCard /></Disclosure>
+    <Disclosure title={t("settings_games")}><ManualControls status={status} /></Disclosure>
+    <Disclosure title={t("section_hotkeys")}><HotkeysPage /></Disclosure>
+    <Disclosure title={t("settings_effect")}><LockEffectSection /></Disclosure>
+    <Disclosure title={t("settings_diagnostics")}>
       <UbuntuSetupButton />
-      <section>
-        <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_appearance")}</h3>
-        <ThemeSwitcher />
-      </section>
-      <LockEffectSection />
-      <section>
-        <h3 className="text-sm font-semibold text-ds-text-muted mb-3">{t("section_performance")}</h3>
-        <PerformanceSection />
-      </section>
-      <section>
-        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_hotkeys")}</h3>
-        <HotkeysPage />
-      </section>
-      <section>
-        <h3 className="text-sm font-semibold text-ds-text mb-3">{t("section_advanced")}</h3>
-        <AdvancedPage />
-      </section>
-    </div>
-  );
+      <div className="mb-5 text-xs leading-relaxed break-all"><p>{status?.local_version}</p><p className="mt-2 text-ds-text-muted">{t("ver_peer")}: {status?.peer_version ?? "—"}</p><p className="mt-2 text-ds-text-muted">{t("workspace_network")}: {status?.peer_addr ?? "—"}</p></div>
+      <AdvancedPage />
+    </Disclosure>
+  </div>;
 }
 
 function UbuntuSetupButton() {
   const [linux, setLinux] = useState(false);
-  const {locale} = useT();
+  const { locale } = useT();
   useEffect(() => { invoke<{linux: boolean}>("get_linux_setup_status").then(s => setLinux(s.linux)).catch(() => {}); }, []);
   if (!linux) return null;
-  return <section><h3 className="text-sm font-semibold mb-3">{locale === "th" ? "ตั้งค่า Ubuntu" : "Ubuntu setup"}</h3>
-    <button className="rounded-lg border border-ds-border px-4 py-2 text-sm" onClick={() => window.dispatchEvent(new Event("mineshare-linux-setup"))}>{locale === "th" ? "ตรวจระบบและตั้งค่า" : "Check system and set up"}</button></section>;
+  return <button className="button-secondary mb-5" onClick={() => window.dispatchEvent(new Event("mineshare-linux-setup"))}>{locale === "th" ? "ตรวจระบบ Ubuntu" : "Check Ubuntu setup"}</button>;
 }
 
-type MouseRateStats = { set_hz: number; fwd_total: number; inj_total: number };
-
-/**
- * Performance section — mouse forward/inject rate slider with a
- * live readout of the achieved rate.
- *
- * Self-contained settings load/write mirroring `InputPrefsCard`
- * in Advanced.tsx: `get_settings` on mount, `set_settings` on
- * each change with no debounce (matches the existing slider
- * pattern). Note: this is a second independent settings loader
- * alongside Advanced's `InputPrefsCard`; the runtime spread
- * preserves the full struct so writes from one don't drop the
- * other's fields, with the usual last-writer-wins caveat if both
- * sliders move between loads.
- */
-function PerformanceSection() {
-  const [settings, setSettings] = useState<{ mouse_rate_hz: number } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [stats, setStats] = useState<MouseRateStats | null>(null);
-  const [prev, setPrev] = useState<{ fwd: number; inj: number; t: number } | null>(null);
-  const [liveFwd, setLiveFwd] = useState<number>(0);
-  const [liveInj, setLiveInj] = useState<number>(0);
-
-  useEffect(() => {
-    invoke<{ mouse_rate_hz: number }>("get_settings")
-      .then(setSettings)
-      .catch((e) => setErr(String(e)));
-  }, []);
-
-  useEffect(() => {
-    const id = setInterval(async () => {
-      const s = await invoke<MouseRateStats>("get_mouse_rate_stats").catch(() => null);
-      if (!s) return;
-      const now = performance.now();
-      if (prev) {
-        const dt = (now - prev.t) / 1000;
-        if (dt > 0) {
-          setLiveFwd(Math.round((s.fwd_total - prev.fwd) / dt));
-          setLiveInj(Math.round((s.inj_total - prev.inj) / dt));
-        }
-      }
-      setPrev({ fwd: s.fwd_total, inj: s.inj_total, t: now });
-      setStats(s);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [prev]);
-
-  async function update(next: { mouse_rate_hz: number }) {
-    setErr(null);
-    setSettings(next);
-    try {
-      const applied = await invoke<{ mouse_rate_hz: number }>("patch_settings", {
-        // Only write this control's field, not other sections' stale settings.
-        patch: { mouse_rate_hz: next.mouse_rate_hz },
-      });
-      setSettings(applied);
-    } catch (e) {
-      setErr(String(e));
-    }
+function ManualControls({ status }: { status: Status | null }) {
+  const { t } = useT();
+  const { control } = useConnectionControl();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function command(name: string, args?: Record<string, unknown>) {
+    setBusy(true); setError("");
+    try { await invoke(name, args); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
   }
-
-  if (!settings) {
-    return (
-      <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
-        <p className="text-base font-semibold text-ds-text mb-3">Performance</p>
-        <p className="text-xs text-ds-text-muted">
-          {err ? `failed to load: ${err}` : "loading…"}
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-xl border border-ds-border bg-ds-surface p-5">
-      <div className="flex items-baseline justify-between mb-2">
-        <label className="text-sm font-medium text-ds-text">Mouse rate</label>
-        <span className="font-mono text-sm text-ds-text-muted">{settings.mouse_rate_hz} Hz</span>
-      </div>
-      <input
-        type="range" min={60} max={1000} step={5}
-        value={settings.mouse_rate_hz}
-        onChange={(e) => update({ ...settings, mouse_rate_hz: parseInt(e.target.value, 10) })}
-        list="mouse-rate-ticks"
-        className="w-full [accent-color:var(--ds-accent)]"
-      />
-      <datalist id="mouse-rate-ticks">
-        <option value="125" /><option value="250" /><option value="500" /><option value="1000" />
-      </datalist>
-      <p className="text-xs text-ds-text-muted mt-2">
-        Live: forwarding ~{liveFwd} Hz · injecting ~{liveInj} Hz
-        {stats ? ` · set ${stats.set_hz} Hz` : ""}
-      </p>
-      <p className="text-[11px] text-ds-text-muted mt-1">
-        Higher rates feel smoother but use more network/CPU. If the live rate stays below your setting,
-        your hardware or the peer's inject path is the limit. (Some anti-cheats ignore injected motion in games.)
-      </p>
-      {err ? <p className="text-xs text-red-400 mt-3">{err}</p> : null}
+  return <fieldset disabled={!status || busy} className="space-y-5">
+    <div>
+      <label className="block text-sm font-medium" htmlFor="keyboard-target">{t("settings_keyboard")}</label>
+      <p className="muted mt-2 mb-3">{t("settings_keyboard_hint")}</p>
+      <select id="keyboard-target" className="w-full rounded-xl border border-ds-border bg-ds-elevated px-3 py-2.5 text-sm" value={status?.keyboard_target ?? "smart"} onChange={e => command("set_keyboard_target", { target: e.target.value })}>
+        {["smart", "auto", "force_peer", "force_local"].map(target => <option disabled={target === "force_peer" && (!status?.peer_connected || control?.paused)} value={target} key={target}>{t(`keyboard_${target}`)}</option>)}
+      </select>
     </div>
-  );
+    <div className="pt-5 border-t border-ds-border">
+      <p className="text-sm font-medium">{t("settings_game_lock")}</p><p className="muted mt-2">{t("settings_game_lock_hint")}</p>
+      <button className="button-secondary mt-3" onClick={() => command("set_input_lock", { locked: !status?.input_locked })}>{t(status?.input_locked ? "action_unlock" : "action_lock")}</button>
+      {status?.remote_input_locked && <p className="muted mt-3">{t("shortcut_lock_hint")} <kbd>Ctrl + Shift + L</kbd></p>}
+    </div>
+    <div className="pt-5 border-t border-ds-border">
+      <p className="text-sm font-medium">Game Drive</p><p className="muted mt-2">{t("settings_game_drive_hint")}</p>
+      <button className="button-secondary mt-3" disabled={!status?.peer_connected || control?.paused} onClick={() => command("toggle_game_drive")}>{t(status?.game_drive === "off" ? "action_start" : "action_stop")}</button>
+    </div>
+    {error && <p role="alert" className="text-sm text-ds-danger">{error}</p>}
+  </fieldset>;
 }
