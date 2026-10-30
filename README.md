@@ -31,9 +31,9 @@ MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared in
 
 Round A was validated on Windows ↔ Windows and includes microphone sample continuity fixes and production build/symbol checks. The GUI retains its tested release profile; a ThinLTO candidate was rejected after audio quality testing.
 
-Round B adds bounded, age-limited audio queues, fair scheduling between input and audio, safer pointer coalescing, and input overload recovery. The latest recorded Rust verification passed **275 tests**, with **14 ignored**; Clippy and the production installer checks also passed. These checks establish code behavior, not measured physical input latency.
+Round B adds bounded audio/input queues, fair scheduling, event-driven Windows capture, and a separate realtime transport runtime. Both Windows test machines now run the validated build. Rust verification passed **276 tests**, with **15 ignored**; Clippy and production installer checks also passed.
 
-**Round B is awaiting installation and hardware validation.** The all-users Windows installer requires administrator confirmation (Error 1925). Both test computers still run the Round A build. Before/after audio results and physical mouse/keyboard acceptance in both directions remain pending, so no Round B latency improvement is claimed yet. See the [performance roadmap](docs/performance-roadmap-2026-10-27.md) and [measurement tools](tools/performance/README.md).
+In the measured Windows pair, continuous audio median/p95 changed from **190.29/191.49 → 180.81/182.19 ms** (desktop → laptop) and **125.16/136.68 → 120.32/124.63 ms** (laptop → desktop). All 512 continuous/sparse timing markers matched; the final continuous recordings had no observed quality events under the documented gate. The user confirmed smoother physical mouse/keyboard operation in both directions. These are results from this test pair, not a latency guarantee. See the [full Round B report and limitations](docs/performance-round-b-2026-10-30.md), [performance roadmap](docs/performance-roadmap-2026-10-27.md), and [measurement tools](tools/performance/README.md).
 
 Ubuntu Typeless coexistence remains opt-in and awaits post-login physical acceptance. See [setup and limitations](docs/linux-typeless-keyboard-broker.md).
 

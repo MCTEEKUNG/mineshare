@@ -3,22 +3,23 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tracing::{info, warn};
-use windows::Win32::Foundation::E_POINTER;
+use windows::Win32::Foundation::{CloseHandle, E_POINTER, HANDLE, WAIT_FAILED};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
-    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
-    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
-    IAudioCaptureClient, IAudioClient, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
-    WAVEFORMATEX,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, WAVEFORMATEX,
 };
 use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Error as WinError, HRESULT, IUnknown, Interface, PROPVARIANT, w};
 
@@ -28,11 +29,31 @@ use crate::{
     FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
 };
 
-const OPUS_BITRATE_BPS: i32 = 128_000;
+const OPUS_BITRATE_BPS: i32 = 192_000;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const IDLE_POLL: Duration = Duration::from_millis(20);
-const CAPTURE_POLL: Duration = Duration::from_millis(5);
+const CAPTURE_WAIT_MS: u32 = 20;
+
+struct CaptureEvent(HANDLE);
+impl CaptureEvent {
+    fn new() -> Result<Self> {
+        Ok(Self(unsafe { CreateEventW(None, false, false, None)? }))
+    }
+    fn wait(&self) -> Result<()> {
+        if unsafe { WaitForSingleObject(self.0, CAPTURE_WAIT_MS) } == WAIT_FAILED {
+            return Err(WinError::from_win32().into());
+        }
+        Ok(())
+    }
+}
+impl Drop for CaptureEvent {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 const CAPTURE_ACCUMULATOR_CAP: usize = FRAME_SAMPLES_INTERLEAVED * 4;
 const MAX_PACKETS_PER_POLL: usize = 8;
 const MAX_PACKET_FRAMES: u32 = SAMPLE_RATE;
@@ -348,16 +369,20 @@ fn run_demand_session(
     seq: &mut u32,
     status: &BackendStatus,
 ) -> Result<CaptureExit> {
+    let audio_scheduling = crate::audio_thread_win::enter();
     let client = activate_process_loopback(std::process::id(), status)?;
     if !sink.is_active() {
         return Ok(CaptureExit::DemandEnded);
     }
 
     let format = preferred_format();
+    let ready = CaptureEvent::new()?;
     unsafe {
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
             0,
             0,
             &format,
@@ -365,6 +390,8 @@ fn run_demand_session(
         )
     }
     .context("initialize 48 kHz stereo f32 process-loopback")?;
+    unsafe { client.SetEventHandle(ready.0) }.context("set process-loopback readiness event")?;
+    let capture_buffer_frames = unsafe { client.GetBufferSize() }.ok();
     if !sink.is_active() {
         return Ok(CaptureExit::DemandEnded);
     }
@@ -375,7 +402,18 @@ fn run_demand_session(
 
     unsafe { client.Start() }.context("start process-loopback capture")?;
     status.set(BackendState::Active);
-    info!("Windows process-loopback capture started");
+    info!(
+        audio_scheduling,
+        ?capture_buffer_frames,
+        "Windows process-loopback capture started (event driven)"
+    );
+    let mut last_poll = Instant::now();
+    let mut last_report = last_poll;
+    let mut max_poll_gap_ms = 0u128;
+    let mut pcm_discarded = 0usize;
+    let mut silent_frames = 0u64;
+    let mut captured_frames = 0u64;
+    let mut encoded_frames = 0u64;
     let capture_result = (|| -> Result<CaptureExit> {
         loop {
             if sink.is_closed() {
@@ -385,6 +423,9 @@ fn run_demand_session(
                 return Ok(CaptureExit::DemandEnded);
             }
 
+            let now = Instant::now();
+            max_poll_gap_ms = max_poll_gap_ms.max(now.duration_since(last_poll).as_millis());
+            last_poll = now;
             let mut processed = 0;
             while packet_drain_has_budget(processed) {
                 let packet_frames = unsafe { capture.GetNextPacketSize() }
@@ -404,7 +445,16 @@ fn run_demand_session(
                 };
                 let release = unsafe { capture.ReleaseBuffer(frames) }
                     .context("release process-loopback packet");
-                append_bounded(&mut pending, packet?, CAPTURE_ACCUMULATOR_CAP);
+                let packet = packet?;
+                captured_frames += frames as u64;
+                if silent {
+                    silent_frames += frames as u64;
+                }
+                pcm_discarded += pending
+                    .len()
+                    .saturating_add(packet.len())
+                    .saturating_sub(CAPTURE_ACCUMULATOR_CAP);
+                append_bounded(&mut pending, packet, CAPTURE_ACCUMULATOR_CAP);
                 release?;
                 processed += 1;
             }
@@ -422,11 +472,35 @@ fn run_demand_session(
                     opus,
                 };
                 *seq = seq.wrapping_add(1);
+                encoded_frames += 1;
                 if !sink.send_lossy(frame) {
                     return Ok(CaptureExit::SinkClosed);
                 }
             }
-            thread::sleep(CAPTURE_POLL);
+            if last_report.elapsed() >= Duration::from_secs(5) {
+                info!(
+                    max_poll_gap_ms,
+                    pcm_discarded,
+                    captured_frames,
+                    silent_frames,
+                    encoded_frames,
+                    "process-loopback capture health"
+                );
+                last_report = Instant::now();
+                max_poll_gap_ms = 0;
+                pcm_discarded = 0;
+                captured_frames = 0;
+                silent_frames = 0;
+                encoded_frames = 0;
+            }
+            // A minimum native process-loopback buffer can hold only one
+            // 10 ms packet. Wake on readiness instead of risking a Sleep(5)
+            // overshoot while the engine overwrites unread capture data.
+            if packet_drain_has_budget(processed) {
+                ready.wait()?;
+            } else {
+                thread::yield_now();
+            }
         }
     })();
     let stop_result = unsafe { client.Stop() }.context("stop process-loopback capture");
@@ -631,6 +705,30 @@ mod tests {
         let mut pending = VecDeque::from(vec![1.0, 2.0]);
         append_bounded(&mut pending, vec![3.0, 4.0, 5.0], 3);
         assert_eq!(pending, VecDeque::from(vec![3.0, 4.0, 5.0]));
+    }
+
+    #[test]
+    #[ignore = "manual Windows process-loopback capacity probe; requires audio engine"]
+    fn native_capture_buffer_capacities() -> Result<()> {
+        let _com = ComApartment::initialize_mta()?;
+        for requested_hns in [0, 1_000_000] {
+            let status = BackendStatus::new(BackendState::Starting);
+            let client = activate_process_loopback(std::process::id(), &status)?;
+            unsafe {
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    requested_hns,
+                    0,
+                    &preferred_format(),
+                    None,
+                )
+            }?;
+            let frames = unsafe { client.GetBufferSize()? };
+            println!("capture_buffer requested_hns={requested_hns} actual_frames={frames}");
+            assert!(frames > 0);
+        }
+        Ok(())
     }
 
     #[test]

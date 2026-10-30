@@ -23,7 +23,7 @@ use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize, Supporte
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::codec::OpusDecoder;
 use crate::{
@@ -35,14 +35,12 @@ use crate::{
 /// 200 ms. Generous enough to absorb network jitter, tight enough not
 /// to feel laggy.
 const RING_CAPACITY: usize = FRAME_SAMPLES_INTERLEAVED * 10;
-/// Three 20 ms frames reserve 60 ms against delivery jitter. A smaller 40 ms
-/// reserve previously underran during device scheduling stalls. Native audio
-/// acceptance, including quiet/sparse sounds, gates this intermediate setting.
-const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 3;
-/// A burst must not turn the 200 ms safety capacity into steady audio delay.
-/// Return to the 60 ms reserve once decoded audio exceeds 80 ms.
-/// A 120 ms plateau still added a device period in the real Wi-Fi measurement.
-const JITTER_MAX_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 4;
+/// Preserve the 80 ms reserve validated against SoundWire/USB scheduling stalls.
+/// Two native 60 ms candidates still produced gaps, including one 31.6 ms gap
+/// despite a wider catch-up threshold. Reduce the device period independently.
+const JITTER_TARGET_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 4;
+/// Catch up beyond 100 ms without retaining the full 200 ms ring capacity.
+const JITTER_MAX_SAMPLES: usize = FRAME_SAMPLES_INTERLEAVED * 5;
 
 /// Keep one ring-buffer's worth of ingress slack. Production logs showed the
 /// Windows playback worker occasionally being descheduled for 80–160 ms while
@@ -55,10 +53,10 @@ const PLAYBACK_HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_PAUSE_AFTER: Duration = Duration::from_secs(2);
 const DEFAULT_DEVICE_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 /// MMCSS protects the decoder/callback threads, and device discovery runs on
-/// a separate worker. The 20 ms device request does not reduce the separate
+/// a separate worker. The 10 ms device request does not reduce the separate
 /// 80 ms PCM reserve used to absorb network delivery stalls.
 #[cfg(target_os = "windows")]
-const PLAYBACK_BUFFER_FRAMES: u32 = 960;
+const PLAYBACK_BUFFER_FRAMES: u32 = 480;
 #[cfg(not(target_os = "windows"))]
 const PLAYBACK_BUFFER_FRAMES: u32 = 1_920;
 
@@ -944,7 +942,7 @@ fn run_playback_thread(
             }
             let samples = PLAYBACK_UNDERRUN_SAMPLES.swap(0, Ordering::Relaxed);
             if samples > 0 {
-                debug!(samples, "cpal playback underrun summary");
+                info!(samples, "cpal playback underrun summary");
             }
             queue_dropped_since_report = queue_dropped_since_report
                 .saturating_add(queue_dropped_frames.swap(0, Ordering::Relaxed));
@@ -1137,9 +1135,9 @@ fn fill_callback_at(
         return;
     }
     if !state.started {
-        // DTX/sparse audio may contain less than 60 ms in total. Bound the
+        // DTX/sparse audio may contain less than 80 ms in total. Bound the
         // wait in wall time instead of retaining a short sound until the next
-        // sound arrives. Continuous audio builds the normal 60 ms reserve.
+        // sound arrives. Continuous audio builds the normal 80 ms reserve.
         let since = state.buffering_since.get_or_insert(now);
         if consumer.occupied_len() < JITTER_TARGET_SAMPLES
             && now.saturating_duration_since(*since) < Duration::from_millis(60)
@@ -1787,7 +1785,7 @@ mod tests {
         assert_eq!(
             playback_stream_config(&supported, true).buffer_size,
             BufferSize::Fixed(if cfg!(target_os = "windows") {
-                960
+                480
             } else {
                 1_920
             })
@@ -1974,6 +1972,29 @@ mod tests {
     }
 
     #[test]
+    fn two_extra_delivery_quanta_preserve_pcm_with_twenty_ms_callbacks() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+        let mut dropped = 0;
+        for frame in 0..5 {
+            push_samples(
+                &mut producer,
+                &vec![frame as f32; FRAME_SAMPLES_INTERLEAVED],
+                &mut dropped,
+            );
+        }
+        let mut state = PlayoutState {
+            started: true,
+            buffering_since: None,
+        };
+        for frame in 0..5 {
+            let mut out = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+            fill_callback(&mut out, &mut consumer, &mut state);
+            assert!(out.iter().all(|&sample| sample == frame as f32));
+        }
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
     fn a_six_frame_delivery_burst_returns_to_the_normal_reserve() {
         let (mut producer, mut consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
         let mut dropped = 0;
@@ -1992,7 +2013,7 @@ mod tests {
         fill_callback(&mut out, &mut consumer, &mut started);
         let audible_age_ms = (5.0 - out[0]) * 20.0;
         assert!(
-            audible_age_ms <= 80.0,
+            audible_age_ms <= 100.0,
             "moderate Wi-Fi burst left {audible_age_ms} ms of queued age"
         );
     }

@@ -154,3 +154,30 @@ For both directions, retain all native continuous runs, separate sparse-sound
 runs, and physical mouse/keyboard acceptance results. A passing model or
 connection handshake does not establish that physical keyboard shortcuts
 reach the intended foreground window.
+
+## Validated Windows configuration (30 October 2026)
+
+The final Round B measurements and rejected experiments are documented in
+[the validation report](../../docs/performance-round-b-2026-10-30.md). The chosen
+configuration uses event-driven Windows process-loopback capture, capture and
+transport MMCSS registration, an isolated embedded Windows runtime, 192 kbps
+system audio, an 80 ms PCM reserve, and a 10 ms device request when supported.
+The source ID and installed payload hash must still be checked for every run.
+
+`windows-pair.py` gives each remote acquisition a unique directory, preventing a
+previous completion marker from making the coordinator copy files still being
+written. Keep incomplete and failed acquisitions instead of pooling their
+surviving markers as a complete latency result.
+
+To isolate capture/codec content from network and playback, build
+`cargo build --locked -p mineshare-audio --example sysout_capture_probe` and run
+the resulting executable with a fresh output directory while playing synthetic
+test audio from a separate process. It records system-output content for 46 s;
+use synthetic audio only. Its timestamps estimate encoded-frame handoff and
+must not be used to claim native endpoint or end-to-end latency.
+
+The ignored `native_capture_buffer_capacities` audio test is an explicit Windows
+hardware probe. Run it with `--ignored --nocapture` to inspect actual WASAPI
+capacity rather than assuming the requested buffer duration was honored. On the
+tested process-loopback implementation, both the minimum and 100 ms requests
+returned 480 frames. Ordinary automated tests do not execute this probe.

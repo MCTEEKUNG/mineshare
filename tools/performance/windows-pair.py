@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import wave
+import uuid
 
 import numpy as np
 from scipy import signal
@@ -146,6 +147,7 @@ def main():
     def ps(script):
         encoded = base64.b64encode(("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "+script).encode('utf-16-le')).decode()
         return subprocess.run(['ssh',*ssh,peer,'powershell','-NoProfile','-EncodedCommand',encoded],check=True,capture_output=True,text=True,timeout=30)
+    session_id = uuid.uuid4().hex
     task = 'MineShareRoundAAudioProbe'
     if not args.analyze_only:
         (args.output/'session.json').write_text(json.dumps(vars(args), default=str, indent=2))
@@ -155,7 +157,7 @@ def main():
         try:
             for number in range(1,args.runs+1):
                 folder = args.output/f'run-{number}'; folder.mkdir(exist_ok=False)
-                remote = args.remote_root+'/'+args.output.name+f'-run-{number}'
+                remote = args.remote_root+'/'+args.output.name+f'-{session_id}-run-{number}'
                 with (folder/'recorder.log').open('w') as log:
                     local_command = ([sys.executable,str(Path(__file__).with_name('windows-pair-agent.py').resolve()),'capture',str(folder.resolve()),str(args.recorder.resolve()),str((args.output/'markers.wav').resolve())]
                                      if args.reverse else [str(args.recorder.resolve()),str(folder.resolve()),'46'])

@@ -2459,7 +2459,10 @@ async fn run_peer_session(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut prev = StatsSnapshot::default();
         loop {
-            interval.tick().await;
+            let scheduled = interval.tick().await;
+            let tick_late_ms = tokio::time::Instant::now()
+                .saturating_duration_since(scheduled)
+                .as_millis();
             let curr = stats_tick.snapshot();
             crate::status::publish_counters(
                 curr.sent_pkts,
@@ -2473,6 +2476,7 @@ async fn run_peer_session(
             if delta.sent_pkts != 0 || delta.recv_pkts != 0 {
                 info!(
                     peer = %peer_label,
+                    tick_late_ms,
                     sent_pkts = delta.sent_pkts,
                     sent_bytes = delta.sent_bytes,
                     recv_pkts = delta.recv_pkts,
@@ -2543,7 +2547,7 @@ async fn run_peer_session(
             }};
         }
         if queue_report.elapsed() >= Duration::from_secs(5) {
-            debug!(input_queue=?input_sub.diagnostics(), audio_queue=?sub.diagnostics(), capture_expired=bcast.capture_expired(), capture_full=?mineshare_audio::capture_queue_drops(), "realtime queue health (depth/coalesce/age and depth/expiry/replacement/age)");
+            info!(input_queue=?input_sub.diagnostics(), audio_queue=?sub.diagnostics(), capture_expired=bcast.capture_expired(), capture_full=?mineshare_audio::capture_queue_drops(), "realtime queue health (depth/coalesce/age and depth/expiry/replacement/age)");
             queue_report = std::time::Instant::now();
         }
         if send_budget.audio_due(std::time::Instant::now()) {

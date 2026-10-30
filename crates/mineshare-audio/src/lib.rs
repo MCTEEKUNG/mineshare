@@ -27,6 +27,13 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 mod audio_thread_win;
+/// Register the calling Windows realtime worker with thread-affine MMCSS.
+/// Registration is idempotent and is reverted when the thread exits.
+#[cfg(target_os = "windows")]
+pub fn register_realtime_thread() -> bool {
+    audio_thread_win::enter()
+}
+
 pub mod codec;
 pub mod cpal_mic;
 pub mod mic_pcm;
