@@ -31,6 +31,10 @@ for name in MineShare.desktop typeless.desktop; do
     fi
 done
 install -m 755 "$root/installer/linux/start-typeless-after-mineshare.sh" "$HOME/.local/bin/mineshare-typeless-start"
+for item in "$HOME/.local/bin/mineshare-typeless-prepare" "$data/MineShare/typeless-ordered.desktop"; do
+    [[ ! -e "$item" ]] || cp -a -- "$item" "$backup/$(basename "$item")"
+done
+install -m 755 "$root/installer/linux/prepare-typeless-autostart.sh" "$HOME/.local/bin/mineshare-typeless-prepare"
 # Remember the selected executable (path only, never a shell command).
 printf '%s\n' "$launcher" > "$data/MineShare/keyboard-broker-launcher"
 printf 'enabled\n' > "$config/MineShare/keyboard-broker.enabled"
@@ -53,6 +57,16 @@ X-GNOME-Autostart-enabled=true
 StartupNotify=false
 EOF
 done
+install -m 644 "$config/autostart/MineShare.desktop" "$data/MineShare/typeless-ordered.desktop"
+# GNOME 50 launches autostarts directly in app-gnome-*.scope. A drop-in on
+# app-typeless@autostart.service does not cover that path. Repair the managed
+# entries before the session manager can cache them, not at a later login target.
+session_guard="$config/systemd/user/gnome-session-manager@.service.d/50-mineshare-order.conf"
+mkdir -p "$(dirname "$session_guard")"
+[[ ! -e "$session_guard" ]] || cp -a -- "$session_guard" "$backup/gnome-session-manager.conf"
+# Do not prevent desktop login if optional MineShare files are damaged. The
+# helper itself checks the opt-in marker; never condition the GNOME unit on it.
+printf '[Service]\nExecStartPre=-"%%h/.local/bin/mineshare-typeless-prepare"\n' > "$session_guard"
 # Typeless can delete its per-user desktop override when its own login setting
 # is off. GNOME then falls back to the system-wide desktop entry and races our
 # coordinator. Keep a separate, conditional user-unit guard: only the opt-in

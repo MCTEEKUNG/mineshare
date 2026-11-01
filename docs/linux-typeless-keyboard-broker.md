@@ -41,6 +41,31 @@ the system-wide desktop entry again; relying on that override alone caused the
 block manual Typeless launches or change vendor files. Validate the condition
 without quotes around the path: this systemd condition treats quotes literally.
 
+GNOME 50 can instead launch desktop entries directly in `app-gnome-*.scope`.
+The `app-typeless@autostart.service` guard does not protect that path. On
+2026-11-01, login logs showed Typeless starting directly before MineShare after
+its user override disappeared. Setup now also installs
+`gnome-session-manager@.service.d/50-mineshare-order.conf`. Its `ExecStartPre`
+runs the per-user `mineshare-typeless-prepare` helper before GNOME reads the
+autostart entries. The helper atomically restores both managed entries from
+`~/.local/share/MineShare/typeless-ordered.desktop`, so vendor deletion or
+rewriting of the Typeless override cannot bypass the readiness coordinator at
+the next login. No vendor or system-wide desktop file is modified.
+
+The preparation helper does nothing when the broker opt-in marker is absent.
+Its optional pre-start command cannot prevent desktop login if MineShare's
+private setup files are damaged. Setup reloads user units without restarting
+GNOME or either application. Re-run setup from the current helper files to
+install this guard on an existing installation.
+
+Validation on the real Ubuntu machine covered systemd parsing and transient
+units executing the same pre-start helper after deleting or replacing the user
+entry. Both restored the coordinator before the unit's main command; existing
+applications stayed running and identity/settings/layout/trust hashes were
+unchanged. Isolated tests also cover opt-out, concurrent coordinators, missing
+readiness and spaced home paths. A new graphical login remains the final
+acceptance step; it was not forced while the user had work open.
+
 Limitations requiring acceptance testing: physical hotplug is not rediscovered by
 the existing capture backend; replugged devices require a new ordered login.
 Virtual keyboards/remappers are excluded in broker mode. Bluetooth UHID devices
@@ -56,6 +81,10 @@ did not exist before), and log out/in. Do not run the old and new capture at onc
 Also remove the MineShare-owned `50-mineshare-order.conf` user drop-in and run
 `systemctl --user daemon-reload`. Removing the broker marker already makes its
 condition allow normal Typeless login startup.
+Remove the separate MineShare-owned drop-in under
+`gnome-session-manager@.service.d/` as well. Removing the marker already makes
+its preparation helper a no-op; the private canonical desktop entry and
+`~/.local/bin/mineshare-typeless-prepare` may then be removed if no longer needed.
 
 Acceptance, with Typeless open on both machines: PC physical mouse crosses to
 Laptop, PC Right Alt activates Laptop only; Super / Win+Shift+S work on Laptop;

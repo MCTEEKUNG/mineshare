@@ -240,6 +240,7 @@ mod linux {
                     "install-gnome-pointer.sh",
                     "enable-input.sh",
                     "start-typeless-after-mineshare.sh",
+                    "prepare-typeless-autostart.sh",
                 ]
                 .iter()
                 .all(|name| helper(name).is_ok())

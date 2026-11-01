@@ -5,7 +5,7 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 dpkg-deb --extract "$deb" "$work"
 root="$work/usr/share/mineshare/setup/installer/linux"
-for file in install-typeless-compat.sh start-typeless-after-mineshare.sh install-gnome-pointer.sh enable-input.sh; do
+for file in install-typeless-compat.sh start-typeless-after-mineshare.sh prepare-typeless-autostart.sh install-gnome-pointer.sh enable-input.sh; do
     cmp "installer/linux/$file" "$root/$file"
     bash -n "$root/$file"
 done
