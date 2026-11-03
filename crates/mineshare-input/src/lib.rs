@@ -910,6 +910,16 @@ fn clear_held_forwarded() {
 ///   * Else (up of an un-tracked key) → don't forward; the
 ///     local OS gets it as usual.
 pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
+    route_keystroke_with_target(code, down, cursor_in_remote, None)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn route_keystroke_with_target(
+    code: u16,
+    down: bool,
+    cursor_in_remote: bool,
+    target: Option<bool>,
+) -> bool {
     let mut held = HELD_FORWARDED.lock();
     let i = code as usize;
     if !peer_session_ready() {
@@ -926,7 +936,7 @@ pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
         }
         true
     } else if down {
-        let decide = should_forward_keys(cursor_in_remote);
+        let decide = target.unwrap_or_else(|| should_forward_keys(cursor_in_remote));
         if decide && i < 1024 {
             held[i] = true;
         }

@@ -15,6 +15,17 @@ impl Default for Routes {
 }
 
 impl Routes {
+    pub(super) fn tab_follows_alt(&self) -> Option<bool> {
+        // Alt+Tab is one shortcut even if the cursor or Smart focus moves
+        // between the Alt and Tab presses. KEY_LEFTALT is the switcher
+        // modifier. Right Alt may be AltGr and remains independent.
+        match self.0[56] {
+            Some(Destination::Local) => Some(false),
+            Some(Destination::Remote) => Some(true),
+            _ => None,
+        }
+    }
+
     pub(super) fn edge(&mut self, code: u16, value: i32, remote: bool) -> Option<Destination> {
         let slot = self.0.get_mut(usize::from(code))?;
         match value {
@@ -52,6 +63,18 @@ impl Routes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_uses_the_destination_of_held_left_alt() {
+        for remote in [false, true] {
+            let mut routes = Routes::default();
+            assert_eq!(routes.tab_follows_alt(), None);
+            routes.edge(56, 1, remote);
+            assert_eq!(routes.tab_follows_alt(), Some(remote));
+            routes.edge(56, 0, !remote);
+            assert_eq!(routes.tab_follows_alt(), None);
+        }
+    }
 
     #[test]
     fn right_alt_and_super_only_reach_selected_destination() {

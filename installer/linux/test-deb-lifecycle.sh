@@ -60,6 +60,10 @@ for session in x11 wayland headless absent; do
         [[ $(wc -l < "$tmp/bus") == 1 ]]
     fi
 done
+session=wayland
+rm -f "$tmp/bus"
+ms_resume_one 1000 ordered
+grep -q '^1000 systemd-run --user --wait --collect .* -- /bin/bash /usr/share/mineshare/setup/installer/linux/start-typeless-after-mineshare.sh$' "$tmp/bus"
 session=wayland launch_fails=yes
 if ms_resume_one 1000; then echo 'Restart failure was not detected'; exit 1; fi
 ms_identity() { echo 1000:10; }

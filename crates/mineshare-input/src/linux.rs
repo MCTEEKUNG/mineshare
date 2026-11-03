@@ -1133,8 +1133,18 @@ fn pump_device(
                         // A locally held key remains local even if a repeat arrives
                         // after crossing. Remote routing keeps its existing held tracker.
                         let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        let shortcut_target = if key == EvKey::KEY_TAB && value == 1 {
+                            broker.as_ref().and_then(|b| b.routes.tab_follows_alt())
+                        } else {
+                            None
+                        };
                         let remote = !local_held
-                            && super::route_keystroke(key.0, value != 0, cursor_in_remote);
+                            && super::route_keystroke_with_target(
+                                key.0,
+                                value != 0,
+                                cursor_in_remote,
+                                shortcut_target,
+                            );
                         let forward = if let Some(broker) = broker.as_mut() {
                             match broker.dispatch(key.0, value, remote) {
                                 Ok(forward) => forward && remote,

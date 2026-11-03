@@ -56,7 +56,7 @@ ms_state_directory() {
 }
 
 ms_prepare_upgrade() {
-    local state=/run/mineshare-upgrade pid identity uid
+    local state=/run/mineshare-upgrade pid identity uid mode vendor
     [[ $EUID == 0 ]] || return 1
     umask 077
     ms_state_directory "$state"
@@ -67,8 +67,55 @@ ms_prepare_upgrade() {
         pid=${proc##*/}
         identity=$(ms_identity "$pid") || continue
         uid=${identity%%:*}
+        mode=plain
+        vendor=$(ms_user_command "$uid" bash -c '
+            [[ -f ${XDG_CONFIG_HOME:-$HOME/.config}/MineShare/keyboard-broker.enabled ]] || exit 0
+            [[ -r ${XDG_DATA_HOME:-$HOME/.local/share}/MineShare/typeless-login.desktop ]] || exit 0
+            for pid in $(pgrep -u "$(id -u)" -x typeless); do
+                [[ $(readlink "/proc/$pid/exe") == /opt/Typeless/typeless ]] && printf "%s\n" "$pid"
+            done
+            exit 0
+        ' 2>/dev/null) || vendor=
+        if [[ -n $vendor ]]; then mode=ordered; fi
         # Record intent before stopping so a configure retry can resume it.
-        printf '%s\n' "$uid" >> "$state/users"
+        printf '%s:%s\n' "$uid" "$mode" >> "$state/users"
+        if [[ $mode == ordered ]]; then
+            if ! ms_user_command "$uid" bash -c '
+                # Run as the desktop user and use pidfds to avoid PID reuse.
+                exec python3 - "$@" <<'"'"'PY'"'"'
+import os, select, signal, sys
+import shutil, subprocess
+from pathlib import Path
+
+if shutil.which("pactl"):
+    audio = subprocess.run(["pactl", "list", "source-outputs"], capture_output=True, text=True)
+    if audio.returncode == 0 and "typeless" in audio.stdout.lower():
+        sys.exit("Typeless is recording. Finish the recording before upgrading MineShare.")
+
+pids = []
+for arg in sys.argv[1:]:
+    pid = int(arg)
+    try:
+        fd = os.pidfd_open(pid)
+        proc = Path("/proc") / str(pid)
+        if proc.stat().st_uid == os.getuid() and os.readlink(proc / "exe") == "/opt/Typeless/typeless":
+            pids.append(fd)
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+for fd in pids:
+    try:
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+for fd in pids:
+    if not select.select([fd], [], [], 3)[0]:
+        sys.exit("Typeless did not close. MineShare upgrade paused before keyboard ownership changed.")
+PY
+            ' bash $vendor; then
+                ms_resume_upgrade || true
+                return 1
+            fi
+        fi
         echo "==> Stopping MineShare for user $uid before upgrade"
         ms_stop_one "$pid" "$identity"
     done
@@ -87,10 +134,10 @@ ms_user_command() {
 }
 
 ms_resume_one() {
-    local uid=$1 proc identity environment
+    local uid=$1 mode=${2:-plain} proc identity environment
     for proc in /proc/[0-9]*; do
         identity=$(ms_identity "${proc##*/}") || continue
-        [[ ${identity%%:*} == "$uid" ]] && return 0
+        if [[ ${identity%%:*} == "$uid" && $mode == plain ]]; then return 0; fi
     done
     environment=$(ms_user_command "$uid" systemctl --user show-environment 2>/dev/null) || {
         echo "==> MineShare not restarted for user $uid: no active user manager."
@@ -100,23 +147,30 @@ ms_resume_one() {
         echo "==> MineShare not restarted for user $uid: no graphical session."
         return 0
     fi
-    ms_user_command "$uid" systemd-run --user --collect --property=Type=exec --property=PartOf=graphical-session.target \
-        "--unit=mineshare-package-resume-$$-$uid" -- /usr/bin/mineshare-app
+    local unit="--unit=mineshare-package-resume-$$-$uid"
+    if [[ $mode == ordered ]]; then
+        # The coordinator exits after launching the apps. Keep its children alive.
+        ms_user_command "$uid" systemd-run --user --wait --collect --property=Type=exec --property=KillMode=process \
+            "$unit" -- /bin/bash /usr/share/mineshare/setup/installer/linux/start-typeless-after-mineshare.sh
+    else
+        ms_user_command "$uid" systemd-run --user --collect --property=Type=exec --property=PartOf=graphical-session.target \
+            "$unit" -- /usr/bin/mineshare-app
+    fi
 }
 
 ms_resume_upgrade() {
-    local state=/run/mineshare-upgrade uid failed=0
+    local state=/run/mineshare-upgrade uid mode failed=0
     [[ -e $state/users ]] || return 0 # Fresh install: do not auto-open a GUI.
     ms_state_directory "$state"
     [[ -f $state/users && ! -L $state/users && $(stat -c %u "$state/users") == 0 ]] || return 1
     [[ -x /usr/bin/mineshare-app ]] || return 1
-    while IFS= read -r uid; do
+    while IFS=: read -r uid mode; do
         [[ $uid =~ ^[0-9]+$ && $uid != 0 ]] || { failed=1; continue; }
-        if ! ms_resume_one "$uid"; then
+        if ! ms_resume_one "$uid" "${mode:-plain}"; then
             echo "MineShare updated, but automatic restart failed for user $uid. Open MineShare from the application menu." >&2
             failed=1
         fi
-    done < <(sort -u "$state/users")
+    done < <(sort -t: -k1,1 -k2,2r "$state/users" | awk -F: '!seen[$1]++')
     if [[ $failed == 0 ]]; then rm -- "$state/users"; rmdir -- "$state"; fi
     # A desktop restart failure must not break package configuration. Retain state for retry.
     return 0
