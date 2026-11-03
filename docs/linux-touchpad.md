@@ -1,4 +1,40 @@
-# Windows touchpad to Ubuntu
+# Touchpad sharing with Linux
+
+## Three-finger window switching
+
+With the pointer on a Linux peer, swipe horizontally with three fingers.
+Swiping right advances the peer's Alt+Tab switcher and swiping left moves
+backward. Keep the fingers down to step through the list and lift to select.
+The receiver releases the gesture's Alt modifier on handback, disconnect, or
+inactivity if contact updates stop arriving. The Linux desktop must have a
+window switcher bound to Alt+Tab and Alt+Shift+Tab.
+
+Linux can also send contacts from a supported type-B multitouch pad to a
+Windows or Linux peer. Windows uses its configured Precision Touchpad
+gestures for the received contacts. Set its three-finger swipes to
+**Switch apps and show desktop** for app switching. Other received gestures
+such as two-finger scrolling and vertical swipes continue through the
+destination's native touchpad handling.
+
+Linux capture uses evdev and injection uses uinput. Ubuntu/Debian and
+Fedora/Rocky use the same input code, with their respective DEB or RPM
+packages and the MineShare input-permission setup. Window switching needs a
+graphical session. Edge handoff also depends on the desktop's pointer
+integration. Use **Ctrl+Alt+R** for manual handoff if the desktop cannot report
+its screen edge. When the pointer is back on the source desktop, its own
+touchpad settings apply.
+
+On Linux, a pad that reports individual contacts can use native forwarding to
+a frame-capable peer. Older peers without frame injection can still receive
+basic pointer and scroll events. Linux sends its native contact geometry
+unchanged and applies the MineShare scroll-speed setting to wheel fallback.
+
+For physical verification, try Windows → Linux, Linux → Windows and Linux →
+Linux. On each receiver, open three windows, cycle forward and backward while
+keeping three fingers down, and lift to select. Repeat while crossing back or
+disconnecting, then verify Alt is released and two-finger scrolling still works.
+
+## Previous Windows-to-Ubuntu validation
 
 Verified on Tee (GNOME Wayland) and the Windows laptop on 2026-10-27, source
 `f3606132c7a5`. The user physically confirmed two-finger scrolling and a
@@ -34,8 +70,8 @@ Reference: [Linux multitouch protocol](https://docs.kernel.org/input/multi-touch
   to another stream. Reject duplicate IDs and malformed counts before mutation.
 - Release all contacts on handoff/disconnect, including when no keyboard keys
   or mouse buttons are held. Reset fractional wheel residue at session cleanup.
-- Do not replace contact gestures with Windows shortcut chords on Ubuntu.
-  Available gestures/actions depend on the destination desktop environment.
+- The three-finger horizontal app switcher is handled by MineShare on Linux.
+  Other native gestures depend on the destination desktop environment.
 - Unit tests cover fractional scroll, invalid frames, missing contacts, stream
   replacement and stale terminal events. Windows input tests: 94 passed,
   12 environment-dependent ignored. Linux input tests: 51 passed, 3 ignored;

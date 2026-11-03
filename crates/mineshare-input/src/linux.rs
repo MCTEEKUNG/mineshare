@@ -2,8 +2,8 @@
 //!
 //! Capture: read raw events from `/dev/input/event*`. Requires the user to
 //! be in group `input` (or a udev rule that grants read access). The daemon
-//! discovers eligible devices by enumerating and looking for relative axes
-//! (mice/touchpads) or `KEY_A`/`KEY_LEFTCTRL` (keyboards).
+//! discovers relative mice, indirect multitouch pads and keyboards by their
+//! advertised evdev capabilities.
 //!
 //! Inject: a virtual `uinput` device that the OS treats as a real HID. Needs
 //! `/dev/uinput` to be writable by the daemon's user.
@@ -68,9 +68,14 @@ mod keyboard_broker;
 mod keyboard_routes;
 mod pointer;
 mod touchpad;
+mod touchpad_capture;
 
 pub(super) fn touchpad_capabilities() -> u32 {
-    touchpad::capabilities()
+    let mut capabilities = touchpad::capabilities();
+    if touchpad_capture::available() {
+        capabilities |= super::TOUCHPAD_CAP_FRAME_CAPTURE;
+    }
+    capabilities
 }
 
 #[cfg(test)]
@@ -715,7 +720,7 @@ impl EvdevCapture {
         }
         if devices.is_empty() {
             anyhow::bail!(
-                "no evdev mouse/keyboard found. Add user to group `input` and re-login, \
+                "no evdev mouse, touchpad or keyboard found. Add user to group `input` and re-login, \
                  or install a udev rule granting read access to /dev/input/event*"
             );
         }
@@ -741,24 +746,25 @@ fn is_relevant(d: &Device) -> bool {
         .supported_keys()
         .map(|k| k.contains(EvKey::BTN_LEFT) || k.contains(EvKey::BTN_RIGHT))
         .unwrap_or(false);
-    has_rel || has_keyboard || has_mouse_btns
+    has_rel || has_keyboard || has_mouse_btns || touchpad_capture::is_touchpad(d)
 }
 
-/// Classify a device as "pointer-like" — has actual relative-axis
-/// motion. Used to scope EVIOCGRAB more narrowly when the peer
+/// Classify a device as "pointer-like" — has relative-axis motion or
+/// type-B touchpad contacts. Used to scope EVIOCGRAB when the peer
 /// is driving us: only mouse-class devices need to be grabbed
 /// (to prevent the user's HW cursor fighting the injected one).
 /// Keyboards stay free so the user can keep typing on their own
 /// machine even while the peer's cursor is borrowing the screen.
 ///
-/// We deliberately key off REL_X / REL_Y *only*, not BTN_LEFT —
+/// For mice we deliberately key off REL_X / REL_Y, not BTN_LEFT —
 /// many gaming keyboards expose media-key BTN_* codes the kernel
 /// happens to share with mouse buttons, and the original
 /// "has_mouse_btns" branch mis-classified them as pointers.
 fn is_pointer_device(d: &Device) -> bool {
-    d.supported_relative_axes()
-        .map(|a| a.contains(RelativeAxisCode::REL_X) || a.contains(RelativeAxisCode::REL_Y))
-        .unwrap_or(false)
+    touchpad_capture::is_touchpad(d)
+        || d.supported_relative_axes()
+            .map(|a| a.contains(RelativeAxisCode::REL_X) || a.contains(RelativeAxisCode::REL_Y))
+            .unwrap_or(false)
 }
 
 impl InputCapture for EvdevCapture {
@@ -787,6 +793,17 @@ impl InputCapture for EvdevCapture {
             warn!(error = %format!("{error:#}"), "keyboard broker unavailable; skipping keyboard capture");
         }
         for (path, device, broker) in prepared.devices {
+            if touchpad_capture::is_touchpad(&device) {
+                match touchpad_capture::start(path.clone(), sink.clone()) {
+                    Ok(()) => {
+                        info!(path = %path.display(), "evdev touchpad capture started");
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(%error, path = %path.display(), "evdev touchpad capture unavailable");
+                    }
+                }
+            }
             let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
@@ -1398,12 +1415,14 @@ enum HeldKey {
     MouseBtn(u16),
     /// KEY_* keyboard code emitted on the keyboard node.
     KbKey(u16),
+    GestureAlt,
 }
 
 pub struct UinputInject {
     mouse: parking_lot::Mutex<VirtualDevice>,
     keyboard: parking_lot::Mutex<VirtualDevice>,
     touchpad: parking_lot::Mutex<Option<touchpad::Touchpad>>,
+    window_swipe: parking_lot::Mutex<touchpad::WindowSwipe>,
     scroll_residue: parking_lot::Mutex<[f32; 2]>,
     /// Set of codes the peer has injected `down` without a matching
     /// `up`. Maintained per inject call; drained on
@@ -1469,6 +1488,7 @@ impl UinputInject {
                 }
             }),
             scroll_residue: parking_lot::Mutex::new([0.0; 2]),
+            window_swipe: parking_lot::Mutex::default(),
             held: parking_lot::Mutex::new(HashSet::new()),
         })
     }
@@ -1483,6 +1503,71 @@ impl UinputInject {
             .lock()
             .emit(ev)
             .context("uinput emit (keyboard)")?;
+        Ok(())
+    }
+
+    fn keyboard_edge(&self, code: u16, down: bool) -> Result<()> {
+        self.emit_keyboard(&[evdev::InputEvent::new(
+            EventType::KEY.0,
+            code,
+            i32::from(down),
+        )])?;
+        super::note_key_injected_with_code(code, down);
+        Ok(())
+    }
+
+    fn end_window_switch(&self) -> Result<()> {
+        let mut held = self.held.lock();
+        if held.contains(&HeldKey::GestureAlt) {
+            if !held.contains(&HeldKey::KbKey(EvKey::KEY_LEFTALT.0)) {
+                self.keyboard_edge(EvKey::KEY_LEFTALT.0, false)?;
+            }
+            held.remove(&HeldKey::GestureAlt);
+        }
+        Ok(())
+    }
+
+    fn switch_window(&self, reverse: bool, count: usize) -> Result<()> {
+        let mut held = self.held.lock();
+        let alt = EvKey::KEY_LEFTALT.0;
+        let tab = EvKey::KEY_TAB.0;
+        let shift = EvKey::KEY_LEFTSHIFT.0;
+        // Avoid interfering with an in-progress keyboard shortcut.
+        if [
+            EvKey::KEY_TAB,
+            EvKey::KEY_LEFTSHIFT,
+            EvKey::KEY_RIGHTSHIFT,
+            EvKey::KEY_LEFTCTRL,
+            EvKey::KEY_RIGHTCTRL,
+            EvKey::KEY_RIGHTALT,
+            EvKey::KEY_LEFTMETA,
+            EvKey::KEY_RIGHTMETA,
+        ]
+        .iter()
+        .any(|key| held.contains(&HeldKey::KbKey(key.0)))
+        {
+            return Ok(());
+        }
+        if !held.contains(&HeldKey::GestureAlt) {
+            if !held.contains(&HeldKey::KbKey(alt)) {
+                self.keyboard_edge(alt, true)?;
+            }
+            held.insert(HeldKey::GestureAlt);
+        }
+        if reverse {
+            self.keyboard_edge(shift, true)?;
+            held.insert(HeldKey::KbKey(shift));
+        }
+        for _ in 0..count {
+            self.keyboard_edge(tab, true)?;
+            held.insert(HeldKey::KbKey(tab));
+            self.keyboard_edge(tab, false)?;
+            held.remove(&HeldKey::KbKey(tab));
+        }
+        if reverse {
+            self.keyboard_edge(shift, false)?;
+            held.remove(&HeldKey::KbKey(shift));
+        }
         Ok(())
     }
 }
@@ -1528,13 +1613,10 @@ impl InputInject for UinputInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
-        self.emit_keyboard(&[evdev::InputEvent::new(
-            EventType::KEY.0,
-            code.0,
-            if down { 1 } else { 0 },
-        )])?;
-        super::note_key_injected_with_code(code.0, down);
         let mut held = self.held.lock();
+        if code.0 != EvKey::KEY_LEFTALT.0 || !held.contains(&HeldKey::GestureAlt) {
+            self.keyboard_edge(code.0, down)?;
+        }
         if down {
             held.insert(HeldKey::KbKey(code.0));
         } else {
@@ -1544,13 +1626,19 @@ impl InputInject for UinputInject {
     }
 
     fn release_all_held(&self) -> Result<()> {
+        let mut swipe = self.window_swipe.lock();
+        *swipe = touchpad::WindowSwipe::default();
         *self.scroll_residue.lock() = [0.0; 2];
         let touchpad_result = self
             .touchpad
             .lock()
             .as_mut()
             .map_or(Ok(()), |pad| pad.release());
-        let drained: Vec<HeldKey> = self.held.lock().drain().collect();
+        let mut held = self.held.lock();
+        if held.remove(&HeldKey::GestureAlt) {
+            held.insert(HeldKey::KbKey(EvKey::KEY_LEFTALT.0));
+        }
+        let drained: Vec<HeldKey> = held.drain().collect();
         if drained.is_empty() {
             return touchpad_result;
         }
@@ -1563,6 +1651,7 @@ impl InputInject for UinputInject {
                 HeldKey::MouseBtn(code) => {
                     self.emit_mouse(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
                 }
+                HeldKey::GestureAlt => unreachable!(),
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");
@@ -1601,11 +1690,52 @@ impl InputInject for UinputInject {
     }
 
     fn touchpad(&self, event: super::TouchpadEvent) -> Result<()> {
-        self.touchpad
-            .lock()
+        use touchpad::SwipeOutput;
+        let mut swipe = self.window_swipe.lock();
+        // A handback can race with the inject worker after its initial
+        // ownership check. Recheck while serialized with gesture cleanup.
+        if !event.is_terminal() && !crate::peer_in_remote() && !crate::is_game_receiving() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if swipe.expired(now) {
+            self.end_window_switch()?;
+        }
+        let output = swipe.update(event, now)?;
+        if matches!(output, SwipeOutput::Ignore) {
+            return Ok(());
+        }
+        if !swipe.switching() {
+            self.end_window_switch()?;
+        }
+        let mut touchpad = self.touchpad.lock();
+        let pad = touchpad
             .as_mut()
-            .context("Linux touchpad receiver unavailable")?
-            .inject(event)
+            .context("Linux touchpad receiver unavailable")?;
+        match output {
+            SwipeOutput::Native => pad.inject(event),
+            SwipeOutput::Replay(first) => {
+                pad.inject(first)?;
+                pad.inject(event)
+            }
+            SwipeOutput::Step { reverse, count } => {
+                pad.release()?;
+                self.switch_window(reverse, count)
+            }
+            SwipeOutput::Hold | SwipeOutput::Finish => pad.release(),
+            SwipeOutput::Ignore => unreachable!(),
+        }
+    }
+
+    fn expire_touchpad_gesture(&self) -> Result<()> {
+        let mut swipe = self.window_swipe.lock();
+        if swipe.switching()
+            && (swipe.expired(std::time::Instant::now())
+                || (!crate::peer_in_remote() && !crate::is_game_receiving()))
+        {
+            self.end_window_switch()?;
+        }
+        Ok(())
     }
 }
 

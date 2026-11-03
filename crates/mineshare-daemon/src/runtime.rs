@@ -380,7 +380,9 @@ impl InjectSender {
                     entry.merged_motion = true;
                     coalesced = true;
                 }
-                (InputEvent::Touchpad(current), InputEvent::Touchpad(next)) => {
+                (InputEvent::Touchpad(current), InputEvent::Touchpad(next))
+                    if current.can_coalesce_with(&next) =>
+                {
                     *current = next;
                     entry.merged_motion = false;
                     coalesced = true;
@@ -2246,6 +2248,7 @@ async fn run_peer_session(
     let playback_recv = playback.clone();
     let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
+    let inject_for_gesture_timeout = inject.clone();
     let mut recv_handle = tokio::spawn(async move {
         // Buffer must fit the largest WireFrame: input events are
         // tiny but Opus frames + AEAD tag + bincode framing top out
@@ -2267,6 +2270,10 @@ async fn run_peer_session(
             let received = tokio::select! {
                 _ = route_tick.tick() => {
                     if inject_tx.queue.stopped.load(Ordering::Acquire) {break;}
+                    if let Err(error) = inject_for_gesture_timeout.expire_touchpad_gesture() {
+                        warn!(%error, "failed to release timed-out touchpad gesture");
+                        break;
+                    }
                     playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
                     mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
                     continue;
@@ -2612,9 +2619,8 @@ async fn run_peer_session(
                 // Touchpad contact frames are absolute active-contact
                 // snapshots. When UDP backpressure leaves several updates
                 // queued for the same stream, only the newest one is useful:
-                // it contains all current contacts and the receiver derives
-                // any missing DOWN/UPDATE/UP transitions from it. Terminal
-                // frames and direct actions are never coalesced.
+                // while the active contact IDs remain the same. Contact
+                // changes, terminal frames and direct actions are barriers.
                 Ok(InputEvent::Touchpad(mut latest))
                     if latest.coalescible_stream().is_some() =>
                 {
@@ -2624,7 +2630,7 @@ async fn run_peer_session(
                     while can_merge_wire_motion(merged_samples) {
                         match input_sub.try_recv() {
                             Ok(InputEvent::Touchpad(next))
-                                if next.coalescible_stream() == Some(stream_id) =>
+                                if latest.can_coalesce_with(&next) =>
                             {
                                 latest = next;
                                 merged_samples += 1;
@@ -3574,6 +3580,55 @@ mod tests {
         InputEvent::Touchpad(
             TouchpadEvent::frame(stream_id, &[TouchpadContact { id: 1, x, y: 20 }], false).unwrap(),
         )
+    }
+
+    #[test]
+    fn inject_queue_preserves_finger_count_changes_within_a_stream() {
+        let queue = Arc::new(InjectQueue {
+            pending: Default::default(),
+            wake: Default::default(),
+            stopped: Default::default(),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        let single = touchpad_frame(77, 100);
+        let three = InputEvent::Touchpad(
+            TouchpadEvent::frame(
+                77,
+                &[
+                    TouchpadContact {
+                        id: 1,
+                        x: 100,
+                        y: 20,
+                    },
+                    TouchpadContact {
+                        id: 2,
+                        x: 200,
+                        y: 20,
+                    },
+                    TouchpadContact {
+                        id: 3,
+                        x: 300,
+                        y: 20,
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        );
+        for event in [single, three, single] {
+            sender.send(event).unwrap();
+        }
+        assert_eq!(
+            queue
+                .pending
+                .lock()
+                .iter()
+                .map(|entry| entry.event)
+                .collect::<Vec<_>>(),
+            vec![single, three, single]
+        );
     }
 
     #[test]

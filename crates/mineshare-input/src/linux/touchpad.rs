@@ -6,6 +6,7 @@ use evdev::{
     UinputAbsSetup, uinput::VirtualDevice,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 const TOOLS: [Key; 5] = [
@@ -15,6 +16,165 @@ const TOOLS: [Key; 5] = [
     Key::BTN_TOOL_QUADTAP,
     Key::BTN_TOOL_QUINTTAP,
 ];
+
+// About 9 mm on the normalized 120 mm virtual pad. Subsequent steps
+// are relative to the previous detent so reversing direction also works.
+const SWITCH_STEP: i32 = 5_000;
+const SWITCH_IDLE: Duration = Duration::from_millis(400);
+
+#[derive(Default)]
+pub(super) struct WindowSwipe {
+    stream: Option<u32>,
+    phase: SwipePhase,
+}
+
+#[derive(Default)]
+enum SwipePhase {
+    #[default]
+    Waiting,
+    Tracking([TouchpadContact; 3]),
+    Native,
+    Switching {
+        fingers: [u32; 3],
+        detent: i32,
+        updated: Instant,
+    },
+    Consumed,
+}
+
+pub(super) enum SwipeOutput {
+    Ignore,
+    Native,
+    Replay(TouchpadEvent),
+    Hold,
+    Step { reverse: bool, count: usize },
+    Finish,
+}
+
+impl WindowSwipe {
+    pub(super) fn expired(&mut self, now: Instant) -> bool {
+        if matches!(self.phase, SwipePhase::Switching { updated, .. }
+            if now.saturating_duration_since(updated) >= SWITCH_IDLE)
+        {
+            self.phase = SwipePhase::Consumed;
+        }
+        matches!(self.phase, SwipePhase::Consumed)
+    }
+
+    pub(super) fn update(&mut self, event: TouchpadEvent, now: Instant) -> Result<SwipeOutput> {
+        use SwipeOutput::*;
+        let TouchpadEvent::Frame {
+            stream_id,
+            terminal,
+            ..
+        } = event
+        else {
+            anyhow::bail!("Linux does not advertise Windows-specific touchpad actions");
+        };
+        let contacts = event.contacts().context("invalid touchpad contact count")?;
+        anyhow::ensure!(
+            contacts
+                .iter()
+                .enumerate()
+                .all(|(i, c)| contacts[..i].iter().all(|p| p.id != c.id)),
+            "duplicate touchpad contact"
+        );
+        if terminal {
+            if self.stream != Some(stream_id) {
+                return Ok(Ignore);
+            }
+            *self = Self::default();
+            return Ok(Finish);
+        }
+        if self.stream != Some(stream_id) {
+            *self = Self {
+                stream: Some(stream_id),
+                ..Self::default()
+            };
+        }
+        let Ok(three) = <&[TouchpadContact; 3]>::try_from(contacts) else {
+            return Ok(match self.phase {
+                SwipePhase::Switching { .. } | SwipePhase::Consumed => {
+                    self.phase = SwipePhase::Consumed;
+                    Finish
+                }
+                _ => {
+                    self.phase = SwipePhase::Waiting;
+                    Native
+                }
+            });
+        };
+        let x = three.iter().map(|c| i32::from(c.x)).sum::<i32>() / 3;
+        match &mut self.phase {
+            SwipePhase::Waiting => {
+                self.phase = SwipePhase::Tracking(*three);
+                Ok(Hold)
+            }
+            SwipePhase::Tracking(origin) => {
+                let mut dx = [0; 3];
+                let mut dy = [0; 3];
+                for (i, contact) in three.iter().enumerate() {
+                    let Some(start) = origin.iter().find(|c| c.id == contact.id) else {
+                        *origin = *three;
+                        return Ok(Hold);
+                    };
+                    dx[i] = i32::from(contact.x) - i32::from(start.x);
+                    dy[i] = i32::from(contact.y) - i32::from(start.y);
+                }
+                let horizontal = dx.iter().sum::<i32>() / 3;
+                let vertical = dy.iter().sum::<i32>() / 3;
+                if horizontal.abs() >= SWITCH_STEP
+                    && horizontal.abs() > vertical.abs()
+                    && dx
+                        .iter()
+                        .all(|d| d * horizontal.signum() >= SWITCH_STEP / 2)
+                {
+                    self.phase = SwipePhase::Switching {
+                        fingers: three.map(|c| c.id),
+                        detent: x - horizontal % SWITCH_STEP,
+                        updated: now,
+                    };
+                    Ok(Step {
+                        reverse: horizontal < 0,
+                        count: (horizontal.unsigned_abs() / SWITCH_STEP as u32).min(3) as usize,
+                    })
+                } else if dx.into_iter().chain(dy).any(|d| d.abs() >= SWITCH_STEP) {
+                    let first = TouchpadEvent::frame(stream_id, origin, false).unwrap();
+                    self.phase = SwipePhase::Native;
+                    Ok(Replay(first))
+                } else {
+                    Ok(Hold)
+                }
+            }
+            SwipePhase::Native => Ok(Native),
+            SwipePhase::Switching {
+                fingers,
+                detent,
+                updated,
+            } => {
+                if !three.iter().all(|c| fingers.contains(&c.id)) {
+                    self.phase = SwipePhase::Consumed;
+                    return Ok(Finish);
+                }
+                let steps = (x - *detent) / SWITCH_STEP;
+                *updated = now;
+                if steps == 0 {
+                    return Ok(Hold);
+                }
+                *detent += steps * SWITCH_STEP;
+                Ok(Step {
+                    reverse: steps < 0,
+                    count: steps.unsigned_abs().min(3) as usize,
+                })
+            }
+            SwipePhase::Consumed => Ok(Hold),
+        }
+    }
+
+    pub(super) fn switching(&self) -> bool {
+        matches!(self.phase, SwipePhase::Switching { .. })
+    }
+}
 
 pub(super) fn capabilities() -> u32 {
     if AVAILABLE.load(Ordering::Acquire) {
@@ -180,6 +340,128 @@ impl Drop for Touchpad {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn three_fingers(stream: u32, x: u16, y: u16) -> TouchpadEvent {
+        TouchpadEvent::frame(
+            stream,
+            &[
+                TouchpadContact { id: 1, x, y },
+                TouchpadContact {
+                    id: 2,
+                    x: x + 1500,
+                    y,
+                },
+                TouchpadContact {
+                    id: 3,
+                    x: x + 3000,
+                    y,
+                },
+            ],
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn horizontal_swipe_steps_and_reverses_until_release() {
+        use SwipeOutput::*;
+        let mut swipe = WindowSwipe::default();
+        let now = Instant::now();
+        assert!(matches!(
+            swipe.update(three_fingers(1, 10000, 12000), now).unwrap(),
+            Hold
+        ));
+        assert!(matches!(
+            swipe.update(three_fingers(1, 15800, 12400), now).unwrap(),
+            Step {
+                reverse: false,
+                count: 1
+            }
+        ));
+        assert!(matches!(
+            swipe.update(three_fingers(1, 26300, 12400), now).unwrap(),
+            Step {
+                reverse: false,
+                count: 2
+            }
+        ));
+        assert!(matches!(
+            swipe.update(three_fingers(1, 19400, 12000), now).unwrap(),
+            Step {
+                reverse: true,
+                count: 1
+            }
+        ));
+        assert!(matches!(
+            swipe.update(TouchpadEvent::terminal(2), now).unwrap(),
+            Ignore
+        ));
+        assert!(swipe.switching());
+        assert!(matches!(
+            swipe.update(TouchpadEvent::terminal(1), now).unwrap(),
+            Finish
+        ));
+        assert!(!swipe.switching());
+    }
+
+    #[test]
+    fn vertical_swipe_replays_native_origin_and_stays_native() {
+        use SwipeOutput::*;
+        let mut swipe = WindowSwipe::default();
+        let now = Instant::now();
+        let origin = three_fingers(1, 12000, 12000);
+        assert!(matches!(swipe.update(origin, now).unwrap(), Hold));
+        assert!(matches!(
+            swipe.update(three_fingers(1, 12100, 18000), now).unwrap(),
+            Replay(event) if event == origin
+        ));
+        assert!(matches!(
+            swipe.update(three_fingers(1, 25000, 21000), now).unwrap(),
+            Native
+        ));
+    }
+
+    #[test]
+    fn replacing_a_finger_finishes_switching_even_without_a_count_change() {
+        let mut swipe = WindowSwipe::default();
+        let now = Instant::now();
+        swipe.update(three_fingers(1, 12000, 12000), now).unwrap();
+        swipe.update(three_fingers(1, 18000, 12000), now).unwrap();
+        let frame = three_fingers(1, 24000, 12000);
+        let mut contacts = frame.contacts().unwrap().to_vec();
+        contacts[0].id = 4;
+        let replacement = TouchpadEvent::frame(1, &contacts, false).unwrap();
+        assert!(matches!(
+            swipe.update(replacement, now).unwrap(),
+            SwipeOutput::Finish
+        ));
+        assert!(!swipe.switching());
+    }
+
+    #[test]
+    fn lost_terminal_expires_switcher_without_restarting_same_swipe() {
+        let mut swipe = WindowSwipe::default();
+        let now = Instant::now();
+        swipe.update(three_fingers(1, 12000, 12000), now).unwrap();
+        swipe.update(three_fingers(1, 18000, 12000), now).unwrap();
+        assert!(!swipe.expired(now + SWITCH_IDLE - Duration::from_millis(1)));
+        assert!(swipe.expired(now + SWITCH_IDLE));
+        assert!(matches!(
+            swipe
+                .update(three_fingers(1, 26000, 12000), now + SWITCH_IDLE)
+                .unwrap(),
+            SwipeOutput::Hold
+        ));
+        swipe.update(three_fingers(2, 12000, 12000), now).unwrap();
+        assert!(matches!(
+            swipe.update(three_fingers(2, 6000, 12000), now).unwrap(),
+            SwipeOutput::Step {
+                reverse: true,
+                count: 1
+            }
+        ));
+    }
+
     #[test]
     fn small_scroll_deltas_are_not_discarded() {
         let mut remainder = 0.0;

@@ -24,10 +24,7 @@ pub fn merge_motion(a: InputEvent, b: InputEvent) -> Option<InputEvent> {
                 && y.unsigned_abs() <= MAX_INJECT_DELTA_PX as u32)
                 .then_some(InputEvent::MouseMove { dx: x, dy: y })
         }
-        (InputEvent::Touchpad(a), InputEvent::Touchpad(b))
-            if a.coalescible_stream().is_some()
-                && a.coalescible_stream() == b.coalescible_stream() =>
-        {
+        (InputEvent::Touchpad(a), InputEvent::Touchpad(b)) if a.can_coalesce_with(&b) => {
             Some(InputEvent::Touchpad(b))
         }
         _ => None,

@@ -125,6 +125,16 @@ impl TouchpadEvent {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Frame { terminal: true, .. })
     }
+
+    /// Preserve contact changes so a receiver can finish a gesture when a
+    /// finger lifts or is replaced, even if the stream itself continues.
+    pub fn can_coalesce_with(&self, next: &Self) -> bool {
+        self.coalescible_stream().is_some()
+            && self.coalescible_stream() == next.coalescible_stream()
+            && self.contacts().zip(next.contacts()).is_some_and(|(a, b)| {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.id == b.id)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -261,6 +271,11 @@ pub trait InputInject: Send + Sync {
     fn key(&self, code: KeyCode, down: bool) -> anyhow::Result<()>;
     fn scroll(&self, dx: f32, dy: f32) -> anyhow::Result<()>;
     fn touchpad(&self, _event: TouchpadEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Release gesture-owned modifiers if the last contact packet was lost.
+    fn expire_touchpad_gesture(&self) -> anyhow::Result<()> {
         Ok(())
     }
 

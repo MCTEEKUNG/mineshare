@@ -1,4 +1,4 @@
-//! Per-user, explicit-consent Ubuntu setup. No actions run during detection.
+//! Per-user, explicit-consent Linux setup. No actions run during detection.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize)]
@@ -48,7 +48,7 @@ pub fn configure(options: Options) -> anyhow::Result<Status> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (options.input, options.broker, options.pointer);
-        anyhow::bail!("Ubuntu setup is only available on Linux")
+        anyhow::bail!("Input setup is only available on Linux")
     }
 }
 
@@ -110,7 +110,7 @@ mod linux {
         let path = Path::new(ROOT).join(name);
         ensure!(
             path.is_file(),
-            "Setup files missing. Install the current MineShare .deb package."
+            "Setup files missing. Install the current MineShare .deb or .rpm package."
         );
         Ok(path)
     }
@@ -264,7 +264,7 @@ mod linux {
         let before = detect()?;
         ensure!(
             before.helpers_available,
-            "Install the current MineShare .deb package to use setup"
+            "Install the current MineShare .deb or .rpm package with its dependencies to use setup"
         );
         if options.pointer {
             ensure!(

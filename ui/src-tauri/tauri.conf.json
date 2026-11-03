@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MineShare",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "identifier": "com.mineshare.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -73,6 +73,25 @@
         "preInstallScript": "target/deb-hooks/preinst",
         "postInstallScript": "target/deb-hooks/postinst",
         "preRemoveScript": "../../installer/linux/deb-prerm"
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/mineshare/setup/installer/linux/install-typeless-compat.sh": "../../installer/linux/install-typeless-compat.sh",
+          "/usr/share/mineshare/setup/installer/linux/start-typeless-after-mineshare.sh": "../../installer/linux/start-typeless-after-mineshare.sh",
+          "/usr/share/mineshare/setup/installer/linux/prepare-typeless-autostart.sh": "../../installer/linux/prepare-typeless-autostart.sh",
+          "/usr/share/mineshare/setup/installer/linux/install-gnome-pointer.sh": "../../installer/linux/install-gnome-pointer.sh",
+          "/usr/share/mineshare/setup/installer/linux/enable-input.sh": "../../installer/linux/enable-input.sh",
+          "/usr/share/mineshare/setup/installer/linux/60-mineshare.rules": "../../installer/linux/60-mineshare.rules",
+          "/usr/share/mineshare/setup/installer/linux/gnome-pointer/metadata.json": "../../installer/linux/gnome-pointer/metadata.json",
+          "/usr/share/mineshare/setup/installer/linux/gnome-pointer/extension.js": "../../installer/linux/gnome-pointer/extension.js"
+        },
+        "depends": [
+          "/usr/bin/pkexec",
+          "glib2",
+          "kmod",
+          "shadow-utils",
+          "systemd-udev"
+        ]
       }
     },
     "windows": {}

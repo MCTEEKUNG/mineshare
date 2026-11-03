@@ -50,6 +50,7 @@ jobs:
             libpipewire-0.3-dev \
             libopus-dev \
             pulseaudio-utils \
+            libarchive-tools \
             pkg-config \
             build-essential
 
@@ -108,7 +109,7 @@ jobs:
         if: runner.os == 'Windows'
         run: node installer/windows/build-bootstrapper.mjs
 
-      - name: Audit Linux upgrade hooks in the actual package
+      - name: Audit Linux upgrade hooks and setup payloads
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -120,6 +121,8 @@ jobs:
           bash -n "$control/preinst" "$control/postinst" "$control/prerm"
           bash installer/linux/test-deb-lifecycle.sh
           bash installer/linux/test-setup-package.sh "$deb"
+          rpm=$(find ui/src-tauri/target/release/bundle/rpm -maxdepth 1 -name '*.rpm' -print -quit)
+          bash installer/linux/test-setup-package.sh "$rpm"
 
       - name: Audit Windows MSI update support
         if: runner.os == 'Windows'

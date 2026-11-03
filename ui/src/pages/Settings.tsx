@@ -25,19 +25,19 @@ export default function SettingsPage({ status }: { status: Status | null }) {
     <Disclosure title={t("section_hotkeys")}><HotkeysPage /></Disclosure>
     <Disclosure title={t("settings_effect")}><LockEffectSection /></Disclosure>
     <Disclosure title={t("settings_diagnostics")}>
-      <UbuntuSetupButton />
+      <LinuxSetupButton />
       <div className="mb-5 text-xs leading-relaxed break-all"><p>{status?.local_version}</p><p className="mt-2 text-ds-text-muted">{t("ver_peer")}: {status?.peer_version ?? "—"}</p><p className="mt-2 text-ds-text-muted">{t("workspace_network")}: {status?.peer_addr ?? "—"}</p></div>
       <AdvancedPage />
     </Disclosure>
   </div>;
 }
 
-function UbuntuSetupButton() {
+function LinuxSetupButton() {
   const [linux, setLinux] = useState(false);
   const { locale } = useT();
   useEffect(() => { invoke<{linux: boolean}>("get_linux_setup_status").then(s => setLinux(s.linux)).catch(() => {}); }, []);
   if (!linux) return null;
-  return <button className="button-secondary mb-5" onClick={() => window.dispatchEvent(new Event("mineshare-linux-setup"))}>{locale === "th" ? "ตรวจระบบ Ubuntu" : "Check Ubuntu setup"}</button>;
+  return <button className="button-secondary mb-5" onClick={() => window.dispatchEvent(new Event("mineshare-linux-setup"))}>{locale === "th" ? "ตรวจการตั้งค่า Linux" : "Check Linux setup"}</button>;
 }
 
 function ManualControls({ status }: { status: Status | null }) {

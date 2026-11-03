@@ -123,6 +123,8 @@ An existing installation is detected and updated in its original directory, reta
 
 For current cross-platform checks, runtime requirements, and physical acceptance steps, see [Ubuntu readiness](docs/ubuntu-readiness.md). CI checks both Ubuntu 22.04 and 24.04; passing compilation is not a physical Wayland/X11 input test.
 
+See [Linux touchpad sharing](docs/linux-touchpad.md) for gesture mappings, input permissions, and compatibility with DEB and RPM installs.
+
 Download `mineshare_<ver>_amd64.deb` and install:
 
 ```bash
