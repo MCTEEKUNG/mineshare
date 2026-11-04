@@ -402,7 +402,12 @@ pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> 
     begin_incoming_at(id, name, size_bytes, &download_dir()).await
 }
 
-async fn begin_incoming_at(id: u64, name: &str, size_bytes: u64, dir: &Path) -> Result<()> {
+pub(crate) async fn begin_incoming_at(
+    id: u64,
+    name: &str,
+    size_bytes: u64,
+    dir: &Path,
+) -> Result<()> {
     validate_offer(name, size_bytes)?;
     anyhow::ensure!(
         !with_state(|m| m.contains_key(&id)),
@@ -646,16 +651,15 @@ const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Reuse the verified, non-overwriting transfer pipeline; clipboard references
 /// follow FileEnd on the SAME FIFO, never before the bytes are present.
-pub fn send_clipboard(paths: Vec<PathBuf>, runtime: &tokio::runtime::Handle) -> Result<()> {
+pub async fn send_clipboard(paths: Vec<PathBuf>, offer: u64, tx: ControlSender) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty() && paths.len() <= MAX_CLIPBOARD_FILES,
         "clipboard file count out of range"
     );
-    let tx = session_tx().context("no peer connected")?;
     let mut sources = Vec::with_capacity(paths.len());
     let mut total = 0u64;
     for path in paths {
-        let metadata = std::fs::metadata(&path)?;
+        let metadata = tokio::fs::metadata(&path).await?;
         anyhow::ensure!(metadata.is_file(), "clipboard folders are not supported");
         total = total
             .checked_add(metadata.len())
@@ -672,24 +676,20 @@ pub fn send_clipboard(paths: Vec<PathBuf>, runtime: &tokio::runtime::Handle) -> 
         )?;
         sources.push((path, metadata.len()));
     }
-    // This runs only on the dedicated clipboard OS thread, like send_image.
-    // Serialize copies so a slow old batch cannot overwrite a newer clipboard.
-    runtime.block_on(async move {
-        let mut ids = Vec::with_capacity(sources.len());
-        for (path, size) in sources {
-            let id = next_id();
-            register_outgoing(id, &path, size);
-            if let Err(e) = drive_send(id, path, size, tx.clone()).await {
-                mark_failed(id, format!("{e:#}"));
-                let _ = tx.send(crate::runtime::ControlMsg::FileCancel { id }).await;
-                return Err(e);
-            }
-            ids.push(id);
+    let mut ids = Vec::with_capacity(sources.len());
+    for (path, size) in sources {
+        let id = next_id();
+        register_outgoing(id, &path, size);
+        if let Err(e) = drive_send(id, path, size, tx.clone()).await {
+            mark_failed(id, format!("{e:#}"));
+            let _ = tx.send(crate::runtime::ControlMsg::FileCancel { id }).await;
+            return Err(e);
         }
-        tx.send(crate::runtime::ControlMsg::ClipboardFiles(ids))
-            .await
-            .context("control channel closed before clipboard publication")
-    })
+        ids.push(id);
+    }
+    tx.send(crate::runtime::ControlMsg::ClipboardFiles { offer, ids })
+        .await
+        .context("control channel closed before clipboard publication")
 }
 
 pub fn received_clipboard_paths(ids: &[u64]) -> Result<Vec<PathBuf>> {

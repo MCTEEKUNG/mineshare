@@ -53,6 +53,10 @@ impl Routes {
         self.0.get(usize::from(code)) == Some(&Some(Destination::Local))
     }
 
+    pub(super) fn is_consumed(&self, code: u16) -> bool {
+        self.0.get(usize::from(code)) == Some(&Some(Destination::Consumed))
+    }
+
     pub(super) fn local_held(&self) -> impl Iterator<Item = u16> + '_ {
         self.0.iter().enumerate().filter_map(|(code, destination)| {
             (*destination == Some(Destination::Local)).then_some(code as u16)

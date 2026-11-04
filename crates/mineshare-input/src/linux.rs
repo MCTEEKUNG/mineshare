@@ -70,6 +70,10 @@ mod pointer;
 mod touchpad;
 mod touchpad_capture;
 
+pub(super) fn paste_window() -> Option<u64> {
+    pointer::paste_window()
+}
+
 pub(super) fn touchpad_capabilities() -> u32 {
     let mut capabilities = touchpad::capabilities();
     if touchpad_capture::available() {
@@ -987,6 +991,9 @@ fn pump_device(
                     _ => {}
                 },
                 EventSummary::Key(_, key, value) => {
+                    if value == 1 && key != EvKey::KEY_V {
+                        super::note_paste_interaction();
+                    }
                     // evdev key value semantics: 0 = release, 1 = press,
                     // 2 = auto-repeat. The previous code treated 2 as
                     // "released" which broke modifier tracking — holding
@@ -1133,6 +1140,12 @@ fn pump_device(
                         // A locally held key remains local even if a repeat arrives
                         // after crossing. Remote routing keeps its existing held tracker.
                         let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        if let Some(broker) = broker.as_mut()
+                            && broker.routes.is_consumed(key.0)
+                        {
+                            broker.routes.edge(key.0, value, false);
+                            continue;
+                        }
                         let shortcut_target = if key == EvKey::KEY_TAB && value == 1 {
                             broker.as_ref().and_then(|b| b.routes.tab_follows_alt())
                         } else {
@@ -1145,6 +1158,19 @@ fn pump_device(
                                 cursor_in_remote,
                                 shortcut_target,
                             );
+                        if let Some(broker) = broker.as_mut()
+                            && key == EvKey::KEY_V
+                            && value == 1
+                            && !remote
+                            && (broker.routes.is_local(29) || broker.routes.is_local(97))
+                            && ![42, 54, 56, 100, 125, 126]
+                                .iter()
+                                .any(|&code| broker.routes.is_local(code))
+                            && crate::request_file_paste()
+                        {
+                            broker.routes.consume(key.0);
+                            continue;
+                        }
                         let forward = if let Some(broker) = broker.as_mut() {
                             match broker.dispatch(key.0, value, remote) {
                                 Ok(forward) => forward && remote,
@@ -1426,6 +1452,7 @@ enum HeldKey {
     /// KEY_* keyboard code emitted on the keyboard node.
     KbKey(u16),
     GestureAlt,
+    PasteV,
 }
 
 pub struct UinputInject {
@@ -1607,6 +1634,9 @@ impl InputInject for UinputInject {
     }
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
+        if down {
+            super::note_paste_interaction();
+        }
         let key = key_from_button(btn);
         self.emit_mouse(&[evdev::InputEvent::new(
             EventType::KEY.0,
@@ -1623,7 +1653,29 @@ impl InputInject for UinputInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
+        if down && code.0 != EvKey::KEY_V.0 {
+            super::note_paste_interaction();
+        }
         let mut held = self.held.lock();
+        if code.0 == EvKey::KEY_V.0 {
+            if held.contains(&HeldKey::PasteV) {
+                if !down {
+                    held.remove(&HeldKey::PasteV);
+                }
+                return Ok(());
+            }
+            if down
+                && (held.contains(&HeldKey::KbKey(29)) || held.contains(&HeldKey::KbKey(97)))
+                && !held.contains(&HeldKey::GestureAlt)
+                && ![42, 54, 56, 100, 125, 126]
+                    .iter()
+                    .any(|&code| held.contains(&HeldKey::KbKey(code)))
+                && crate::request_file_paste()
+            {
+                held.insert(HeldKey::PasteV);
+                return Ok(());
+            }
+        }
         if code.0 != EvKey::KEY_LEFTALT.0 || !held.contains(&HeldKey::GestureAlt) {
             self.keyboard_edge(code.0, down)?;
         }
@@ -1662,6 +1714,7 @@ impl InputInject for UinputInject {
                     self.emit_mouse(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
                 }
                 HeldKey::GestureAlt => unreachable!(),
+                HeldKey::PasteV => Ok(()),
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");
@@ -1746,6 +1799,23 @@ impl InputInject for UinputInject {
             self.end_window_switch()?;
         }
         Ok(())
+    }
+
+    fn paste_in_window(&self, window: u64) -> Result<()> {
+        let held = self.held.lock();
+        if paste_window() != Some(window)
+            || MOD_ALT.load(Ordering::Relaxed)
+            || MOD_SHIFT_LEFT.load(Ordering::Relaxed)
+            || MOD_SHIFT_RIGHT.load(Ordering::Relaxed)
+            || held.contains(&HeldKey::GestureAlt)
+            || [42, 54, 56, 100, 125, 126]
+                .iter()
+                .any(|&code| held.contains(&HeldKey::KbKey(code)))
+        {
+            return Ok(());
+        }
+        let ctrl = held.contains(&HeldKey::KbKey(29)) || held.contains(&HeldKey::KbKey(97));
+        crate::paste_keys(ctrl, |code, down| self.keyboard_edge(code.0, down))
     }
 }
 

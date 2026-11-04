@@ -6,17 +6,25 @@ const iface = `<node><interface name="org.gnome.Shell.Extensions.MineSharePointe
 <method name="GetPointer">
 <arg type="i" direction="out" name="x"/><arg type="i" direction="out" name="y"/>
 <arg type="i" direction="out" name="width"/><arg type="i" direction="out" name="height"/>
-</method></interface></node>`;
+</method>
+<method name="GetPasteWindow"><arg type="t" direction="out" name="id"/></method>
+</interface></node>`;
 
 export default class MineSharePointer extends Extension {
     enable() {
         this._export = Gio.DBusExportedObject.wrapJSObject(iface, {
             GetPointer() {
-                // No input injection, clipboard/window data, eval or shell commands.
+                // No input injection, clipboard data, eval or shell commands.
                 if (Main.sessionMode.isLocked)
                     return [0, 0, 0, 0];
                 const [x, y] = global.get_pointer();
                 return [x, y, global.screen_width, global.screen_height];
+            },
+            GetPasteWindow() {
+                if (Main.sessionMode.isLocked || Main.overview.visible)
+                    return 0;
+                // Opaque identifier only, so a delayed paste can check focus.
+                return global.display.focus_window?.get_stable_sequence() ?? 0;
             },
         });
         this._export.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/MineSharePointer');

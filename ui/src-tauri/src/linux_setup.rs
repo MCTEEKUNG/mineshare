@@ -160,22 +160,20 @@ mod linux {
         let data = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
+        let typeless = Path::new("/opt/Typeless/typeless").is_file();
+        let ordered_broker = crate::startup::entry_enabled(
+            &std::fs::read_to_string(root.join("autostart/MineShare.desktop")).unwrap_or_default(),
+        ) && same_file(
+            &root.join("autostart/MineShare.desktop"),
+            &root.join("autostart/typeless.desktop"),
+        ) && same_file(
+            &home.join(".local/bin/mineshare-typeless-start"),
+            &Path::new(ROOT).join("start-typeless-after-mineshare.sh"),
+        ) && std::fs::read_to_string(root.join("autostart/MineShare.desktop"))
+            .unwrap_or_default()
+            .contains("mineshare-typeless-start");
         let broker_configured = root.join("MineShare/keyboard-broker.enabled").is_file()
-            && crate::startup::entry_enabled(
-                &std::fs::read_to_string(root.join("autostart/MineShare.desktop"))
-                    .unwrap_or_default(),
-            )
-            && same_file(
-                &root.join("autostart/MineShare.desktop"),
-                &root.join("autostart/typeless.desktop"),
-            )
-            && same_file(
-                &home.join(".local/bin/mineshare-typeless-start"),
-                &Path::new(ROOT).join("start-typeless-after-mineshare.sh"),
-            )
-            && std::fs::read_to_string(root.join("autostart/MineShare.desktop"))
-                .unwrap_or_default()
-                .contains("mineshare-typeless-start");
+            && (!typeless || ordered_broker);
         let broker_active = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .and_then(|p| std::fs::read_to_string(p.join("mineshare-keyboard-broker.ready")).ok())
@@ -218,7 +216,21 @@ mod linux {
                 "org.gnome.Shell.Extensions.MineSharePointer.GetPointer",
             ],
         )
-        .is_some_and(|text| pointer_active(&text));
+        .is_some_and(|text| pointer_active(&text))
+            && query(
+                "gdbus",
+                &[
+                    "call",
+                    "--session",
+                    "--dest",
+                    "org.gnome.Shell",
+                    "--object-path",
+                    "/org/gnome/Shell/Extensions/MineSharePointer",
+                    "--method",
+                    "org.gnome.Shell.Extensions.MineSharePointer.GetPasteWindow",
+                ],
+            )
+            .is_some();
         Ok(Status {
             linux: true,
             session,
@@ -228,7 +240,7 @@ mod linux {
             uinput_available: Path::new("/dev/uinput").exists(),
             input_needs_repair: group_active && !input_active,
             input_configured,
-            typeless: Path::new("/opt/Typeless/typeless").is_file(),
+            typeless,
             broker_configured,
             broker_active,
             extension_configured,
@@ -272,12 +284,6 @@ mod linux {
                 "Pointer setup needs GNOME 45–50 Wayland with user extensions allowed"
             );
         }
-        if options.broker {
-            ensure!(
-                before.typeless,
-                "Typeless was not detected; keyboard broker is optional"
-            );
-        }
         if options.input
             && (!before.input_configured || !before.uinput_available || before.input_needs_repair)
         {
@@ -291,9 +297,14 @@ mod linux {
         }
         if options.broker && !before.broker_configured {
             let path = helper("install-typeless-compat.sh")?;
+            let mode = if before.typeless {
+                "/usr/bin/mineshare-app"
+            } else {
+                "--keyboard-only"
+            };
             command(
                 "/bin/bash",
-                &[path.to_str().unwrap(), "/usr/bin/mineshare-app"],
+                &[path.to_str().unwrap(), mode],
                 Duration::from_secs(15),
             )?;
         }

@@ -279,6 +279,11 @@ pub trait InputInject: Send + Sync {
         Ok(())
     }
 
+    /// Replay a paste only while its original window still has focus.
+    fn paste_in_window(&self, _window: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn dispatch(&self, event: InputEvent) -> anyhow::Result<()> {
         match event {
             InputEvent::MouseMove { dx, dy } => self.mouse_move_rel(
@@ -301,6 +306,49 @@ pub trait InputInject: Send + Sync {
     fn release_all_held(&self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+static FILE_PASTE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+static FILE_PASTE_INTERACTION: AtomicU64 = AtomicU64::new(0);
+
+pub fn file_paste_interaction() -> u64 {
+    FILE_PASTE_INTERACTION.load(Ordering::Acquire)
+}
+
+fn note_paste_interaction() {
+    FILE_PASTE_INTERACTION.fetch_add(1, Ordering::Release);
+}
+
+pub fn register_file_paste(handler: fn() -> bool) {
+    let _ = FILE_PASTE.set(handler);
+}
+
+fn request_file_paste() -> bool {
+    FILE_PASTE.get().is_some_and(|handler| handler())
+}
+
+fn paste_keys(
+    ctrl_held: bool,
+    mut emit: impl FnMut(KeyCode, bool) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let ctrl = KeyCode(29);
+    let v = KeyCode(47);
+    if !ctrl_held {
+        emit(ctrl, true)?;
+    }
+    let press = emit(v, true);
+    let release = emit(v, false);
+    let modifier = if ctrl_held { Ok(()) } else { emit(ctrl, false) };
+    press.and(release).and(modifier)
+}
+
+pub fn paste_window() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    return windows::paste_window();
+    #[cfg(target_os = "linux")]
+    return linux::paste_window();
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    None
 }
 
 pub const TOUCHPAD_CAP_FRAME_CAPTURE: u32 = 1 << 0;
@@ -1203,6 +1251,7 @@ static LOCAL_CLICK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 static PEER_ACTIVITY_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn bump_local_click() {
+    note_paste_interaction();
     LOCAL_CLICK_AT.store(now_ms(), Ordering::Relaxed);
 }
 

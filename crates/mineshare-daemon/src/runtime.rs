@@ -551,7 +551,7 @@ struct PortAnnounce {
     touchpad_capabilities: u32,
 }
 
-const CONNECTION_MAGIC: [u8; 8] = *b"MSPAIR03";
+const CONNECTION_MAGIC: [u8; 8] = *b"MSPAIR04";
 #[derive(Debug, Serialize, Deserialize)]
 struct ConnectionHello {
     magic: [u8; 8],
@@ -705,13 +705,18 @@ pub enum ControlMsg {
         epoch: u64,
     },
     /// IDs of verified FileEnd transfers to publish as a native file clipboard.
-    ClipboardFiles(Vec<u64>),
+    ClipboardFiles {
+        offer: u64,
+        ids: Vec<u64>,
+    },
     InputLockRequest(mineshare_input::LockRequest),
     InputLockReply(mineshare_input::LockReply),
     PairingDecision {
         accepted: bool,
         reason: String,
     },
+    ClipboardFileOffer(u64),
+    ClipboardFilePaste(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1862,7 +1867,6 @@ async fn run_peer_session(
     let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<crate::clipboard::ClipboardEvent>(
         crate::clipboard::queue_capacity(),
     );
-    crate::clipboard::ensure_watcher(clip_tx);
     let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
     crate::layout::set_propagate_sender(side_tx);
     // Stage 8.5 RTT plumbing: a generic ControlMsg pipe used by
@@ -1904,6 +1908,7 @@ async fn run_peer_session(
                     Some(crate::clipboard::ClipboardEvent::Text(text)) => {
                         ControlMsg::ClipboardText(text)
                     }
+                    Some(crate::clipboard::ClipboardEvent::FileOffer(id)) => ControlMsg::ClipboardFileOffer(id),
                     Some(crate::clipboard::ClipboardEvent::ImageStart {
                         id,
                         width,
@@ -1948,6 +1953,7 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
+    crate::clipboard::ensure_watcher(clip_tx, file_tx.clone(), inject.clone());
     crate::files::set_session_tx(file_tx);
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
@@ -2116,12 +2122,14 @@ async fn run_peer_session(
                         warn!(error = %e, "failed to apply peer clipboard");
                     }
                 }
-                Ok(ControlMsg::ClipboardFiles(ids)) => {
-                    if let Err(e) = crate::files::received_clipboard_paths(&ids)
-                        .and_then(crate::clipboard::apply_files_from_peer)
-                    {
-                        warn!(error = %e, "failed to apply peer clipboard files");
-                    }
+                Ok(ControlMsg::ClipboardFileOffer(offer)) => {
+                    crate::clipboard::offer_from_peer(offer);
+                }
+                Ok(ControlMsg::ClipboardFilePaste(offer)) => {
+                    crate::clipboard::request_from_peer(offer);
+                }
+                Ok(ControlMsg::ClipboardFiles { offer, ids }) => {
+                    crate::clipboard::finish_file_paste(offer, &ids);
                 }
                 Ok(ControlMsg::ClipboardImageStart {
                     id,
@@ -2733,6 +2741,7 @@ async fn run_peer_session(
     // Drop the file-transfer session sender + fail any in-flight
     // transfers so the GUI doesn't show a stuck progress bar.
     crate::files::clear_session_tx();
+    crate::clipboard::clear_file_session();
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::force_local_exit_remote();

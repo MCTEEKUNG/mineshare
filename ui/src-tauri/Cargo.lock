@@ -2661,7 +2661,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mineshare-app"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "gio",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-audio"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-core"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "parking_lot",
  "serde",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-daemon"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2728,6 +2728,7 @@ dependencies = [
  "mineshare-ipc",
  "mineshare-net",
  "parking_lot",
+ "percent-encoding",
  "rand",
  "serde",
  "serde_json",
@@ -2740,11 +2741,13 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
+ "wl-clipboard-rs",
+ "x11-clipboard",
 ]
 
 [[package]]
 name = "mineshare-input"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "enigo",
@@ -2763,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-ipc"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "mineshare-core",
@@ -2775,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-net"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6468,6 +6471,16 @@ checksum = "502da5464ccd04011667b11c435cb992822c2c0dbde1770c988480d312a0db2e"
 dependencies = [
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "x11-clipboard"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "662d74b3d77e396b8e5beb00b9cad6a9eccf40b2ef68cc858784b14c41d535a3"
+dependencies = [
+ "libc",
+ "x11rb",
 ]
 
 [[package]]

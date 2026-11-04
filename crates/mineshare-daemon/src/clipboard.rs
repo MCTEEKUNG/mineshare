@@ -29,8 +29,8 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{sync::Arc, thread};
 
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -64,6 +64,7 @@ enum ClipboardFingerprint {
 #[derive(Debug, Clone)]
 pub enum ClipboardEvent {
     Text(String),
+    FileOffer(u64),
     ImageStart {
         id: u64,
         width: u32,
@@ -105,7 +106,336 @@ static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
 enum ApplyEvent {
     Text(String),
     Image(arboard::ImageData<'static>),
-    Files(Vec<PathBuf>),
+    Files(Vec<PathBuf>, Paste),
+}
+
+const OFFER_TTL: Duration = Duration::from_secs(120);
+
+#[derive(Clone)]
+struct Offer {
+    id: u64,
+    revision: Option<u32>,
+    fingerprint: Option<ClipboardFingerprint>,
+    expires: Instant,
+}
+
+struct Paste {
+    offer: Offer,
+    window: u64,
+    interaction: u64,
+    sent: bool,
+    inject: Arc<dyn mineshare_input::InputInject>,
+    tx: crate::files::ControlSender,
+}
+
+#[derive(Default)]
+struct FileSession {
+    connection: Option<(
+        crate::files::ControlSender,
+        Arc<dyn mineshare_input::InputInject>,
+    )>,
+    local: Option<Offer>,
+    remote: Option<Offer>,
+    paste: Option<Paste>,
+    request: Option<(Offer, crate::files::ControlSender)>,
+}
+
+static FILE_SESSION: Mutex<FileSession> = Mutex::new(FileSession {
+    connection: None,
+    local: None,
+    remote: None,
+    paste: None,
+    request: None,
+});
+static NEXT_FILE_OFFER: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static TEST_PASTE_WINDOW: AtomicU64 = AtomicU64::new(0);
+
+fn paste_window() -> Option<u64> {
+    #[cfg(test)]
+    {
+        let id = TEST_PASTE_WINDOW.load(Ordering::Relaxed);
+        if id != 0 {
+            return Some(id);
+        }
+    }
+    mineshare_input::paste_window()
+}
+
+pub fn clear_file_session() {
+    *FILE_SESSION.lock() = FileSession::default();
+}
+
+fn wake_watcher() {
+    if let Some(tx) = APPLY_TX.lock().as_ref() {
+        let _ = tx.try_send(());
+    }
+}
+
+pub fn offer_from_peer(id: u64) {
+    let revision = clipboard_revision();
+    let fingerprint = LAST_CLIPBOARD.lock().clone();
+    let mut state = FILE_SESSION.lock();
+    if state.connection.is_some() {
+        state.remote = (id != 0).then(|| Offer {
+            id,
+            revision,
+            fingerprint,
+            expires: Instant::now() + OFFER_TTL,
+        });
+    }
+}
+
+fn request_local_paste() -> bool {
+    let offer_id = {
+        let mut state = FILE_SESSION.lock();
+        let Some(offer) = state.remote.as_ref() else {
+            return false;
+        };
+        if offer.revision != clipboard_revision() || Instant::now() >= offer.expires {
+            state.remote = None;
+            return false;
+        }
+        offer.id
+    };
+    let Some(window) = paste_window() else {
+        return false;
+    };
+    let mut state = FILE_SESSION.lock();
+    if !state
+        .remote
+        .as_ref()
+        .is_some_and(|offer| offer.id == offer_id)
+    {
+        return false;
+    }
+    let Some((tx, inject)) = state.connection.clone() else {
+        return false;
+    };
+    let offer = state.remote.take().unwrap();
+    state.paste = Some(Paste {
+        offer,
+        window,
+        interaction: mineshare_input::file_paste_interaction(),
+        sent: false,
+        inject,
+        tx,
+    });
+    drop(state);
+    wake_watcher();
+    true
+}
+
+pub fn request_from_peer(id: u64) {
+    let mut state = FILE_SESSION.lock();
+    if state.local.as_ref().is_some_and(|offer| offer.id == id)
+        && let Some((tx, _)) = state.connection.clone()
+    {
+        let offer = state.local.take().unwrap();
+        state.request = Some((offer, tx));
+        drop(state);
+        wake_watcher();
+    }
+}
+
+pub fn finish_file_paste(id: u64, ids: &[u64]) {
+    let paste = {
+        let mut state = FILE_SESSION.lock();
+        if !state
+            .paste
+            .as_ref()
+            .is_some_and(|p| p.offer.id == id && p.sent)
+        {
+            return;
+        }
+        state.paste.take().unwrap()
+    };
+    if ids.is_empty() || Instant::now() >= paste.offer.expires {
+        return;
+    }
+    if let Err(error) = crate::files::received_clipboard_paths(ids).and_then(|paths| {
+        enqueue_apply(PendingApply {
+            received_revision: paste.offer.revision,
+            event: ApplyEvent::Files(paths, paste),
+        })
+    }) {
+        warn!(%error, "could not prepare requested file paste");
+    }
+}
+
+fn clipboard_file_list(clipboard: &mut arboard::Clipboard) -> Result<Vec<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        use std::io::Read;
+        use wl_clipboard_rs::paste::{self, ClipboardType, MimeType, Seat};
+        match paste::get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific("text/uri-list"),
+        ) {
+            Ok((pipe, _)) => {
+                const MAX_URI_LIST: u64 = 1024 * 1024;
+                let mut list = Vec::new();
+                pipe.take(MAX_URI_LIST + 1).read_to_end(&mut list)?;
+                anyhow::ensure!(
+                    list.len() as u64 <= MAX_URI_LIST,
+                    "file clipboard URI list too large"
+                );
+                return parse_file_uris(&list);
+            }
+            Err(paste::Error::ClipboardEmpty | paste::Error::NoMimeType) => return Ok(Vec::new()),
+            Err(_) => {} // Read the Xwayland selection on GNOME.
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some() {
+        return x11_file_list();
+    }
+    Ok(clipboard.get().file_list()?)
+}
+
+#[cfg(target_os = "linux")]
+fn x11_file_list() -> Result<Vec<PathBuf>> {
+    thread_local! {
+        static CLIPBOARD: std::cell::RefCell<Option<(x11_clipboard::Clipboard, u32)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    CLIPBOARD.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.is_none() {
+            let clipboard = x11_clipboard::Clipboard::new()?;
+            let uri_list = clipboard.getter.get_atom("text/uri-list")?;
+            *state = Some((clipboard, uri_list));
+        }
+        let (clipboard, uri_list) = state.as_ref().unwrap();
+        let atoms = &clipboard.getter.atoms;
+        let list = clipboard.load(
+            atoms.clipboard,
+            *uri_list,
+            atoms.property,
+            Duration::from_millis(100),
+        )?;
+        parse_file_uris(&list)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_file_uris(list: &[u8]) -> Result<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStrExt;
+    list.split(|&byte| byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty() && !line.starts_with(b"#"))
+        .map(|line| {
+            // Strip CRLF before decoding. A percent-encoded CR may be part of
+            // a legitimate Unix filename, while a raw CR ends the URI line.
+            let path = line
+                .strip_prefix(b"file://")
+                .filter(|path| path.starts_with(b"/"))
+                .ok_or_else(|| anyhow::anyhow!("file clipboard URI is not a local path"))?;
+            let bytes: Vec<u8> = percent_encoding::percent_decode(path).collect();
+            anyhow::ensure!(!bytes.contains(&0), "file clipboard URI contains NUL");
+            Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+        })
+        .collect()
+}
+
+fn snapshot_fingerprint(
+    clipboard: &mut arboard::Clipboard,
+) -> Result<Option<ClipboardFingerprint>> {
+    if let Ok(paths) = clipboard_file_list(clipboard)
+        && !paths.is_empty()
+    {
+        return Ok(Some(file_fingerprint(&paths)));
+    }
+    match clipboard.get_image() {
+        Ok(image) => return Ok(Some(image_fingerprint(&image))),
+        Err(arboard::Error::ContentNotAvailable) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match clipboard.get_text() {
+        Ok(text) => Ok(Some(ClipboardFingerprint::Text(text))),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn paste_is_current(paste: &Paste, clipboard: &mut arboard::Clipboard) -> bool {
+    !paste.tx.is_closed()
+        && Instant::now() < paste.offer.expires
+        && paste.interaction == mineshare_input::file_paste_interaction()
+        && paste.offer.revision == clipboard_revision()
+        && snapshot_fingerprint(clipboard).is_ok_and(|fp| fp == paste.offer.fingerprint)
+        && paste_window() == Some(paste.window)
+}
+
+fn service_file_requests(clipboard: &mut arboard::Clipboard, runtime: &tokio::runtime::Handle) {
+    use crate::runtime::ControlMsg;
+    let (request, paste) = {
+        let mut state = FILE_SESSION.lock();
+        let paste = if state.paste.as_ref().is_some_and(|p| !p.sent) {
+            state.paste.take()
+        } else {
+            None
+        };
+        (state.request.take(), paste)
+    };
+    if let Some(mut paste) = paste {
+        if paste_is_current(&paste, clipboard) {
+            let mut state = FILE_SESSION.lock();
+            // Publish pending state before the peer can reply. A new request
+            // may supersede this one while the clipboard is being checked.
+            if state.paste.is_none()
+                && state
+                    .connection
+                    .as_ref()
+                    .is_some_and(|(tx, _)| tx.same_channel(&paste.tx))
+                && paste
+                    .tx
+                    .try_send(ControlMsg::ClipboardFilePaste(paste.offer.id))
+                    .is_ok()
+            {
+                paste.sent = true;
+                state.paste = Some(paste);
+            }
+        } else if !paste.tx.is_closed()
+            && Instant::now() < paste.offer.expires
+            && paste.interaction == mineshare_input::file_paste_interaction()
+        {
+            // A local copy can beat Linux polling. Deliver the original
+            // shortcut without asking the peer when that happens.
+            if let Err(error) = paste.inject.paste_in_window(paste.window) {
+                warn!(%error, "could not restore local clipboard paste");
+            }
+        }
+    }
+    if let Some((offer, tx)) = request {
+        let paths = if !tx.is_closed()
+            && Instant::now() < offer.expires
+            && offer.revision == clipboard_revision()
+            && !files_excluded_from_monitoring()
+        {
+            clipboard_file_list(clipboard).ok().filter(|paths| {
+                offer.fingerprint.as_ref() == Some(&file_fingerprint(paths))
+                    && offer.revision == clipboard_revision()
+            })
+        } else {
+            None
+        };
+        runtime.spawn(async move {
+            if let Some(paths) = paths {
+                match crate::files::send_clipboard(paths, offer.id, tx.clone()).await {
+                    Ok(()) => return,
+                    Err(error) => warn!(%error, "requested clipboard file transfer failed"),
+                }
+            }
+            let _ = tx
+                .send(ControlMsg::ClipboardFiles {
+                    offer: offer.id,
+                    ids: Vec::new(),
+                })
+                .await;
+        });
+    }
 }
 
 struct PendingApply {
@@ -330,7 +660,11 @@ fn send_image(tx: &Sender<ClipboardEvent>, image: arboard::ImageData<'static>) -
 /// Spawn the clipboard watcher thread (idempotent). Only the first
 /// call actually starts the OS-side thread; subsequent calls are
 /// no-ops, so it's safe to invoke this from every peer session.
-pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
+pub fn ensure_watcher(
+    tx: Sender<ClipboardEvent>,
+    file_tx: crate::files::ControlSender,
+    inject: Arc<dyn mineshare_input::InputInject>,
+) {
     *INCOMING_IMAGE.lock() = None;
     // DIAGNOSTIC GATE (crash hunt): MINESHARE_NO_CLIPBOARD=1 disables
     // all clipboard sync, to test whether Win32 clipboard / OLE access
@@ -340,6 +674,11 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
         warn!("clipboard sync disabled via MINESHARE_NO_CLIPBOARD");
         return;
     }
+    *FILE_SESSION.lock() = FileSession {
+        connection: Some((file_tx, inject)),
+        ..FileSession::default()
+    };
+    mineshare_input::register_file_paste(request_local_paste);
     if WATCHER_RUNNING.swap(true, Ordering::AcqRel) {
         // Already running. Replace the active sender so the new
         // peer session receives change notifications instead of the
@@ -371,6 +710,7 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
             let mut revisions = RevisionGuard::new(clipboard_revision());
 
             loop {
+                service_file_requests(&mut clipboard, &runtime);
                 // Block up to POLL_MS for an inbound peer payload. A
                 // payload wakes us immediately to apply it; a timeout
                 // is the cue to poll the local clipboard for changes.
@@ -382,7 +722,10 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         };
                         if revisions.may_apply(pending.received_revision, clipboard_revision()) {
                             match pending.event {
-                                ApplyEvent::Files(paths) => {
+                                ApplyEvent::Files(paths, paste) => {
+                                    if !paste_is_current(&paste, &mut clipboard) {
+                                        continue;
+                                    }
                                     let fingerprint = file_fingerprint(&paths);
                                     let setter = clipboard.set();
                                     #[cfg(target_os = "windows")]
@@ -395,6 +738,11 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                                             *LAST_CLIPBOARD.lock() = Some(fingerprint);
                                             revisions.applied(clipboard_revision());
                                             info!(count = paths.len(), "applied peer clipboard files");
+                                            if paste.interaction == mineshare_input::file_paste_interaction()
+                                                && let Err(error) = paste.inject.paste_in_window(paste.window)
+                                            {
+                                                warn!(%error, "could not replay requested file paste");
+                                            }
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "failed to apply peer clipboard files")
@@ -447,29 +795,31 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                     continue;
                 }
                 // Explorer's native file list must not degrade to filename text.
-                if let Ok(paths) = clipboard.get().file_list()
+                if let Ok(paths) = clipboard_file_list(&mut clipboard)
                     && !paths.is_empty()
                 {
                     let fingerprint = file_fingerprint(&paths);
                     if clipboard_revision() != revision {
                         continue;
                     }
-                    if should_send_files(&revisions, revision, &fingerprint, LAST_CLIPBOARD.lock().as_ref(), files_excluded_from_monitoring()) {
-                        // File sends have disk side effects. Claim this snapshot
-                        // BEFORE sending: a failure after file N must not retry
-                        // files 1..N every poll and fill both peers' disks.
-                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                        revisions.observe(revision);
-                        match crate::files::send_clipboard(paths, &runtime) {
-                            Ok(()) => {}
-                            Err(e) => warn!(error = %e, "clipboard file send failed; copy again to retry (automatic retry disabled)"),
+                    if should_send_files(&revisions, revision, &fingerprint, LAST_CLIPBOARD.lock().as_ref(), files_excluded_from_monitoring())
+                        && paths.len() <= crate::files::MAX_CLIPBOARD_FILES
+                    {
+                        let id = NEXT_FILE_OFFER.fetch_add(1, Ordering::Relaxed);
+                        let tx = REPLACE_TX_GUARD.lock().clone();
+                        let mut state = FILE_SESSION.lock();
+                        state.remote = None;
+                        state.paste = None;
+                        state.local = state.connection.as_ref().map(|_| Offer {
+                            id, revision, fingerprint: Some(fingerprint.clone()), expires: Instant::now() + OFFER_TTL,
+                        });
+                        drop(state);
+                        if let Some(tx) = tx {
+                            let _ = tx.blocking_send(ClipboardEvent::FileOffer(id));
                         }
-                    } else {
-                        // Baseline the clipboard on launch without replaying
-                        // a file copy left behind by a previous process/session.
-                        *LAST_CLIPBOARD.lock() = Some(fingerprint);
-                        revisions.observe(revision);
                     }
+                    *LAST_CLIPBOARD.lock() = Some(fingerprint);
+                    revisions.observe(revision);
                     continue;
                 }
                 // Rich content wins over alternate text (e.g. an image's name).
@@ -481,6 +831,7 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         }
                         if revisions.local_revision_changed(revision)
                             || LAST_CLIPBOARD.lock().as_ref() != Some(&fingerprint) {
+                            invalidate_file_offers();
                             let tx = REPLACE_TX_GUARD.lock().clone();
                             if let Some(tx) = tx
                                 && send_image(&tx, image)
@@ -528,6 +879,7 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         revisions.observe(revision);
                         continue;
                     }
+                    invalidate_file_offers();
                     let tx = REPLACE_TX_GUARD.lock().clone();
                     if let Some(tx) = tx {
                         if tx.blocking_send(ClipboardEvent::Text(current)).is_err() {
@@ -538,6 +890,9 @@ pub fn ensure_watcher(tx: Sender<ClipboardEvent>) {
                         }
                     }
                     continue;
+                }
+                if revisions.local_revision_changed(revision) {
+                    invalidate_file_offers();
                 }
                 revisions.observe(revision);
             }
@@ -622,15 +977,15 @@ fn files_excluded_from_monitoring() -> bool {
     }
 }
 
-pub fn apply_files_from_peer(paths: Vec<PathBuf>) -> Result<()> {
-    if std::env::var_os("MINESHARE_NO_CLIPBOARD").is_some() {
-        return Ok(());
+fn invalidate_file_offers() {
+    let mut state = FILE_SESSION.lock();
+    state.remote = None;
+    state.paste = None;
+    let revoke = state.local.take().is_some();
+    drop(state);
+    if revoke && let Some(tx) = REPLACE_TX_GUARD.lock().clone() {
+        let _ = tx.blocking_send(ClipboardEvent::FileOffer(0));
     }
-    *INCOMING_IMAGE.lock() = None;
-    enqueue_apply(PendingApply {
-        event: ApplyEvent::Files(paths),
-        received_revision: clipboard_revision(),
-    })
 }
 
 fn enqueue_apply(event: PendingApply) -> Result<()> {
@@ -660,6 +1015,7 @@ fn assemble_event(
     event: ClipboardEvent,
 ) -> Result<Option<PendingApply>> {
     match event {
+        ClipboardEvent::FileOffer(_) => Ok(None),
         ClipboardEvent::Text(text) => {
             *incoming = None;
             Ok(Some(PendingApply {
@@ -712,6 +1068,194 @@ pub const fn queue_capacity() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_uri_lists_keep_localized_paths_and_strip_only_line_endings() {
+        assert_eq!(
+            parse_file_uris(b"# Files\r\nfile:///tmp/%E0%B9%84%E0%B8%9F%E0%B8%A5%E0%B9%8C%20a.png\r\nfile:///tmp/encoded%0D\r\n").unwrap(),
+            [PathBuf::from("/tmp/ไฟล์ a.png"), PathBuf::from("/tmp/encoded\r")],
+        );
+        assert!(parse_file_uris(b"file://other-host/tmp/a.png\r\n").is_err());
+        assert!(parse_file_uris(b"file:///tmp/encoded%00\n").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    fn isolate_native_clipboard() {
+        use windows_sys::Win32::System::StationsAndDesktops::*;
+        let desktop: Vec<u16> = "Default\0".encode_utf16().collect();
+        unsafe {
+            let station = CreateWindowStationW(std::ptr::null(), 0, 0x000f_037f, std::ptr::null());
+            assert!(!station.is_null(), "private window station unavailable");
+            assert_ne!(SetProcessWindowStation(station), 0);
+            let desktop = CreateDesktopW(
+                desktop.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0x000f_01ff,
+                std::ptr::null(),
+            );
+            assert!(!desktop.is_null(), "private desktop unavailable");
+            assert_ne!(SetThreadDesktop(desktop), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "run alone with MINESHARE_TEST_CLIPBOARD=1 and a private X display on Linux"]
+    fn native_file_copy_transfers_only_on_paste_and_preserves_newer_local_copy() -> Result<()> {
+        use crate::runtime::ControlMsg;
+        use mineshare_input::{Button, InputInject, KeyCode};
+
+        assert_eq!(
+            std::env::var("MINESHARE_TEST_CLIPBOARD").as_deref(),
+            Ok("1")
+        );
+        #[cfg(target_os = "windows")]
+        isolate_native_clipboard();
+        #[cfg(target_os = "linux")]
+        assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
+
+        #[derive(Default)]
+        struct Recorder(AtomicU64);
+        impl InputInject for Recorder {
+            fn mouse_move_rel(&self, _: i32, _: i32) -> Result<()> {
+                unreachable!()
+            }
+            fn mouse_button(&self, _: Button, _: bool) -> Result<()> {
+                unreachable!()
+            }
+            fn key(&self, _: KeyCode, _: bool) -> Result<()> {
+                unreachable!()
+            }
+            fn scroll(&self, _: f32, _: f32) -> Result<()> {
+                unreachable!()
+            }
+            fn paste_in_window(&self, window: u64) -> Result<()> {
+                self.0.store(window, Ordering::Release);
+                Ok(())
+            }
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("mineshare-clipboard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir)?;
+        let pdf = dir.join("fixture.pdf");
+        let png = dir.join("fixture.png");
+        std::fs::write(&pdf, b"%PDF fixture")?;
+        std::fs::write(&png, b"PNG fixture")?;
+        let mut clipboard = arboard::Clipboard::new()?;
+        clipboard.set_text("local baseline")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let _entered = runtime.enter();
+        let (events, mut clipboard_events) = tokio::sync::mpsc::channel(queue_capacity());
+        let (wire, mut messages) = tokio::sync::mpsc::channel(crate::files::file_queue_capacity());
+        let recorder = Arc::new(Recorder::default());
+        ensure_watcher(events, wire, recorder.clone());
+
+        runtime.block_on(async {
+            let wait = Duration::from_secs(6);
+            assert!(matches!(
+                tokio::time::timeout(wait, clipboard_events.recv()).await?,
+                Some(ClipboardEvent::Text(_))
+            ));
+            clipboard.set().file_list(&[&pdf, &png])?;
+            let Some(ClipboardEvent::FileOffer(id)) =
+                tokio::time::timeout(wait, clipboard_events.recv()).await?
+            else {
+                anyhow::bail!("copy did not publish a token");
+            };
+            assert!(
+                tokio::time::timeout(Duration::from_millis(POLL_MS * 2), messages.recv())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(clipboard.get().file_list()?, [pdf.clone(), png.clone()]);
+            request_from_peer(id);
+            let mut bytes = Vec::new();
+            loop {
+                match tokio::time::timeout(wait, messages.recv()).await?.unwrap() {
+                    ControlMsg::FileOffer { .. } | ControlMsg::FileEnd { .. } => {}
+                    ControlMsg::FileChunk { data, .. } => bytes.extend_from_slice(&data),
+                    ControlMsg::ClipboardFiles { offer, ids } => {
+                        assert_eq!(offer, id);
+                        assert_eq!(ids.len(), 2);
+                        break;
+                    }
+                    other => anyhow::bail!("unexpected file transfer message: {other:?}"),
+                }
+            }
+            assert_eq!(bytes, b"%PDF fixturePNG fixture");
+            request_from_peer(id);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(POLL_MS * 2), messages.recv())
+                    .await
+                    .is_err()
+            );
+
+            clipboard.set_text("destination clipboard")?;
+            assert!(matches!(
+                tokio::time::timeout(wait, clipboard_events.recv()).await?,
+                Some(ClipboardEvent::Text(_))
+            ));
+            let received_id = u64::MAX - 1;
+            let contents = b"requested PDF";
+            crate::files::begin_incoming_at(
+                received_id,
+                "received.pdf",
+                contents.len() as u64,
+                &dir,
+            )
+            .await?;
+            crate::files::write_chunk(received_id, 0, contents).await?;
+            crate::files::finalize_incoming(received_id, Sha256::digest(contents).into()).await?;
+            TEST_PASTE_WINDOW.store(123, Ordering::Relaxed);
+            offer_from_peer(100);
+            assert!(request_local_paste());
+            assert!(matches!(
+                tokio::time::timeout(wait, messages.recv()).await?,
+                Some(ControlMsg::ClipboardFilePaste(100))
+            ));
+            finish_file_paste(100, &[received_id]);
+            tokio::time::timeout(wait, async {
+                while recorder.0.load(Ordering::Acquire) != 123 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await?;
+            assert_eq!(clipboard.get().file_list()?, [dir.join("received.pdf")]);
+
+            offer_from_peer(101);
+            assert!(request_local_paste());
+            assert!(matches!(
+                tokio::time::timeout(wait, messages.recv()).await?,
+                Some(ControlMsg::ClipboardFilePaste(101))
+            ));
+            TEST_PASTE_WINDOW.store(124, Ordering::Relaxed);
+            finish_file_paste(101, &[received_id]);
+            tokio::time::sleep(Duration::from_millis(POLL_MS * 2)).await;
+            assert_eq!(recorder.0.load(Ordering::Acquire), 123);
+
+            offer_from_peer(102);
+            clipboard.set_text("a newer local copy")?;
+            let _ = request_local_paste(); // Linux detects the change on its watcher thread.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(POLL_MS * 2), messages.recv())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(clipboard.get_text()?, "a newer local copy");
+            clear_file_session();
+            Ok::<_, anyhow::Error>(())
+        })?;
+        std::fs::remove_file(pdf)?;
+        std::fs::remove_file(png)?;
+        std::fs::remove_file(dir.join("received.pdf"))?;
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn file_clipboard_restart_never_replays_six_existing_files() {

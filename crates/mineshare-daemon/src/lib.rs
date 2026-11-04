@@ -27,7 +27,7 @@ pub mod status;
 pub mod trust;
 
 use std::sync::OnceLock;
-pub const CONTROL_PROTOCOL: &str = "control-v3";
+pub const CONTROL_PROTOCOL: &str = "control-v4";
 
 pub fn compatible_control_build(version: &str) -> bool {
     version.rsplit(" · ").next() == Some(CONTROL_PROTOCOL)

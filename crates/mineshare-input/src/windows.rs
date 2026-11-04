@@ -1657,6 +1657,16 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         let scan = info.scanCode;
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
         let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+        static FILE_PASTE_HELD: AtomicBool = AtomicBool::new(false);
+        if scan == 0x2f && FILE_PASTE_HELD.load(Ordering::Relaxed) {
+            if up {
+                FILE_PASTE_HELD.store(false, Ordering::Relaxed);
+            }
+            return LRESULT(1);
+        }
+        if down && scan != 0x2f {
+            super::note_paste_interaction();
+        }
         // A held shortcut is one toggle, not a stream of lock/unlock flashes.
         if scan == SCAN_HOTKEY_LOCK && LOCK_HOTKEY_HELD.load(Ordering::Relaxed) {
             if up {
@@ -1772,6 +1782,16 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
             let pass_local_release =
                 up && touchpad::take_legacy_passthrough_release(scan, extended);
             let routed = route_physical_key(scan, info.vkCode, extended, down, mode == MODE_REMOTE);
+            if down
+                && !routed
+                && scan == 0x2f
+                && win_key_down(0x11)
+                && !paste_modifier_conflict()
+                && super::request_file_paste()
+            {
+                FILE_PASTE_HELD.store(true, Ordering::Relaxed);
+                return LRESULT(1);
+            }
             if matches!(scan, 0x2a | 0x36) {
                 info!(
                     scan,
@@ -1806,6 +1826,20 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         }
     }
     LRESULT(0)
+}
+
+fn win_key_down(vk: i32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    (unsafe { GetAsyncKeyState(vk) }) < 0
+}
+
+fn paste_modifier_conflict() -> bool {
+    [0x10, 0x12, 0x5b, 0x5c].into_iter().any(win_key_down)
+}
+
+pub(super) fn paste_window() -> Option<u64> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    (!hwnd.0.is_null()).then_some(hwnd.0 as usize as u64)
 }
 
 fn route_physical_key(
@@ -1849,6 +1883,7 @@ pub(super) fn route_touchpad_capture_key(scan: u32, vk: u32, extended: bool, dow
 /// knows whether to call enigo's button() or key() to clear it.
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 enum HeldKey {
+    PasteV,
     MouseBtn(Button),
     Key(u16),
 }
@@ -2100,6 +2135,9 @@ impl InputInject for EnigoInject {
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
         if down {
+            super::note_paste_interaction();
+        }
+        if down {
             // A real click chooses its own target; never override it later.
             REMOTE_FOCUS_HANDOFF.arm(false);
         }
@@ -2131,6 +2169,9 @@ impl InputInject for EnigoInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
+        if down && code.0 != 47 {
+            super::note_paste_interaction();
+        }
         let trace_alt_tab = matches!(code.0, 15 | 56 | 100);
         let started = trace_alt_tab.then(Instant::now);
         if down {
@@ -2138,6 +2179,23 @@ impl InputInject for EnigoInject {
         }
         let edge = HeldKey::Key(code.0);
         let mut held = self.held.lock();
+        if code.0 == 47 {
+            if held.contains(&HeldKey::PasteV) {
+                if !down {
+                    held.remove(&HeldKey::PasteV);
+                }
+                return Ok(());
+            }
+            if down
+                && !held.contains(&edge)
+                && (held.contains(&HeldKey::Key(29)) || held.contains(&HeldKey::Key(97)))
+                && !paste_modifier_conflict()
+                && super::request_file_paste()
+            {
+                held.insert(HeldKey::PasteV);
+                return Ok(());
+            }
+        }
         if !should_inject_owned_edge(&held, edge, down) {
             debug!(scancode = code.0, "ignored unowned injected key release");
             return Ok(());
@@ -2183,6 +2241,7 @@ impl InputInject for EnigoInject {
                         .context("enigo button release")
                 }
                 HeldKey::Key(code) => self.inject_key(KeyCode(code), false),
+                HeldKey::PasteV => Ok(()),
             };
             match res {
                 Ok(()) => released += 1,
@@ -2218,6 +2277,14 @@ impl InputInject for EnigoInject {
 
     fn touchpad(&self, event: TouchpadEvent) -> Result<()> {
         touchpad::inject(event)
+    }
+
+    fn paste_in_window(&self, window: u64) -> Result<()> {
+        let _held = self.held.lock();
+        if paste_window() == Some(window) && !paste_modifier_conflict() {
+            super::paste_keys(win_key_down(0x11), |code, down| self.inject_key(code, down))?;
+        }
+        Ok(())
     }
 }
 

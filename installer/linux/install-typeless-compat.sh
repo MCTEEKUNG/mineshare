@@ -5,6 +5,12 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 config=${XDG_CONFIG_HOME:-$HOME/.config}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
+if [[ ${1:-} == --keyboard-only ]]; then
+    mkdir -p "$config/MineShare"
+    printf 'enabled\n' > "$config/MineShare/keyboard-broker.enabled"
+    echo 'Keyboard broker enabled. Restart MineShare when ready.'
+    exit 0
+fi
 launcher="${1:-/usr/bin/mineshare-app}"
 if [[ ! -x $launcher ]]; then launcher="$HOME/.local/bin/mineshare-app"; fi
 [[ -x "$launcher" ]]

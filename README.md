@@ -25,7 +25,7 @@
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
 
-**Development snapshot:** `0.0.16` · request-based pairing (`control-v3`), connection controls, microphone continuity fixes, and bounded audio/input queues. See [release notes](docs/releases/0.0.16.md) and [connection controls](docs/connection-controls.md). Both computers need a compatible build. Development changes are not necessarily published as installers.
+**Development snapshot:** request-based pairing, file paste on demand (`control-v4`), microphone continuity fixes, and bounded audio/input queues. See [connection controls](docs/connection-controls.md). Both computers need a compatible build. Development changes are not necessarily published as installers.
 
 ### Performance work: current status
 
@@ -62,7 +62,7 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 | ⌨️ **Smart keyboard routing** | Keys follow whichever side you're actively using. Defaults to "Smart" mode: the most-recently-clicked machine wins focus, sticky during typing pauses. Pin to either side with **Ctrl+Alt+K**. |
 | 🔊 **System sound bridge** | What's playing on Win → audible on Ubuntu, and vice-versa. WASAPI loopback (Win) ↔ PipeWire monitor (Linux) ↔ Opus over UDP. |
 | 🎙️ **Microphone bridge** | Your mic on either PC becomes an input device on the peer (PipeWire null-sink on Linux, VB-CABLE on Win). |
-| 📋 **Clipboard sync** | Text copy/paste flows both directions automatically. |
+| 📋 **Clipboard sync** | Text syncs automatically. File bytes transfer only when you press **Ctrl+V** on the paired destination. |
 | 📁 **File transfer** | Drag a file onto the MineShare window → streams to peer over the encrypted channel, lands at `Downloads/MineShare/<name>` with SHA-256 integrity check. Live progress + cancel. |
 | 🔒 **Encrypted by default** | Noise XX handshake → ChaCha20-Poly1305 AEAD on every byte. PIN-pairing once per device, trust-on-first-use. |
 | 📡 **Zero-config discovery** | mDNS announces `_mineshare._tcp.local.`; both ends auto-connect on the same LAN. |
@@ -76,7 +76,14 @@ see devices on the LAN, select one, and confirm **Send request**. The other
 computer must accept before a first-time PIN exchange begins. Discovery never
 pairs new computers automatically. Your selected paired computer reconnects
 after an outage; **Disconnect & pause** blocks reconnection until you resume.
-Both computers need the request-based `control-v3` build.
+Both computers need compatible builds. File paste on demand uses `control-v4`.
+
+Copy files as usual with **Ctrl+C**, then press **Ctrl+V** in the destination
+window within two minutes. A newer local copy takes precedence. If you switch
+windows or continue interacting during the transfer, MineShare skips the delayed
+paste. On Ubuntu Wayland, enable the updated MineShare GNOME pointer extension
+for the focus check. Pasting with the physical Ubuntu keyboard also requires
+MineShare keyboard capture through the keyboard broker.
 See [connection controls](docs/connection-controls.md).
 
 ---

@@ -83,7 +83,7 @@ ms_prepare_upgrade() {
             if ! ms_user_command "$uid" bash -c '
                 # Run as the desktop user and use pidfds to avoid PID reuse.
                 exec python3 - "$@" <<'"'"'PY'"'"'
-import os, select, signal, sys
+import os, select, signal, sys, time
 import shutil, subprocess
 from pathlib import Path
 
@@ -92,24 +92,43 @@ if shutil.which("pactl"):
     if audio.returncode == 0 and "typeless" in audio.stdout.lower():
         sys.exit("Typeless is recording. Finish the recording before upgrading MineShare.")
 
-pids = []
+pids = {}
 for arg in sys.argv[1:]:
     pid = int(arg)
     try:
         fd = os.pidfd_open(pid)
         proc = Path("/proc") / str(pid)
         if proc.stat().st_uid == os.getuid() and os.readlink(proc / "exe") == "/opt/Typeless/typeless":
-            pids.append(fd)
+            parent = int((proc / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            pids[pid] = (fd, parent)
     except (FileNotFoundError, ProcessLookupError):
         pass
-for fd in pids:
-    try:
-        signal.pidfd_send_signal(fd, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-for fd in pids:
-    if not select.select([fd], [], [], 3)[0]:
-        sys.exit("Typeless did not close. MineShare upgrade paused before keyboard ownership changed.")
+def stop(fds):
+    for fd in fds:
+        try:
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+def wait(fds, seconds):
+    pending = set(fds)
+    deadline = time.monotonic() + seconds
+    while pending:
+        readable, _, _ = select.select(pending, [], [], max(0, deadline - time.monotonic()))
+        if not readable:
+            break
+        pending.difference_update(readable)
+    return pending
+
+# Let the Electron parent shut down its helpers before signalling them.
+# Sending TERM to all of them at once can leave the parent closing slowly.
+roots = [fd for fd, parent in pids.values() if parent not in pids]
+stop(roots)
+wait(roots, 8)
+remaining = wait([fd for fd, _ in pids.values()], 0)
+stop(remaining)
+if wait(remaining, 20):
+    sys.exit("Typeless did not close. MineShare upgrade paused before keyboard ownership changed.")
 PY
             ' bash $vendor; then
                 ms_resume_upgrade || true

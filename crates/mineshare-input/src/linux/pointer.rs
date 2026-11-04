@@ -55,6 +55,38 @@ pub(super) fn sample() -> Sample {
     }
 }
 
+pub(super) fn paste_window() -> Option<u64> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value == "wayland")
+    {
+        static CONNECTION: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
+        let connection = CONNECTION.get_or_init(|| {
+            zbus::blocking::connection::Builder::session()
+                .ok()?
+                .method_timeout(std::time::Duration::from_millis(25))
+                .build()
+                .ok()
+        });
+        let id: u64 = connection
+            .as_ref()?
+            .call_method(
+                Some("org.gnome.Shell"),
+                "/org/gnome/Shell/Extensions/MineSharePointer",
+                Some("org.gnome.Shell.Extensions.MineSharePointer"),
+                "GetPasteWindow",
+                &(),
+            )
+            .ok()?
+            .body()
+            .deserialize()
+            .ok()?;
+        return (id != 0).then_some(id);
+    }
+    let (connection, _) = x11rb::connect(None).ok()?;
+    let id = connection.get_input_focus().ok()?.reply().ok()?.focus;
+    (id > 1).then_some(u64::from(id))
+}
+
 fn wayland_sample() -> Sample {
     use std::time::{Duration, Instant};
     // Bound method waits on this candidate-only path. A missing/stalled extension
