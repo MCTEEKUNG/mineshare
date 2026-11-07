@@ -1,6 +1,7 @@
 //! Authoritative compositor coordinates only. Never infer an edge from raw mickeys.
 use parking_lot::Mutex;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
+use std::time::{Duration, Instant};
 use x11rb::{
     connection::Connection, protocol::xproto::ConnectionExt, rust_connection::RustConnection,
 };
@@ -87,8 +88,57 @@ pub(super) fn paste_window() -> Option<u64> {
     (id > 1).then_some(u64::from(id))
 }
 
+pub(super) fn reveal_window_switcher() {
+    // Other desktops retain their normal keyboard-driven switcher.
+    if !std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+        desktop
+            .split(':')
+            .any(|name| name.eq_ignore_ascii_case("GNOME"))
+    }) {
+        return;
+    }
+    static REQUESTS: OnceLock<Option<mpsc::SyncSender<Instant>>> = OnceLock::new();
+    let requested = Instant::now();
+    let sender = REQUESTS.get_or_init(|| {
+        let (send, recv) = mpsc::sync_channel::<Instant>(1);
+        std::thread::Builder::new()
+            .name("mineshare-gnome-switcher".into())
+            .spawn(move || {
+                let mut bus = None;
+                for requested in recv {
+                    let result = (|| -> zbus::Result<()> {
+                        let max_age = Duration::from_millis(50);
+                        if requested.elapsed() >= max_age {
+                            return Ok(());
+                        }
+                        if bus.is_none() {
+                            bus = Some(zbus::blocking::Connection::session()?);
+                        }
+                        let proxy = zbus::blocking::Proxy::new(
+                            bus.as_ref().unwrap(),
+                            "org.gnome.Shell",
+                            "/org/gnome/Shell/Extensions/MineSharePointer",
+                            "org.gnome.Shell.Extensions.MineSharePointer",
+                        )?;
+                        if requested.elapsed() < max_age {
+                            proxy.call_noreply("RevealWindowSwitcher", &())?;
+                        }
+                        Ok(())
+                    })();
+                    if result.is_err() {
+                        bus = None;
+                    }
+                }
+            })
+            .ok()?;
+        Some(send)
+    });
+    if let Some(sender) = sender {
+        let _ = sender.try_send(requested);
+    }
+}
+
 fn wayland_sample() -> Sample {
-    use std::time::{Duration, Instant};
     // Bound method waits on this candidate-only path. A missing/stalled extension
     // cannot authorize crossing; never cache a successful position as proof.
     struct Bus {

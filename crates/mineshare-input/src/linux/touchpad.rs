@@ -17,8 +17,9 @@ const TOOLS: [Key; 5] = [
     Key::BTN_TOOL_QUINTTAP,
 ];
 
-// About 9 mm on the normalized 120 mm virtual pad. Subsequent steps
-// are relative to the previous detent so reversing direction also works.
+// Start a clear horizontal swipe at about 4.6 mm on the normalized 120 mm
+// pad. Keep later detents about 9 mm apart so cycling stays controllable.
+const SWITCH_START: i32 = 2_500;
 const SWITCH_STEP: i32 = 5_000;
 const SWITCH_IDLE: Duration = Duration::from_millis(400);
 
@@ -123,20 +124,24 @@ impl WindowSwipe {
                 }
                 let horizontal = dx.iter().sum::<i32>() / 3;
                 let vertical = dy.iter().sum::<i32>() / 3;
-                if horizontal.abs() >= SWITCH_STEP
-                    && horizontal.abs() > vertical.abs()
+                let distance = horizontal.abs();
+                let clear_direction = distance > vertical.abs()
+                    && (distance >= SWITCH_STEP || distance * 4 >= vertical.abs() * 5);
+                if distance >= SWITCH_START
+                    && clear_direction
                     && dx
                         .iter()
-                        .all(|d| d * horizontal.signum() >= SWITCH_STEP / 2)
+                        .all(|d| d * horizontal.signum() >= SWITCH_START / 2)
                 {
+                    let travel = distance - SWITCH_START;
                     self.phase = SwipePhase::Switching {
                         fingers: three.map(|c| c.id),
-                        detent: x - horizontal % SWITCH_STEP,
+                        detent: x - horizontal.signum() * (travel % SWITCH_STEP),
                         updated: now,
                     };
                     Ok(Step {
                         reverse: horizontal < 0,
-                        count: (horizontal.unsigned_abs() / SWITCH_STEP as u32).min(3) as usize,
+                        count: (1 + travel / SWITCH_STEP).min(3) as usize,
                     })
                 } else if dx.into_iter().chain(dy).any(|d| d.abs() >= SWITCH_STEP) {
                     let first = TouchpadEvent::frame(stream_id, origin, false).unwrap();
@@ -363,6 +368,28 @@ mod tests {
     }
 
     #[test]
+    fn short_horizontal_swipe_starts_within_twelve_reports_in_both_directions() {
+        for direction in [-1, 1] {
+            let mut swipe = WindowSwipe::default();
+            let start = Instant::now();
+            // 50 mm/s at 125 Hz on the normalized 120 mm pad.
+            let first_step = (0..=24).find(|&sample| {
+                let x = (24_000 + direction * 218 * sample as i32) as u16;
+                let now = start + Duration::from_millis(8 * sample);
+                matches!(
+                    swipe.update(three_fingers(1, x, 20_000), now).unwrap(),
+                    SwipeOutput::Step { reverse, count: 1 } if reverse == (direction < 0)
+                )
+            });
+            eprintln!(
+                "direction={direction}, first_step_ms={:?}",
+                first_step.map(|n| n * 8)
+            );
+            assert_eq!(first_step, Some(12));
+        }
+    }
+
+    #[test]
     fn horizontal_swipe_steps_and_reverses_until_release() {
         use SwipeOutput::*;
         let mut swipe = WindowSwipe::default();
@@ -386,7 +413,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            swipe.update(three_fingers(1, 19400, 12000), now).unwrap(),
+            swipe.update(three_fingers(1, 16800, 12000), now).unwrap(),
             Step {
                 reverse: true,
                 count: 1

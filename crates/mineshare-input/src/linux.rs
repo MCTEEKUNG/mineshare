@@ -1585,7 +1585,8 @@ impl UinputInject {
         {
             return Ok(());
         }
-        if !held.contains(&HeldKey::GestureAlt) {
+        let starting = !held.contains(&HeldKey::GestureAlt);
+        if starting {
             if !held.contains(&HeldKey::KbKey(alt)) {
                 self.keyboard_edge(alt, true)?;
             }
@@ -1604,6 +1605,9 @@ impl UinputInject {
         if reverse {
             self.keyboard_edge(shift, false)?;
             held.remove(&HeldKey::KbKey(shift));
+        }
+        if starting {
+            pointer::reveal_window_switcher();
         }
         Ok(())
     }

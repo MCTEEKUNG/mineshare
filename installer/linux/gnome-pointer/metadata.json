@@ -1,7 +1,7 @@
 {
   "uuid": "mineshare-pointer@mineshare.local",
   "name": "MineShare Pointer Confirmation",
-  "description": "Read-only pointer coordinates and focused-window identifier for MineShare on Wayland.",
+  "description": "Pointer and focus information for MineShare on Wayland and faster switcher display for remote touchpad gestures.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "version": 2
+  "version": 3
 }
