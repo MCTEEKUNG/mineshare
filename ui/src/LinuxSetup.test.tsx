@@ -58,6 +58,9 @@ describe("Ubuntu first-run setup", () => {
       broker_configured: true, broker_active: false, extension_configured: true,
       extension_active: true, pending_login: true});
     render(<LinuxSetup/>);
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent(window, new Event("mineshare-linux-setup"));
     await screen.findByRole("dialog");
     for (const checkbox of screen.getAllByRole("checkbox") as HTMLInputElement[]) {
       expect(checkbox.checked).toBe(true);
@@ -68,6 +71,11 @@ describe("Ubuntu first-run setup", () => {
     fireEvent.click(proceed);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(invoke.mock.calls.some(([name]) => name === "configure_linux_setup")).toBe(false);
+  });
+  it("does not auto-open for an unsupported Wayland helper or an already active extension", () => {
+    const configured = {...fresh, input_active: true, input_configured: true, broker_configured: true};
+    expect(needsSetup({...configured, gnome_supported: false})).toBe(false);
+    expect(needsSetup({...configured, extension_active: true})).toBe(false);
   });
   it("shows cancellation errors and rechecks partially applied state", async () => {
     render(<LinuxSetup/>); await screen.findByRole("dialog");

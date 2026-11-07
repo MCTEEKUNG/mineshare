@@ -1585,6 +1585,7 @@ impl UinputInject {
         {
             return Ok(());
         }
+        let native_reverse = reverse.then(pointer::reverse_window_switcher).flatten();
         let starting = !held.contains(&HeldKey::GestureAlt);
         if starting {
             if !held.contains(&HeldKey::KbKey(alt)) {
@@ -1592,21 +1593,32 @@ impl UinputInject {
             }
             held.insert(HeldKey::GestureAlt);
         }
-        if reverse {
+        let use_shift = reverse && native_reverse.is_none();
+        if use_shift {
             self.keyboard_edge(shift, true)?;
             held.insert(HeldKey::KbKey(shift));
         }
-        for _ in 0..count {
+        let tabs = if native_reverse.is_some() {
+            usize::from(starting)
+        } else {
+            count
+        };
+        for _ in 0..tabs {
             self.keyboard_edge(tab, true)?;
             held.insert(HeldKey::KbKey(tab));
             self.keyboard_edge(tab, false)?;
             held.remove(&HeldKey::KbKey(tab));
         }
-        if reverse {
+        if use_shift {
             self.keyboard_edge(shift, false)?;
             held.remove(&HeldKey::KbKey(shift));
         }
-        if starting {
+        if let Some(switcher) = native_reverse {
+            // Opening with plain Alt+Tab selects the next window. Undo that
+            // selection before applying the initial backward detents.
+            let steps = count as u32 + u32::from(starting);
+            let _: zbus::Result<bool> = switcher.call("StepWindowSwitcher", &(steps,));
+        } else if starting {
             pointer::reveal_window_switcher();
         }
         Ok(())

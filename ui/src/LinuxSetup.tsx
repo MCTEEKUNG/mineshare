@@ -28,7 +28,7 @@ export default function LinuxSetup() {
       setStatus(s); setOptions(recommended(s));
       let dismissed = false;
       try { dismissed = sessionStorage.getItem("mineshare-linux-setup-later") === "1"; } catch { /* optional */ }
-      setOpen(needsSetup(s) && !dismissed);
+      if (needsSetup(s) && !dismissed) setOpen(true);
     }).catch(() => { /* Browser preview/unsupported older backend. */ });
     const show = () => { setOpen(true); setError(""); void refresh().catch(e => setError(String(e))); };
     window.addEventListener("mineshare-linux-setup", show);

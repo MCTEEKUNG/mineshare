@@ -88,13 +88,17 @@ pub(super) fn paste_window() -> Option<u64> {
     (id > 1).then_some(u64::from(id))
 }
 
-pub(super) fn reveal_window_switcher() {
-    // Other desktops retain their normal keyboard-driven switcher.
-    if !std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+fn gnome_session() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
         desktop
             .split(':')
             .any(|name| name.eq_ignore_ascii_case("GNOME"))
-    }) {
+    })
+}
+
+pub(super) fn reveal_window_switcher() {
+    // Other desktops retain their normal keyboard-driven switcher.
+    if !gnome_session() {
         return;
     }
     static REQUESTS: OnceLock<Option<mpsc::SyncSender<Instant>>> = OnceLock::new();
@@ -136,6 +140,31 @@ pub(super) fn reveal_window_switcher() {
     if let Some(sender) = sender {
         let _ = sender.try_send(requested);
     }
+}
+
+pub(super) fn reverse_window_switcher() -> Option<&'static zbus::blocking::Proxy<'static>> {
+    static PROXY: OnceLock<Option<zbus::blocking::Proxy<'static>>> = OnceLock::new();
+    PROXY
+        .get_or_init(|| {
+            if !gnome_session() {
+                return None;
+            }
+            let bus = zbus::blocking::connection::Builder::session()
+                .ok()?
+                .method_timeout(Duration::from_millis(40))
+                .build()
+                .ok()?;
+            let proxy = zbus::blocking::Proxy::new_owned(
+                bus,
+                "org.gnome.Shell",
+                "/org/gnome/Shell/Extensions/MineSharePointer",
+                "org.gnome.Shell.Extensions.MineSharePointer",
+            )
+            .ok()?;
+            let supported: bool = proxy.call("StepWindowSwitcher", &(0_u32,)).ok()?;
+            supported.then_some(proxy)
+        })
+        .as_ref()
 }
 
 fn wayland_sample() -> Sample {

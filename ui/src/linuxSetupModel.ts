@@ -11,6 +11,7 @@ export function recommended(s: SetupStatus): SetupOptions {
     pointer: s.wayland && s.gnome_supported && s.extensions_allowed && !s.extension_configured };
 }
 export function needsSetup(s: SetupStatus): boolean {
-  return s.linux && (!s.input_active || (s.typeless && !s.broker_active) ||
-    (s.wayland && !s.extension_active));
+  const options = recommended(s);
+  return s.linux && ((options.input && !s.input_active) ||
+    (options.broker && !s.broker_active) || (options.pointer && !s.extension_active));
 }
