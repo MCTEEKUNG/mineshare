@@ -142,9 +142,36 @@ pub(super) fn reveal_window_switcher() {
     }
 }
 
-pub(super) fn reverse_window_switcher() -> Option<&'static zbus::blocking::Proxy<'static>> {
-    static PROXY: OnceLock<Option<zbus::blocking::Proxy<'static>>> = OnceLock::new();
-    PROXY
+pub(super) struct WindowSwitcher {
+    proxy: zbus::blocking::Proxy<'static>,
+    bounded: bool,
+}
+
+impl WindowSwitcher {
+    pub(super) fn supports(&self, reverse: bool) -> bool {
+        self.bounded || reverse
+    }
+
+    pub(super) fn move_by(&self, reverse: bool, count: usize, starting: bool) {
+        // Wait for selection before the inject worker can release Alt and commit it.
+        let _: zbus::Result<bool> = if self.bounded {
+            let delta = if reverse {
+                -(count as i32)
+            } else {
+                count as i32
+            };
+            self.proxy.call("MoveWindowSwitcher", &(delta, starting))
+        } else {
+            // The older helper steps backward from Alt+Tab's initial next item.
+            let steps = count as u32 + u32::from(starting);
+            self.proxy.call("StepWindowSwitcher", &(steps,))
+        };
+    }
+}
+
+pub(super) fn window_switcher() -> Option<&'static WindowSwitcher> {
+    static SWITCHER: OnceLock<Option<WindowSwitcher>> = OnceLock::new();
+    SWITCHER
         .get_or_init(|| {
             if !gnome_session() {
                 return None;
@@ -161,8 +188,11 @@ pub(super) fn reverse_window_switcher() -> Option<&'static zbus::blocking::Proxy
                 "org.gnome.Shell.Extensions.MineSharePointer",
             )
             .ok()?;
-            let supported: bool = proxy.call("StepWindowSwitcher", &(0_u32,)).ok()?;
-            supported.then_some(proxy)
+            let bounded = proxy
+                .call("MoveWindowSwitcher", &(0_i32, false))
+                .unwrap_or(false);
+            let supported = bounded || proxy.call("StepWindowSwitcher", &(0_u32,)).unwrap_or(false);
+            supported.then_some(WindowSwitcher { proxy, bounded })
         })
         .as_ref()
 }

@@ -6,9 +6,10 @@ With the pointer on a Linux peer, swipe horizontally with three fingers.
 Swiping right advances the peer's Alt+Tab switcher and swiping left moves
 backward. Keep the fingers down to step through the list and lift to select.
 The first step starts at about 4.6 mm on the virtual pad. Subsequent steps
-are about 9 mm apart. The MineShare GNOME extension shows the switcher as
-soon as it opens. Version 4 also steps backward inside the switcher,
-allowing Alt+Shift to remain assigned to switching keyboard languages.
+are about 6.4 mm apart. Reversing direction takes about 3 mm from the
+furthest point reached. Version 5 of the MineShare GNOME extension shows the
+switcher as soon as it opens and stops the gesture at either end of the list.
+Alt+Shift remains available to switch keyboard languages.
 Run Linux Setup and sign in again to load an updated extension.
 The receiver releases the gesture's Alt modifier on handback, disconnect, or
 inactivity if contact updates stop arriving. The Linux desktop must have a

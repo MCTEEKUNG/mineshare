@@ -17,10 +17,12 @@ const TOOLS: [Key; 5] = [
     Key::BTN_TOOL_QUINTTAP,
 ];
 
-// Start a clear horizontal swipe at about 4.6 mm on the normalized 120 mm
-// pad. Keep later detents about 9 mm apart so cycling stays controllable.
+// Normalized against a 120 mm pad. Keep the initial axis classification
+// independent of how far the fingers travel between selections.
 const SWITCH_START: i32 = 2_500;
-const SWITCH_STEP: i32 = 5_000;
+const NATIVE_SWIPE_THRESHOLD: i32 = 5_000;
+const SWITCH_STEP: i32 = 3_500;
+const SWITCH_REVERSE: i32 = 1_600;
 const SWITCH_IDLE: Duration = Duration::from_millis(400);
 
 #[derive(Default)]
@@ -38,6 +40,8 @@ enum SwipePhase {
     Switching {
         fingers: [u32; 3],
         detent: i32,
+        peak: i32,
+        direction: i32,
         updated: Instant,
     },
     Consumed,
@@ -126,7 +130,7 @@ impl WindowSwipe {
                 let vertical = dy.iter().sum::<i32>() / 3;
                 let distance = horizontal.abs();
                 let clear_direction = distance > vertical.abs()
-                    && (distance >= SWITCH_STEP || distance * 4 >= vertical.abs() * 5);
+                    && (distance >= NATIVE_SWIPE_THRESHOLD || distance * 4 >= vertical.abs() * 5);
                 if distance >= SWITCH_START
                     && clear_direction
                     && dx
@@ -134,16 +138,23 @@ impl WindowSwipe {
                         .all(|d| d * horizontal.signum() >= SWITCH_START / 2)
                 {
                     let travel = distance - SWITCH_START;
+                    let direction = horizontal.signum();
                     self.phase = SwipePhase::Switching {
                         fingers: three.map(|c| c.id),
-                        detent: x - horizontal.signum() * (travel % SWITCH_STEP),
+                        detent: x - direction * (travel % SWITCH_STEP),
+                        peak: x,
+                        direction,
                         updated: now,
                     };
                     Ok(Step {
                         reverse: horizontal < 0,
                         count: (1 + travel / SWITCH_STEP).min(3) as usize,
                     })
-                } else if dx.into_iter().chain(dy).any(|d| d.abs() >= SWITCH_STEP) {
+                } else if dx
+                    .into_iter()
+                    .chain(dy)
+                    .any(|d| d.abs() >= NATIVE_SWIPE_THRESHOLD)
+                {
                     let first = TouchpadEvent::frame(stream_id, origin, false).unwrap();
                     self.phase = SwipePhase::Native;
                     Ok(Replay(first))
@@ -155,21 +166,35 @@ impl WindowSwipe {
             SwipePhase::Switching {
                 fingers,
                 detent,
+                peak,
+                direction,
                 updated,
             } => {
                 if !three.iter().all(|c| fingers.contains(&c.id)) {
                     self.phase = SwipePhase::Consumed;
                     return Ok(Finish);
                 }
-                let steps = (x - *detent) / SWITCH_STEP;
                 *updated = now;
-                if steps == 0 {
+                // Measure a reversal from the furthest point, even if the
+                // last motion did not cross a detent or selection was clamped.
+                let from_peak = (x - *peak) * *direction;
+                let reversed = from_peak <= -SWITCH_REVERSE;
+                if reversed {
+                    *direction = -*direction;
+                    *detent = *peak + *direction * SWITCH_REVERSE;
+                }
+                if reversed || from_peak > 0 {
+                    *peak = x;
+                }
+                let steps = ((x - *detent) * *direction / SWITCH_STEP).max(0);
+                let count = steps + i32::from(reversed);
+                if count == 0 {
                     return Ok(Hold);
                 }
-                *detent += steps * SWITCH_STEP;
+                *detent += *direction * steps * SWITCH_STEP;
                 Ok(Step {
-                    reverse: steps < 0,
-                    count: steps.unsigned_abs().min(3) as usize,
+                    reverse: *direction < 0,
+                    count: count.min(3) as usize,
                 })
             }
             SwipePhase::Consumed => Ok(Hold),
@@ -390,6 +415,29 @@ mod tests {
     }
 
     #[test]
+    fn reversing_after_a_long_swipe_responds_to_small_motion_from_the_peak() {
+        for direction in [-1, 1] {
+            let mut swipe = WindowSwipe::default();
+            let start = Instant::now();
+            let frame = |offset| three_fingers(1, (30_000 + direction * offset) as u16, 20_000);
+            for offset in [0, 2_500, 8_000, 16_000, 17_000] {
+                swipe.update(frame(offset), start).unwrap();
+            }
+            let first_reverse = (1..=48).find(|&sample| {
+                matches!(
+                    swipe.update(frame(17_000 - 218 * sample as i32), start + Duration::from_millis(8 * sample)).unwrap(),
+                    SwipeOutput::Step { reverse, count: 1 } if reverse == (direction > 0)
+                )
+            });
+            eprintln!(
+                "direction={direction}, first_reverse_ms={:?}",
+                first_reverse.map(|n| n * 8)
+            );
+            assert_eq!(first_reverse, Some(8));
+        }
+    }
+
+    #[test]
     fn horizontal_swipe_steps_and_reverses_until_release() {
         use SwipeOutput::*;
         let mut swipe = WindowSwipe::default();
@@ -399,21 +447,21 @@ mod tests {
             Hold
         ));
         assert!(matches!(
-            swipe.update(three_fingers(1, 15800, 12400), now).unwrap(),
+            swipe.update(three_fingers(1, 13000, 12400), now).unwrap(),
             Step {
                 reverse: false,
                 count: 1
             }
         ));
         assert!(matches!(
-            swipe.update(three_fingers(1, 26300, 12400), now).unwrap(),
+            swipe.update(three_fingers(1, 19800, 12400), now).unwrap(),
             Step {
                 reverse: false,
                 count: 2
             }
         ));
         assert!(matches!(
-            swipe.update(three_fingers(1, 16800, 12000), now).unwrap(),
+            swipe.update(three_fingers(1, 17500, 12000), now).unwrap(),
             Step {
                 reverse: true,
                 count: 1
@@ -481,7 +529,7 @@ mod tests {
         ));
         swipe.update(three_fingers(2, 12000, 12000), now).unwrap();
         assert!(matches!(
-            swipe.update(three_fingers(2, 6000, 12000), now).unwrap(),
+            swipe.update(three_fingers(2, 7000, 12000), now).unwrap(),
             SwipeOutput::Step {
                 reverse: true,
                 count: 1

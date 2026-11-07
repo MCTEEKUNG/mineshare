@@ -3,5 +3,5 @@
   "name": "MineShare Pointer Confirmation",
   "description": "Pointer and focus information for MineShare on Wayland and faster switcher display for remote touchpad gestures.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "version": 4
+  "version": 5
 }

@@ -12,6 +12,7 @@ const iface = `<node><interface name="org.gnome.Shell.Extensions.MineSharePointe
 <method name="GetPasteWindow"><arg type="t" direction="out" name="id"/></method>
 <method name="RevealWindowSwitcher"/>
 <method name="StepWindowSwitcher"><arg type="u" direction="in" name="backward"/><arg type="b" direction="out" name="handled"/></method>
+<method name="MoveWindowSwitcher"><arg type="i" direction="in" name="delta"/><arg type="b" direction="in" name="starting"/><arg type="b" direction="out" name="handled"/></method>
 </interface></node>`;
 
 export default class MineSharePointer extends Extension {
@@ -33,7 +34,12 @@ export default class MineSharePointer extends Extension {
                 return global.display.focus_window?.get_stable_sequence() ?? 0;
             },
             RevealWindowSwitcher: () => this._revealWindowSwitcher(),
-            StepWindowSwitcherAsync: ([count], invocation) => this._stepWindowSwitcher(count, invocation),
+            StepWindowSwitcherAsync: ([count], invocation) =>
+                this._moveWindowSwitcher(count, 4, invocation, (index, length) =>
+                    ((index - count) % length + length) % length),
+            MoveWindowSwitcherAsync: ([delta, starting], invocation) =>
+                this._moveWindowSwitcher(delta, 3, invocation, (index, length) =>
+                    Math.max(0, Math.min(length - 1, (starting ? 0 : index) + delta))),
         });
         this._export.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/MineSharePointer');
     }
@@ -64,13 +70,13 @@ export default class MineSharePointer extends Extension {
         });
     }
 
-    _stepWindowSwitcher(count, invocation) {
+    _moveWindowSwitcher(delta, limit, invocation, destination) {
         const reply = handled => invocation.return_value(new GLib.Variant('(b)', [handled]));
-        if (count === 0) {
+        if (delta === 0) {
             reply(true);
             return;
         }
-        if (count > 4 || this._stepRequest || Main.sessionMode.isLocked || Main.overview.visible) {
+        if (Math.abs(delta) > limit || this._stepRequest || Main.sessionMode.isLocked || Main.overview.visible) {
             reply(false);
             return;
         }
@@ -78,8 +84,9 @@ export default class MineSharePointer extends Extension {
             const popup = this._windowSwitcher();
             if (!popup?._items?.length)
                 return false;
-            for (let i = 0; i < count; i++)
-                popup._select(popup._previous());
+            const target = destination(popup._selectedIndex, popup._items.length);
+            if (target !== popup._selectedIndex)
+                popup._select(target);
             popup._showImmediately?.();
             return true;
         };
