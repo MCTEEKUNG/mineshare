@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-audio"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "cpal",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-core"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-daemon"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-input"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "enigo",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-ipc"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "mineshare-core",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-net"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "bincode",
