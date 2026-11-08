@@ -427,6 +427,50 @@ fn paste_is_current(paste: &Paste, clipboard: &mut arboard::Clipboard) -> bool {
         && paste_window() == Some(paste.window)
 }
 
+#[cfg(target_os = "windows")]
+fn clipboard_file_marker() -> Option<std::num::NonZeroU32> {
+    static FORMAT: std::sync::OnceLock<Option<std::num::NonZeroU32>> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| {
+        clipboard_win::register_format("ExcludeClipboardContentFromMonitorProcessing")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn replace_windows_file_clipboard(paths: &[PathBuf], revision: Option<u32>) -> Result<bool> {
+    use clipboard_win::{formats::CF_HDROP, raw};
+    use std::os::windows::ffi::OsStrExt;
+
+    anyhow::ensure!(!paths.is_empty(), "cannot publish an empty file clipboard");
+    // DROPFILES: offset to the path list, x/y, fNC, and fWide.
+    let mut data: Vec<u8> = [20u32, 0, 0, 0, 1]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    for path in paths {
+        data.extend(
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_le_bytes),
+        );
+    }
+    data.extend_from_slice(&[0, 0]);
+    let marker = clipboard_file_marker()
+        .ok_or_else(|| anyhow::anyhow!("could not register file clipboard marker"))?;
+    let os_error =
+        |error: clipboard_win::ErrorCode| std::io::Error::from_raw_os_error(error.raw_code());
+    let _open = clipboard_win::Clipboard::new_attempts(5).map_err(os_error)?;
+    if clipboard_revision() != revision {
+        return Ok(false);
+    }
+    // Replace the previous Shell data object and CF_HDROP together. Leaving
+    // the old Shell IDList Array lets Explorer paste the previous local file.
+    raw::empty().map_err(os_error)?;
+    raw::set_without_clear(marker.get(), &0u32.to_le_bytes()).map_err(os_error)?;
+    raw::set_without_clear(CF_HDROP, &data).map_err(os_error)?;
+    Ok(true)
+}
+
 fn service_file_requests(clipboard: &mut arboard::Clipboard, runtime: &tokio::runtime::Handle) {
     use crate::runtime::ControlMsg;
     let (request, paste) = {
@@ -807,14 +851,12 @@ pub fn ensure_watcher(
                                         continue;
                                     }
                                     let fingerprint = file_fingerprint(&paths);
-                                    let setter = clipboard.set();
                                     #[cfg(target_os = "windows")]
-                                    let setter = {
-                                        use arboard::SetExtWindows;
-                                        setter.exclude_from_monitoring()
-                                    };
-                                    match setter.file_list(&paths) {
-                                        Ok(()) => {
+                                    let applied = replace_windows_file_clipboard(&paths, paste.offer.revision);
+                                    #[cfg(not(target_os = "windows"))]
+                                    let applied = clipboard.set().file_list(&paths).map(|()| true);
+                                    match applied {
+                                        Ok(true) => {
                                             if let Some(staging) = paste.staging.clone()
                                                 && let Some(previous) = active_files.replace(staging)
                                             {
@@ -829,6 +871,7 @@ pub fn ensure_watcher(
                                                 warn!(%error, "could not replay requested file paste");
                                             }
                                         }
+                                        Ok(false) => {}
                                         Err(e) => {
                                             warn!(error = %e, "failed to apply peer clipboard files")
                                         }
@@ -1042,19 +1085,9 @@ fn should_send_files(
 fn files_excluded_from_monitoring() -> bool {
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::DataExchange::{
-            IsClipboardFormatAvailable, RegisterClipboardFormatW,
-        };
-        static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        let format = *FORMAT.get_or_init(|| {
-            let name: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing\0"
-                .encode_utf16()
-                .collect();
-            unsafe { RegisterClipboardFormatW(name.as_ptr()) }
-        });
-        // Added atomically with CF_HDROP by arboard, retained across process
+        // Added atomically with CF_HDROP, retained across process
         // restarts, and cleared by the next genuine native Copy operation.
-        format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+        clipboard_file_marker().is_some_and(|format| clipboard_win::is_format_avail(format.get()))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1230,6 +1263,25 @@ mod tests {
         std::fs::write(&pdf, b"%PDF fixture")?;
         std::fs::write(&png, b"PNG fixture")?;
         let mut clipboard = arboard::Clipboard::new()?;
+        #[cfg(target_os = "windows")]
+        {
+            let shell_id_list = clipboard_win::register_format("Shell IDList Array").unwrap();
+            clipboard.set().file_list(&[&pdf])?;
+            {
+                let _open = clipboard_win::Clipboard::new().unwrap();
+                clipboard_win::raw::set_without_clear(shell_id_list.get(), &[1, 0, 0, 0]).unwrap();
+            }
+            let revision = clipboard_revision();
+            assert!(!replace_windows_file_clipboard(
+                &[png.clone()],
+                revision.map(|n| n.wrapping_sub(1))
+            )?);
+            assert!(clipboard_win::is_format_avail(shell_id_list.get()));
+            assert!(replace_windows_file_clipboard(&[png.clone()], revision)?);
+            assert!(!clipboard_win::is_format_avail(shell_id_list.get()));
+            assert!(files_excluded_from_monitoring());
+            assert_eq!(clipboard.get().file_list()?, [png.clone()]);
+        }
         clipboard.set_text("local baseline")?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

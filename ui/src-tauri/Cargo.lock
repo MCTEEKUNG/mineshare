@@ -2720,6 +2720,7 @@ dependencies = [
  "arboard",
  "bincode",
  "clap",
+ "clipboard-win",
  "dirs",
  "hostname",
  "mineshare-audio",
