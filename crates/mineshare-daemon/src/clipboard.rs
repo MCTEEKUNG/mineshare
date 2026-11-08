@@ -126,10 +126,20 @@ struct Paste {
     sent: bool,
     inject: Arc<dyn mineshare_input::InputInject>,
     tx: crate::files::ControlSender,
+    staging: Option<Arc<tempfile::TempDir>>,
+    ids: Vec<u64>,
+    bytes: u64,
+}
+
+impl Drop for Paste {
+    fn drop(&mut self) {
+        crate::files::discard_clipboard_receives(&self.ids);
+    }
 }
 
 #[derive(Default)]
 struct FileSession {
+    staged_paste: bool,
     connection: Option<(
         crate::files::ControlSender,
         Arc<dyn mineshare_input::InputInject>,
@@ -141,6 +151,7 @@ struct FileSession {
 }
 
 static FILE_SESSION: Mutex<FileSession> = Mutex::new(FileSession {
+    staged_paste: false,
     connection: None,
     local: None,
     remote: None,
@@ -176,7 +187,7 @@ pub fn offer_from_peer(id: u64) {
     let revision = clipboard_revision();
     let fingerprint = LAST_CLIPBOARD.lock().clone();
     let mut state = FILE_SESSION.lock();
-    if state.connection.is_some() {
+    if state.staged_paste && state.connection.is_some() {
         state.remote = (id != 0).then(|| Offer {
             id,
             revision,
@@ -220,6 +231,9 @@ fn request_local_paste() -> bool {
         sent: false,
         inject,
         tx,
+        staging: None,
+        ids: Vec::new(),
+        bytes: 0,
     });
     drop(state);
     wake_watcher();
@@ -238,6 +252,46 @@ pub fn request_from_peer(id: u64) {
     }
 }
 
+pub async fn begin_clipboard_receive(offer: u64, id: u64, name: &str, size: u64) -> Result<()> {
+    let staging = {
+        let mut state = FILE_SESSION.lock();
+        let paste = state
+            .paste
+            .as_mut()
+            .filter(|paste| {
+                paste.sent
+                    && paste.offer.id == offer
+                    && Instant::now() < paste.offer.expires
+                    && paste.interaction == mineshare_input::file_paste_interaction()
+            })
+            .ok_or_else(|| anyhow::anyhow!("clipboard paste is no longer pending"))?;
+        anyhow::ensure!(
+            paste.ids.len() < crate::files::MAX_CLIPBOARD_FILES && !paste.ids.contains(&id),
+            "invalid clipboard transfer id or count"
+        );
+        let bytes = paste.bytes.saturating_add(size);
+        anyhow::ensure!(
+            bytes <= crate::files::MAX_CLIPBOARD_FILE_BYTES,
+            "clipboard paste exceeds size limit"
+        );
+        let staging = paste.staging.as_ref().unwrap().clone();
+        paste.ids.push(id);
+        paste.bytes = bytes;
+        staging
+    };
+    crate::files::begin_incoming_file(id, name, size, staging.path(), true).await?;
+    if !FILE_SESSION.lock().paste.as_ref().is_some_and(|paste| {
+        paste
+            .staging
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &staging))
+    }) {
+        crate::files::discard_clipboard_receives(&[id]);
+        anyhow::bail!("clipboard paste was superseded");
+    }
+    Ok(())
+}
+
 pub fn finish_file_paste(id: u64, ids: &[u64]) {
     let paste = {
         let mut state = FILE_SESSION.lock();
@@ -250,10 +304,15 @@ pub fn finish_file_paste(id: u64, ids: &[u64]) {
         }
         state.paste.take().unwrap()
     };
-    if ids.is_empty() || Instant::now() >= paste.offer.expires {
+    if ids.is_empty() || ids != paste.ids || Instant::now() >= paste.offer.expires {
         return;
     }
     if let Err(error) = crate::files::received_clipboard_paths(ids).and_then(|paths| {
+        let directory = paste.staging.as_ref().map(|dir| dir.path());
+        anyhow::ensure!(
+            directory.is_some() && paths.iter().all(|path| path.parent() == directory),
+            "clipboard files do not belong to the pending paste"
+        );
         enqueue_apply(PendingApply {
             received_revision: paste.offer.revision,
             event: ApplyEvent::Files(paths, paste),
@@ -381,21 +440,29 @@ fn service_file_requests(clipboard: &mut arboard::Clipboard, runtime: &tokio::ru
     };
     if let Some(mut paste) = paste {
         if paste_is_current(&paste, clipboard) {
-            let mut state = FILE_SESSION.lock();
-            // Publish pending state before the peer can reply. A new request
-            // may supersede this one while the clipboard is being checked.
-            if state.paste.is_none()
-                && state
-                    .connection
-                    .as_ref()
-                    .is_some_and(|(tx, _)| tx.same_channel(&paste.tx))
-                && paste
-                    .tx
-                    .try_send(ControlMsg::ClipboardFilePaste(paste.offer.id))
-                    .is_ok()
+            match tempfile::Builder::new()
+                .prefix("mineshare-paste-")
+                .tempdir()
             {
-                paste.sent = true;
-                state.paste = Some(paste);
+                Ok(staging) => {
+                    paste.staging = Some(Arc::new(staging));
+                    let mut state = FILE_SESSION.lock();
+                    // Publish pending state before the peer can reply.
+                    if state.paste.is_none()
+                        && state
+                            .connection
+                            .as_ref()
+                            .is_some_and(|(tx, _)| tx.same_channel(&paste.tx))
+                        && paste
+                            .tx
+                            .try_send(ControlMsg::ClipboardFilePaste(paste.offer.id))
+                            .is_ok()
+                    {
+                        paste.sent = true;
+                        state.paste = Some(paste);
+                    }
+                }
+                Err(error) => warn!(%error, "could not create clipboard staging directory"),
             }
         } else if !paste.tx.is_closed()
             && Instant::now() < paste.offer.expires
@@ -664,6 +731,7 @@ pub fn ensure_watcher(
     tx: Sender<ClipboardEvent>,
     file_tx: crate::files::ControlSender,
     inject: Arc<dyn mineshare_input::InputInject>,
+    staged_paste: bool,
 ) {
     *INCOMING_IMAGE.lock() = None;
     // DIAGNOSTIC GATE (crash hunt): MINESHARE_NO_CLIPBOARD=1 disables
@@ -675,6 +743,7 @@ pub fn ensure_watcher(
         return;
     }
     *FILE_SESSION.lock() = FileSession {
+        staged_paste,
         connection: Some((file_tx, inject)),
         ..FileSession::default()
     };
@@ -708,8 +777,19 @@ pub fn ensure_watcher(
             };
             info!(poll_ms = POLL_MS, "clipboard watcher started");
             let mut revisions = RevisionGuard::new(clipboard_revision());
+            let mut active_files = None;
+            let mut retired_files = Vec::<(Instant, Arc<tempfile::TempDir>)>::new();
 
             loop {
+                // Explorer may read the clipboard paths asynchronously. Keep
+                // the current batch and give replaced batches time to finish.
+                retired_files.retain(|(expiry, _)| Instant::now() < *expiry);
+                {
+                    let mut state = FILE_SESSION.lock();
+                    if state.paste.as_ref().is_some_and(|p| Instant::now() >= p.offer.expires) {
+                        state.paste = None;
+                    }
+                }
                 service_file_requests(&mut clipboard, &runtime);
                 // Block up to POLL_MS for an inbound peer payload. A
                 // payload wakes us immediately to apply it; a timeout
@@ -735,6 +815,11 @@ pub fn ensure_watcher(
                                     };
                                     match setter.file_list(&paths) {
                                         Ok(()) => {
+                                            if let Some(staging) = paste.staging.clone()
+                                                && let Some(previous) = active_files.replace(staging)
+                                            {
+                                                retired_files.push((Instant::now() + Duration::from_secs(600), previous));
+                                            }
                                             *LAST_CLIPBOARD.lock() = Some(fingerprint);
                                             revisions.applied(clipboard_revision());
                                             info!(count = paths.len(), "applied peer clipboard files");
@@ -810,7 +895,7 @@ pub fn ensure_watcher(
                         let mut state = FILE_SESSION.lock();
                         state.remote = None;
                         state.paste = None;
-                        state.local = state.connection.as_ref().map(|_| Offer {
+                        state.local = state.staged_paste.then_some(Offer {
                             id, revision, fingerprint: Some(fingerprint.clone()), expires: Instant::now() + OFFER_TTL,
                         });
                         drop(state);
@@ -1153,7 +1238,7 @@ mod tests {
         let (events, mut clipboard_events) = tokio::sync::mpsc::channel(queue_capacity());
         let (wire, mut messages) = tokio::sync::mpsc::channel(crate::files::file_queue_capacity());
         let recorder = Arc::new(Recorder::default());
-        ensure_watcher(events, wire, recorder.clone());
+        ensure_watcher(events, wire, recorder.clone(), true);
 
         runtime.block_on(async {
             let wait = Duration::from_secs(6);
@@ -1177,7 +1262,8 @@ mod tests {
             let mut bytes = Vec::new();
             loop {
                 match tokio::time::timeout(wait, messages.recv()).await?.unwrap() {
-                    ControlMsg::FileOffer { .. } | ControlMsg::FileEnd { .. } => {}
+                    ControlMsg::ClipboardFileTransfer { offer, .. } => assert_eq!(offer, id),
+                    ControlMsg::FileEnd { .. } => {}
                     ControlMsg::FileChunk { data, .. } => bytes.extend_from_slice(&data),
                     ControlMsg::ClipboardFiles { offer, ids } => {
                         assert_eq!(offer, id);
@@ -1202,15 +1288,6 @@ mod tests {
             ));
             let received_id = u64::MAX - 1;
             let contents = b"requested PDF";
-            crate::files::begin_incoming_at(
-                received_id,
-                "received.pdf",
-                contents.len() as u64,
-                &dir,
-            )
-            .await?;
-            crate::files::write_chunk(received_id, 0, contents).await?;
-            crate::files::finalize_incoming(received_id, Sha256::digest(contents).into()).await?;
             TEST_PASTE_WINDOW.store(123, Ordering::Relaxed);
             offer_from_peer(100);
             assert!(request_local_paste());
@@ -1218,6 +1295,16 @@ mod tests {
                 tokio::time::timeout(wait, messages.recv()).await?,
                 Some(ControlMsg::ClipboardFilePaste(100))
             ));
+            begin_clipboard_receive(100, received_id, "received.pdf", contents.len() as u64)
+                .await?;
+            crate::files::write_chunk(received_id, 0, contents).await?;
+            crate::files::finalize_incoming(received_id, Sha256::digest(contents).into()).await?;
+            let paths = crate::files::received_clipboard_paths(&[received_id])?;
+            assert_ne!(
+                paths[0].parent(),
+                Some(crate::files::download_dir().as_path())
+            );
+            assert!(crate::files::snapshot().iter().all(|t| t.id != received_id));
             finish_file_paste(100, &[received_id]);
             tokio::time::timeout(wait, async {
                 while recorder.0.load(Ordering::Acquire) != 123 {
@@ -1225,7 +1312,8 @@ mod tests {
                 }
             })
             .await?;
-            assert_eq!(clipboard.get().file_list()?, [dir.join("received.pdf")]);
+            assert_eq!(clipboard.get().file_list()?, paths);
+            assert_eq!(std::fs::read(&paths[0])?, contents);
 
             offer_from_peer(101);
             assert!(request_local_paste());
@@ -1233,10 +1321,16 @@ mod tests {
                 tokio::time::timeout(wait, messages.recv()).await?,
                 Some(ControlMsg::ClipboardFilePaste(101))
             ));
+            begin_clipboard_receive(101, received_id, "received.pdf", contents.len() as u64)
+                .await?;
+            crate::files::write_chunk(received_id, 0, contents).await?;
+            crate::files::finalize_incoming(received_id, Sha256::digest(contents).into()).await?;
+            let cancelled = crate::files::received_clipboard_paths(&[received_id])?;
             TEST_PASTE_WINDOW.store(124, Ordering::Relaxed);
             finish_file_paste(101, &[received_id]);
             tokio::time::sleep(Duration::from_millis(POLL_MS * 2)).await;
             assert_eq!(recorder.0.load(Ordering::Acquire), 123);
+            assert!(!cancelled[0].exists());
 
             offer_from_peer(102);
             clipboard.set_text("a newer local copy")?;
@@ -1252,7 +1346,6 @@ mod tests {
         })?;
         std::fs::remove_file(pdf)?;
         std::fs::remove_file(png)?;
-        std::fs::remove_file(dir.join("received.pdf"))?;
         std::fs::remove_dir(dir)?;
         Ok(())
     }

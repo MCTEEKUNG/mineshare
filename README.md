@@ -76,12 +76,14 @@ see devices on the LAN, select one, and confirm **Send request**. The other
 computer must accept before a first-time PIN exchange begins. Discovery never
 pairs new computers automatically. Your selected paired computer reconnects
 after an outage; **Disconnect & pause** blocks reconnection until you resume.
-Both computers need compatible builds. File paste on demand uses `control-v4`.
+Both computers need compatible builds with staged clipboard file paste support.
 
 Copy files as usual with **Ctrl+C**, then press **Ctrl+V** in the destination
 window within two minutes. A newer local copy takes precedence. If you switch
 windows or continue interacting during the transfer, MineShare skips the delayed
-paste. On Ubuntu Wayland, enable the updated MineShare GNOME pointer extension
+paste. Clipboard files are staged in a temporary directory so the file manager
+can paste them into the chosen folder. Explicit file transfers still use
+`Downloads/MineShare`. On Ubuntu Wayland, enable the updated MineShare GNOME pointer extension
 for the focus check. Pasting with the physical Ubuntu keyboard also requires
 MineShare keyboard capture through the keyboard broker.
 See [connection controls](docs/connection-controls.md).

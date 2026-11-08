@@ -552,6 +552,9 @@ struct PortAnnounce {
 }
 
 const CONNECTION_MAGIC: [u8; 8] = *b"MSPAIR04";
+// The legacy announce field is a bitset. Use a non-touchpad bit so older
+// peers can still connect without seeing the new clipboard-only message.
+const STAGED_PASTE_CAPABILITY: u32 = 1 << 31;
 #[derive(Debug, Serialize, Deserialize)]
 struct ConnectionHello {
     magic: [u8; 8],
@@ -717,6 +720,12 @@ pub enum ControlMsg {
     },
     ClipboardFileOffer(u64),
     ClipboardFilePaste(u64),
+    ClipboardFileTransfer {
+        offer: u64,
+        id: u64,
+        name: String,
+        size_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1795,7 +1804,8 @@ async fn run_peer_session(
         daemon_version: crate::build_id(),
         screen_w: local_w,
         screen_h: local_h,
-        touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire),
+        touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire)
+            | STAGED_PASTE_CAPABILITY,
     };
     let exchange = async {
         write_encrypted(&mut stream, &aead, &announce).await?;
@@ -1822,12 +1832,14 @@ async fn run_peer_session(
     crate::status::set_peer_connected(peer_addr.to_string(), Some(remote.display_name.clone()));
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
     mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
-    mineshare_input::set_peer_touchpad_capabilities(peer_announce.touchpad_capabilities);
+    let staged_paste = peer_announce.touchpad_capabilities & STAGED_PASTE_CAPABILITY != 0;
+    let peer_touchpad_capabilities = peer_announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
+    mineshare_input::set_peer_touchpad_capabilities(peer_touchpad_capabilities);
     crate::status::set_peer_version(Some(peer_announce.daemon_version.clone()));
-    let local_touchpad_capabilities = announce.touchpad_capabilities;
+    let local_touchpad_capabilities = announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
     let touchpad_mode = if mineshare_input::native_touchpad_pair_available(
         local_touchpad_capabilities,
-        peer_announce.touchpad_capabilities,
+        peer_touchpad_capabilities,
     ) {
         "native"
     } else {
@@ -1841,7 +1853,7 @@ async fn run_peer_session(
         local_screen = ?(local_w, local_h),
         peer_screen = ?(peer_announce.screen_w, peer_announce.screen_h),
         local_touchpad_capabilities = format_args!("{local_touchpad_capabilities:#x}"),
-        peer_touchpad_capabilities = format_args!("{:#x}", peer_announce.touchpad_capabilities),
+        peer_touchpad_capabilities = format_args!("{peer_touchpad_capabilities:#x}"),
         touchpad_mode,
         "input UDP channel established"
     );
@@ -1953,7 +1965,7 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
-    crate::clipboard::ensure_watcher(clip_tx, file_tx.clone(), inject.clone());
+    crate::clipboard::ensure_watcher(clip_tx, file_tx.clone(), inject.clone(), staged_paste);
     crate::files::set_session_tx(file_tx);
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
@@ -2208,6 +2220,22 @@ async fn run_peer_session(
                     if let Err(e) = crate::files::begin_incoming(id, &name, size_bytes).await {
                         warn!(id, error = %e, "failed to start incoming file");
                         crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    }
+                }
+                Ok(ControlMsg::ClipboardFileTransfer {
+                    offer,
+                    id,
+                    name,
+                    size_bytes,
+                }) => {
+                    if !staged_paste {
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    } else if let Err(error) =
+                        crate::clipboard::begin_clipboard_receive(offer, id, &name, size_bytes)
+                            .await
+                    {
+                        debug!(id, %error, "clipboard file rejected");
                         let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
