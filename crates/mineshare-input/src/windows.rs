@@ -69,16 +69,52 @@ mod touchpad;
 
 pub use keyboard_worker::{enable_gui_keyboard_worker, run_keyboard_worker_if_requested};
 
-/// RAII guard that releases the raised system timer resolution
-/// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
-/// forward watchdog thread so the finer scheduler tick is only in
-/// effect while the bridge is actively forwarding motion.
-struct HighResTimerGuard;
+/// Raise the system timer to 1 ms for one [`super::HighResTimer`] holder.
+///
+/// Since Windows 11, a process with no visible or audible window (this app
+/// hidden in the tray) is not guaranteed a resolution finer than the default
+/// ~15.6 ms tick, so `timeBeginPeriod(1)` alone can silently do nothing. Opt
+/// out of that throttling once, as documented for `SetProcessInformation`.
+/// Holders are only taken while motion is actively forwarded or injected, so
+/// idle power use is unchanged.
+pub(crate) fn begin_high_res_timer() {
+    honor_timer_resolution_when_hidden();
+    unsafe { timeBeginPeriod(1) };
+}
 
-impl Drop for HighResTimerGuard {
-    fn drop(&mut self) {
-        unsafe { timeEndPeriod(1) };
-    }
+pub(crate) fn end_high_res_timer() {
+    unsafe { timeEndPeriod(1) };
+}
+
+fn honor_timer_resolution_when_hidden() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // ControlMask selects the policy; a cleared StateMask means "do not
+        // throttle", i.e. always honour timer-resolution requests.
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let result = unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+                mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            )
+        };
+        match result {
+            Ok(()) => info!("timer resolution requests honoured while hidden"),
+            // Pre-Windows 11 builds reject the flag; they never throttled it.
+            Err(error) => debug!(%error, "timer-resolution throttling opt-out unavailable"),
+        }
+    });
 }
 
 const MODE_LOCAL: u8 = 0;
@@ -411,8 +447,7 @@ fn start_motion_flush_watchdog() {
                 // The default Windows scheduler tick is ~15.6 ms. Raise it
                 // only for an active remote-driving interval, then release it
                 // as soon as control returns local.
-                unsafe { timeBeginPeriod(1) };
-                let timer_guard = HighResTimerGuard;
+                let timer_guard = super::HighResTimer::acquire();
                 while forwarding_active() {
                     let now_us = monotonic_us();
                     let deadline = NEXT_FLUSH_DEADLINE_US.load(Ordering::Acquire);

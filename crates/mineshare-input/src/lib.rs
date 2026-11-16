@@ -711,6 +711,42 @@ pub fn target_flush_us() -> u64 {
     TARGET_FLUSH_US.load(Ordering::Relaxed)
 }
 
+static HIGH_RES_HOLDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Scoped request for 1 ms OS timer resolution while motion is being paced.
+///
+/// The default Windows scheduler tick (~15.6 ms) is far coarser than a
+/// 500-1,000 Hz mouse interval, so any sub-tick sleep in the forward watchdog
+/// or the receive-side injection pacer otherwise rounds up to a full tick.
+/// Hold one only while motion is active; drop it when input goes idle. A
+/// no-op on other platforms.
+#[must_use = "the raised resolution is released when the guard is dropped"]
+pub struct HighResTimer {
+    _private: (),
+}
+
+impl HighResTimer {
+    pub fn acquire() -> Self {
+        #[cfg(target_os = "windows")]
+        windows::begin_high_res_timer();
+        HIGH_RES_HOLDERS.fetch_add(1, Ordering::Relaxed);
+        Self { _private: () }
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        HIGH_RES_HOLDERS.fetch_sub(1, Ordering::Relaxed);
+        #[cfg(target_os = "windows")]
+        windows::end_high_res_timer();
+    }
+}
+
+/// True while any [`HighResTimer`] is held (diagnostics only).
+pub fn high_res_timer_active() -> bool {
+    HIGH_RES_HOLDERS.load(Ordering::Relaxed) != 0
+}
+
 static FWD_EVENTS: AtomicU64 = AtomicU64::new(0); // forwarded MouseMove flushes (Windows)
 static INJ_EVENTS: AtomicU64 = AtomicU64::new(0); // injected mouse moves (Linux/receiver)
 

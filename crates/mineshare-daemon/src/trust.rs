@@ -124,6 +124,9 @@ pub fn select_peer(device_id: &str) -> Result<()> {
         next.selected_device_id = Some(device_id.into());
         persist_then_cache(&mut g, next, save)?;
     }
+    drop(g);
+    // Choosing a computer means "connect now", even if its loop is backing off.
+    crate::runtime::kick_reconnect();
     Ok(())
 }
 

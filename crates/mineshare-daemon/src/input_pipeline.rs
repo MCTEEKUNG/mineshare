@@ -131,9 +131,9 @@ impl InputSubscription {
                     state.pending.clear();
                     return Err(TryRecvError::Closed);
                 }
-                state.max_age_us = state
-                    .max_age_us
-                    .max(now.saturating_duration_since(entry.at).as_micros() as u64);
+                let age = now.saturating_duration_since(entry.at);
+                state.max_age_us = state.max_age_us.max(age.as_micros() as u64);
+                crate::input_timing::SEND_QUEUE_AGE.record(age);
                 Ok(entry.event)
             }
             None => Err(TryRecvError::Empty),

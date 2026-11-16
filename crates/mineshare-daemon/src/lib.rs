@@ -15,6 +15,7 @@ pub mod collect;
 pub mod files;
 pub mod identity;
 pub mod input_pipeline;
+pub mod input_timing;
 pub mod latency;
 pub mod layout;
 pub mod logs;

@@ -84,6 +84,8 @@ impl Sessions {
             if let Some(active) = &state.active {
                 active.cancel.send_replace(true);
             }
+        } else {
+            crate::runtime::kick_reconnect();
         }
     }
     /// The old blanket admission switch is intentionally no longer available.
@@ -125,6 +127,7 @@ impl Sessions {
         if let Some(active) = &state.active {
             active.cancel.send_replace(true);
         }
+        crate::runtime::kick_reconnect();
         Ok(request)
     }
     pub(crate) fn outgoing_for(&self, peer_id: &str) -> Option<OutgoingRequest> {

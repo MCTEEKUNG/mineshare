@@ -149,6 +149,36 @@ pub fn set_pairing_enabled(enabled: bool) -> Result<()> {
 }
 static LOCAL_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
 
+/// Wakes reconnect loops that are backing off: a peer re-announcing itself,
+/// a user connect request, or resuming from pause means "dial now".
+static RECONNECT_KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub(crate) fn kick_reconnect() {
+    RECONNECT_KICK.notify_waiters();
+}
+
+/// A session that stayed up this long counts as healthy, so its failure
+/// restarts backoff from the fastest retry.
+const RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(10);
+const RECONNECT_MIN_DELAY: Duration = Duration::from_millis(250);
+/// Kept low on purpose: a trusted peer that returns after a LAN outage may
+/// never re-announce (see `forget_offline_peer`), so no kick arrives and
+/// this cap bounds recovery toward the 5 s reconnect target.
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(4);
+
+/// Retry delay after `failures` consecutive failed dials. The first retries
+/// stay fast for a transient Wi-Fi blip; an unreachable peer settles at the
+/// cap, roughly halving overnight dials versus retrying right after each
+/// 4 s connect timeout. A [`kick_reconnect`] while waiting cuts the delay
+/// short (one landing mid-dial is not retained).
+fn reconnect_backoff(failures: u32) -> Duration {
+    if failures <= 2 {
+        return RECONNECT_MIN_DELAY;
+    }
+    let exp = (failures - 2).min(6);
+    (Duration::from_secs(1) * (1u32 << exp) / 2).clamp(RECONNECT_MIN_DELAY, RECONNECT_MAX_DELAY)
+}
+
 fn reconnect_initial_delay(local_id: DeviceId, peer_id: DeviceId) -> Duration {
     if local_id.0 < peer_id.0 {
         Duration::ZERO
@@ -290,6 +320,9 @@ impl MotionPacer {
                 self.next_deadline = Some(std::time::Instant::now() + interval);
                 return;
             }
+            // Only an uninterrupted wait says anything about timer resolution.
+            crate::input_timing::PACER_OVERSHOOT
+                .record(std::time::Instant::now().saturating_duration_since(deadline));
         }
         self.next_deadline = Some(next);
     }
@@ -321,6 +354,9 @@ struct InjectSender {
 const MAX_WIRE_MOTION_MERGE: usize = 4;
 const MAX_INJECT_QUEUE: usize = 1_024;
 const MAX_INJECT_AGE: Duration = Duration::from_millis(250);
+/// Keep the raised timer briefly after the last motion so a pause between
+/// strokes does not toggle the system-wide resolution on every flick.
+const HIGH_RES_TIMER_IDLE_RELEASE: Duration = Duration::from_secs(1);
 
 fn can_merge_wire_motion(merged_samples: usize) -> bool {
     merged_samples < MAX_WIRE_MOTION_MERGE
@@ -424,11 +460,26 @@ impl InjectDispatcher {
             .spawn(move || {
                 raise_input_thread_priority();
                 let mut motion_pacer = MotionPacer::new();
+                // 1 ms timer only while motion is flowing, so pacing waits are
+                // not rounded up to the default ~15.6 ms Windows tick.
+                let mut timer: Option<mineshare_input::HighResTimer> = None;
+                let mut last_motion = std::time::Instant::now();
                 loop {
                     let entry = {
                         let mut pending = worker_queue.pending.lock();
                         while pending.is_empty() && !worker_queue.stopped.load(Ordering::Acquire) {
-                            worker_queue.wake.wait(&mut pending);
+                            if timer.is_some() {
+                                let idle = last_motion.elapsed();
+                                if idle >= HIGH_RES_TIMER_IDLE_RELEASE {
+                                    timer = None;
+                                    continue;
+                                }
+                                worker_queue
+                                    .wake
+                                    .wait_for(&mut pending, HIGH_RES_TIMER_IDLE_RELEASE - idle);
+                            } else {
+                                worker_queue.wake.wait(&mut pending);
+                            }
                         }
                         if worker_queue.stopped.load(Ordering::Acquire) {
                             break;
@@ -443,17 +494,25 @@ impl InjectDispatcher {
                             break;
                         }
                         if matches!(entry.event, InputEvent::MouseMove { .. }) {
+                            if timer.is_none() {
+                                timer = Some(mineshare_input::HighResTimer::acquire());
+                            }
+                            last_motion = std::time::Instant::now();
                             motion_pacer.wait_before_motion(&worker_queue);
                         }
                         if worker_queue.stopped.load(Ordering::Acquire) {
                             break;
                         }
-                        if !dispatch_inject_event(
+                        crate::input_timing::INJECT_QUEUE_AGE.record(entry.queued_at.elapsed());
+                        let inject_started = std::time::Instant::now();
+                        let injected = dispatch_inject_event(
                             &*inject,
                             &stats,
                             entry.event,
                             entry.merged_motion,
-                        ) {
+                        );
+                        crate::input_timing::INJECT_CALL.record(inject_started.elapsed());
+                        if !injected {
                             worker_queue.stopped.store(true, Ordering::Release);
                             worker_queue.pending.lock().clear();
                             break;
@@ -1352,6 +1411,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                         let mut f = in_flight.lock();
                         if f.contains(&peer.device_id) {
                             debug!(peer = %peer.device_id, "reconnect loop already running — it will pick up the refreshed endpoint");
+                            kick_reconnect();
                             continue;
                         }
                         f.insert(peer.device_id);
@@ -1377,6 +1437,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             debug!(peer = %peer_id, ?initial_delay, "standby reconnect armed");
                             tokio::time::sleep(initial_delay).await;
                         }
+                        let mut failures = 0u32;
                         loop {
                             let peer_now = {
                                 let k = known_for_loop.lock();
@@ -1402,6 +1463,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                 continue;
                             }
                             let request = SESSIONS.outgoing_for(&peer_id_string);
+                            let dial_started = std::time::Instant::now();
                             let result = dial_and_run(
                                 &peer_now,
                                 &known_for_loop,
@@ -1423,13 +1485,28 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                     reason: error.to_string(),
                                 });
                             }
+                            if result.is_ok() || dial_started.elapsed() >= RECONNECT_HEALTHY_SESSION
+                            {
+                                failures = 0;
+                            }
+                            if result.is_err() {
+                                failures = failures.saturating_add(1);
+                            }
+                            let delay = if SESSIONS.outgoing_for(&peer_id_string).is_some() {
+                                RECONNECT_MIN_DELAY
+                            } else {
+                                reconnect_backoff(failures)
+                            };
                             match result {
                                 Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
                                 Err(e) => {
-                                    warn!(peer = %peer_id, error = %e, "session error — will reconnect")
+                                    warn!(peer = %peer_id, error = %e, failures, retry_ms = delay.as_millis() as u64, "session error — will reconnect")
                                 }
                             }
-                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                _ = RECONNECT_KICK.notified() => {}
+                            }
                         }
                     });
                 }
@@ -2585,12 +2662,26 @@ async fn run_peer_session(
                 let event = $event;
                 let seq = next_input_seq;
                 next_input_seq = next_input_seq.wrapping_add(1);
+                let send_started = std::time::Instant::now();
                 send_wire!(WireFrame::Input { seq, event }, "input");
+                crate::input_timing::SEND_CALL.record(send_started.elapsed());
                 send_budget.input_sent();
             }};
         }
         if queue_report.elapsed() >= Duration::from_secs(5) {
             info!(input_queue=?input_sub.diagnostics(), audio_queue=?sub.diagnostics(), capture_expired=bcast.capture_expired(), capture_full=?mineshare_audio::capture_queue_drops(), "realtime queue health (depth/coalesce/age and depth/expiry/replacement/age)");
+            let timing = crate::input_timing::InputTimingReport::take();
+            if !timing.is_empty() {
+                info!(
+                    send_queue_age = %timing.send_queue_age,
+                    send_call = %timing.send_call,
+                    inject_queue_age = %timing.inject_queue_age,
+                    inject_call = %timing.inject_call,
+                    pacer_overshoot = %timing.pacer_overshoot,
+                    high_res_timer = mineshare_input::high_res_timer_active(),
+                    "input stage timing (single-clock, last 5 s)"
+                );
+            }
             queue_report = std::time::Instant::now();
         }
         if send_budget.audio_due(std::time::Instant::now()) {
@@ -3364,6 +3455,51 @@ mod tests {
         control_collision_action, legacy_echo_guard_policy, motion_pacing_step,
         reconnect_initial_delay, retry_stale_owned_input, should_send_input_state,
     };
+    /// Manual probe: `cargo test -p mineshare-daemon -- --ignored --nocapture
+    /// pacer_wait_resolution`. Runs from a window-less process, which is the
+    /// tray-hidden case Windows 11 may throttle.
+    #[test]
+    #[ignore = "manual timer-resolution probe; prints, does not assert"]
+    fn pacer_wait_resolution_probe() {
+        fn sample() -> (u128, u128, u128) {
+            let lock = parking_lot::Mutex::new(());
+            let cv = parking_lot::Condvar::new();
+            let mut waits: Vec<u128> = (0..200)
+                .map(|_| {
+                    let mut guard = lock.lock();
+                    let start = std::time::Instant::now();
+                    cv.wait_for(&mut guard, Duration::from_millis(1));
+                    start.elapsed().as_micros()
+                })
+                .collect();
+            waits.sort_unstable();
+            (waits[100], waits[190], waits[199])
+        }
+        let before = sample();
+        let timer = mineshare_input::HighResTimer::acquire();
+        let during = sample();
+        drop(timer);
+        println!("1 ms Condvar wait (p50/p95/max us): default={before:?} high_res={during:?}");
+    }
+
+    #[test]
+    fn reconnect_backoff_stays_fast_for_blips_and_caps_for_an_offline_peer() {
+        use super::{RECONNECT_MAX_DELAY, RECONNECT_MIN_DELAY, reconnect_backoff};
+        assert_eq!(reconnect_backoff(0), RECONNECT_MIN_DELAY);
+        assert_eq!(reconnect_backoff(2), RECONNECT_MIN_DELAY);
+        assert_eq!(reconnect_backoff(3), Duration::from_secs(1));
+        assert_eq!(reconnect_backoff(4), Duration::from_secs(2));
+        assert_eq!(reconnect_backoff(5), RECONNECT_MAX_DELAY);
+        assert!(RECONNECT_MAX_DELAY <= Duration::from_secs(4));
+        assert_eq!(reconnect_backoff(u32::MAX), RECONNECT_MAX_DELAY);
+        let mut previous = Duration::ZERO;
+        for failures in 0..40 {
+            let delay = reconnect_backoff(failures);
+            assert!(delay >= previous, "backoff must never shrink while failing");
+            previous = delay;
+        }
+    }
+
     #[test]
     fn a_discrete_edge_interrupts_mouse_pacing_without_overtaking_motion() {
         let queue = Arc::new(InjectQueue {
