@@ -16,4 +16,7 @@ $actions=@(Rows 'SELECT `Action` FROM `CustomAction`' | ForEach-Object { $_.Stri
 foreach($name in @('MineSharePrepare','MineShareComplete','MineShareRollback')) {
     if ($name -notin $actions) { throw "Missing migration action: $name" }
 }
+$version=@(Rows 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion''')[0].StringData(1)
+$icon=@(Rows 'SELECT `FileName` FROM `File` WHERE `File` = ''TaskbarIcon''')
+if ($icon.Count -ne 1 -or ($icon[0].StringData(1) -split '\|')[-1] -ne "MineShare-$version.ico") { throw 'MSI does not contain its versioned Taskbar icon' }
 Write-Output 'PASS: MSI keeps its upgrade identity and includes legacy detection, update UI and migration actions'

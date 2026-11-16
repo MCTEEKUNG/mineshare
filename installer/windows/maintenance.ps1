@@ -17,6 +17,29 @@ function Stop-InstallProcesses([object[]]$Processes) {
         }
     }
 }
+function Update-TaskbarIcons([string]$Exe, [string]$Icon) {
+    $pins = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+    if (-not (Test-Path -LiteralPath $pins -PathType Container)) { return }
+    $shell = New-Object -ComObject WScript.Shell
+    $changed = @(
+        foreach ($link in Get-ChildItem -LiteralPath $pins -Filter '*.lnk' -File) {
+            $shortcut = $shell.CreateShortcut($link.FullName)
+            if ($shortcut.TargetPath -ine $Exe -or $shortcut.IconLocation -ieq "$Icon,0") { continue }
+            $shortcut.IconLocation = "$Icon,0"
+            $shortcut.Save()
+            $link.FullName
+        }
+    )
+    if ($changed.Count -eq 0) { return }
+    Add-Type -Namespace MineShare -Name ShellIcons -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern void SHChangeNotify(int eventId, uint flags, string path, System.IntPtr unused);
+'@
+    foreach ($link in $changed) {
+        # SHCNE_UPDATEITEM with a Unicode path and asynchronous delivery.
+        [MineShare.ShellIcons]::SHChangeNotify(0x2000, 0x2005, $link, [IntPtr]::Zero)
+    }
+}
 try {
     $action = $env:MINESHARE_INSTALL_ACTION
     $transaction = [Guid]::Parse($env:MINESHARE_INSTALL_TRANSACTION).ToString('N')
@@ -73,6 +96,14 @@ try {
         if ($state.Directory -ine $directory) { throw 'Installer transaction directory mismatch' }
         if ($action -eq 'complete') {
             if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing' }
+            # MSI already committed. A per-user shortcut failure must not prevent app restart.
+            try {
+                $icon = Join-Path $directory "MineShare-$($env:MINESHARE_INSTALL_VERSION).ico"
+                if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) { throw 'Installed Taskbar icon missing' }
+                Update-TaskbarIcons $exe $icon
+            } catch {
+                $_.Exception.Message | Add-Content -LiteralPath (Join-Path $stateRoot 'last-error.txt') -ErrorAction SilentlyContinue
+            }
             $retiredNsis = $false
             # MSI owns the files now. Remove only a verified old NSIS registration,
             # not its uninstaller (running it would remove our newly installed files).
@@ -89,7 +120,7 @@ try {
             if ($retiredNsis) {
                 # Remove only standard, argument-free duplicate shortcuts whose
                 # target is this same executable AND whose MSI replacement exists.
-                # Startup and taskbar/pinned shortcuts are never touched here.
+                # This cleanup only removes replaced Start Menu and desktop shortcuts.
                 $shell = New-Object -ComObject WScript.Shell
                 $menus = @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))
                 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
