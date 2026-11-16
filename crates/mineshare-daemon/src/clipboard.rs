@@ -213,10 +213,10 @@ fn request_local_paste() -> bool {
         return false;
     };
     let mut state = FILE_SESSION.lock();
-    if !state
+    if state
         .remote
         .as_ref()
-        .is_some_and(|offer| offer.id == offer_id)
+        .is_none_or(|offer| offer.id != offer_id)
     {
         return false;
     }
@@ -1273,14 +1273,17 @@ mod tests {
             }
             let revision = clipboard_revision();
             assert!(!replace_windows_file_clipboard(
-                &[png.clone()],
+                std::slice::from_ref(&png),
                 revision.map(|n| n.wrapping_sub(1))
             )?);
             assert!(clipboard_win::is_format_avail(shell_id_list.get()));
-            assert!(replace_windows_file_clipboard(&[png.clone()], revision)?);
+            assert!(replace_windows_file_clipboard(
+                std::slice::from_ref(&png),
+                revision
+            )?);
             assert!(!clipboard_win::is_format_avail(shell_id_list.get()));
             assert!(files_excluded_from_monitoring());
-            assert_eq!(clipboard.get().file_list()?, [png.clone()]);
+            assert_eq!(clipboard.get().file_list()?, std::slice::from_ref(&png));
         }
         clipboard.set_text("local baseline")?;
         let runtime = tokio::runtime::Builder::new_current_thread()
