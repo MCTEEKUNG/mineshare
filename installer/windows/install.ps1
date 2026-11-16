@@ -73,7 +73,7 @@ Unregister-ScheduledTask -TaskName 'MineShareDaemon' -Confirm:$false -ErrorActio
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
 Write-Host "==> registering the single per-user logon task: $TaskName"
-$Action = New-ScheduledTaskAction -Execute $InstalledExe -WorkingDirectory $InstallDir
+$Action = New-ScheduledTaskAction -Execute $InstalledExe -Argument '--mineshare-autostart' -WorkingDirectory $InstallDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $InteractiveUser
 $Principal = New-ScheduledTaskPrincipal `
     -UserId $InteractiveUser `

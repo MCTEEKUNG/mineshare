@@ -1,9 +1,20 @@
 # Opt out of the parent workspace — Tauri keeps its own lockfile and target dir.
 [workspace]
 
+# This GUI is its own workspace: dependency profiles are not inherited.
+# Preserve the established GUI code generation policy until a more aggressive
+# profile passes native audio acceptance. Keep matching PDB/DWP separately.
+[profile.release]
+lto = false
+codegen-units = 16
+opt-level = 3
+debug = 1
+split-debuginfo = "packed"
+strip = "none"
+
 [package]
 name = "mineshare-app"
-version = "0.0.14"
+version = "0.0.24"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -59,3 +70,6 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"

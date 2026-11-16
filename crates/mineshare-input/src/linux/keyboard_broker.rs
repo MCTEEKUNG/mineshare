@@ -4,6 +4,7 @@ use super::keyboard_routes::{Destination, Routes};
 use anyhow::{Context, Result};
 use evdev::{Device, EventType, InputEvent, uinput::VirtualDevice};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 static LIVE: parking_lot::Mutex<usize> = parking_lot::const_mutex(0);
 
@@ -73,9 +74,29 @@ impl Broker {
             .with_keys(keys)?
             .build()
             .context("create local keyboard proxy")?;
-        device.grab().context(
-            "keyboard broker needs first ownership; log in with MineShare before Typeless",
-        )?;
+        // The desktop may already have seen a physical key-down. Taking the
+        // grab before that key goes up would hide the release from libinput,
+        // which can then suppress that key even on other keyboards.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // EVIOCGKEY also flushes pre-grab key events from this reader.
+            if device.get_key_state()?.iter().next().is_none() {
+                device.grab().context(
+                    "keyboard broker needs first ownership; log in with MineShare before Typeless",
+                )?;
+                // If a key arrived between the snapshot and the grab, give
+                // the desktop its release before trying again.
+                match device.get_key_state() {
+                    Ok(keys) if keys.iter().next().is_none() => break,
+                    state => {
+                        device.ungrab()?;
+                        state?;
+                    }
+                }
+            }
+            anyhow::ensure!(Instant::now() < deadline, "keyboard did not become idle");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         *LIVE.lock() += 1;
         Ok(Self {
             proxy,
@@ -119,6 +140,52 @@ mod tests {
     use super::*;
     use evdev::{AttributeSet, KeyCode};
     use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "needs /dev/uinput on an isolated Linux seat"]
+    fn desktop_receives_release_before_broker_takes_ownership() -> Result<()> {
+        let keys = [KeyCode::KEY_F, KeyCode::KEY_G]
+            .into_iter()
+            .collect::<AttributeSet<_>>();
+        let mut source = VirtualDevice::builder()?
+            .name("MineShare Virtual Broker Handoff Test")
+            .with_keys(&keys)?
+            .build()?;
+        let node = source
+            .enumerate_dev_nodes_blocking()?
+            .next()
+            .context("source node")??;
+        let mut desktop = Device::open(&node)?;
+        desktop.set_nonblocking(true)?;
+        source.emit(&[InputEvent::new(EventType::KEY.0, KeyCode::KEY_F.0, 1)])?;
+        assert!(desktop.fetch_events()?.any(|event| {
+            event.event_type() == EventType::KEY
+                && event.code() == KeyCode::KEY_F.0
+                && event.value() == 1
+        }));
+
+        let mut physical = Device::open(&node)?;
+        let _broker = std::thread::scope(|scope| -> Result<_> {
+            let release = scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(150));
+                source.emit(&[InputEvent::new(EventType::KEY.0, KeyCode::KEY_F.0, 0)])
+            });
+            let broker = Broker::prepare(&mut physical);
+            release.join().expect("release test key")?;
+            broker
+        })?;
+        let released = match desktop.fetch_events() {
+            Ok(mut events) => events.any(|event| {
+                event.event_type() == EventType::KEY
+                    && event.code() == KeyCode::KEY_F.0
+                    && event.value() == 0
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => return Err(error.into()),
+        };
+        assert!(released, "the desktop saw F down and must also see F up");
+        Ok(())
+    }
 
     #[test]
     #[ignore = "needs /dev/uinput; isolated virtual-device integration test"]

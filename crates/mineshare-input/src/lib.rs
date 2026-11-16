@@ -125,6 +125,16 @@ impl TouchpadEvent {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Frame { terminal: true, .. })
     }
+
+    /// Preserve contact changes so a receiver can finish a gesture when a
+    /// finger lifts or is replaced, even if the stream itself continues.
+    pub fn can_coalesce_with(&self, next: &Self) -> bool {
+        self.coalescible_stream().is_some()
+            && self.coalescible_stream() == next.coalescible_stream()
+            && self.contacts().zip(next.contacts()).is_some_and(|(a, b)| {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.id == b.id)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -251,7 +261,9 @@ pub trait InputCapture: Send {
 /// (observed ~64), so 200 leaves generous headroom while neutralising the
 /// half-screen artifact regardless of which layer produced it. Tunable; a
 /// future handover-suppression fix can make this purely a safety net.
-pub(crate) const MAX_INJECT_DELTA_PX: i32 = 200;
+/// Safety bound for one untrusted relative-motion event. Coalescers must not
+/// create a wire event beyond this bound or the receiver would lose distance.
+pub const MAX_INJECT_DELTA_PX: i32 = 200;
 
 pub trait InputInject: Send + Sync {
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> anyhow::Result<()>;
@@ -259,6 +271,16 @@ pub trait InputInject: Send + Sync {
     fn key(&self, code: KeyCode, down: bool) -> anyhow::Result<()>;
     fn scroll(&self, dx: f32, dy: f32) -> anyhow::Result<()>;
     fn touchpad(&self, _event: TouchpadEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Release gesture-owned modifiers if the last contact packet was lost.
+    fn expire_touchpad_gesture(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Replay a paste only while its original window still has focus.
+    fn paste_in_window(&self, _window: u64) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -286,6 +308,49 @@ pub trait InputInject: Send + Sync {
     }
 }
 
+static FILE_PASTE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+static FILE_PASTE_INTERACTION: AtomicU64 = AtomicU64::new(0);
+
+pub fn file_paste_interaction() -> u64 {
+    FILE_PASTE_INTERACTION.load(Ordering::Acquire)
+}
+
+fn note_paste_interaction() {
+    FILE_PASTE_INTERACTION.fetch_add(1, Ordering::Release);
+}
+
+pub fn register_file_paste(handler: fn() -> bool) {
+    let _ = FILE_PASTE.set(handler);
+}
+
+fn request_file_paste() -> bool {
+    FILE_PASTE.get().is_some_and(|handler| handler())
+}
+
+fn paste_keys(
+    ctrl_held: bool,
+    mut emit: impl FnMut(KeyCode, bool) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let ctrl = KeyCode(29);
+    let v = KeyCode(47);
+    if !ctrl_held {
+        emit(ctrl, true)?;
+    }
+    let press = emit(v, true);
+    let release = emit(v, false);
+    let modifier = if ctrl_held { Ok(()) } else { emit(ctrl, false) };
+    press.and(release).and(modifier)
+}
+
+pub fn paste_window() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    return windows::paste_window();
+    #[cfg(target_os = "linux")]
+    return linux::paste_window();
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    None
+}
+
 pub const TOUCHPAD_CAP_FRAME_CAPTURE: u32 = 1 << 0;
 pub const TOUCHPAD_CAP_ACTION_CAPTURE: u32 = 1 << 1;
 pub const TOUCHPAD_CAP_FRAME_INJECT: u32 = 1 << 2;
@@ -298,7 +363,11 @@ pub fn local_touchpad_capabilities() -> u32 {
     {
         windows::touchpad_capabilities()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::touchpad_capabilities()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         0
     }
@@ -460,13 +529,18 @@ static LOCK_EFFECT: parking_lot::Mutex<LockEffect> = parking_lot::Mutex::new(Loc
     duration_ms: 1150,
     thickness: 6,
 });
+pub fn current_lock_effect() -> LockEffect {
+    *LOCK_EFFECT.lock()
+}
 pub fn set_lock_effect(effect: LockEffect) {
     *LOCK_EFFECT.lock() = effect.clamped();
 }
 pub fn preview_lock_effect(locked: bool, effect: LockEffect) {
     #[cfg(target_os = "windows")]
     windows::lock_feedback::show_configured(locked, effect.clamped());
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    linux::lock_feedback::show_configured(locked, effect.clamped());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let _ = (locked, effect);
 }
 
@@ -635,6 +709,42 @@ pub fn set_mouse_rate_hz(hz: u32) {
 /// side can burst faster than the rate selected by the user.
 pub fn target_flush_us() -> u64 {
     TARGET_FLUSH_US.load(Ordering::Relaxed)
+}
+
+static HIGH_RES_HOLDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Scoped request for 1 ms OS timer resolution while motion is being paced.
+///
+/// The default Windows scheduler tick (~15.6 ms) is far coarser than a
+/// 500-1,000 Hz mouse interval, so any sub-tick sleep in the forward watchdog
+/// or the receive-side injection pacer otherwise rounds up to a full tick.
+/// Hold one only while motion is active; drop it when input goes idle. A
+/// no-op on other platforms.
+#[must_use = "the raised resolution is released when the guard is dropped"]
+pub struct HighResTimer {
+    _private: (),
+}
+
+impl HighResTimer {
+    pub fn acquire() -> Self {
+        #[cfg(target_os = "windows")]
+        windows::begin_high_res_timer();
+        HIGH_RES_HOLDERS.fetch_add(1, Ordering::Relaxed);
+        Self { _private: () }
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        HIGH_RES_HOLDERS.fetch_sub(1, Ordering::Relaxed);
+        #[cfg(target_os = "windows")]
+        windows::end_high_res_timer();
+    }
+}
+
+/// True while any [`HighResTimer`] is held (diagnostics only).
+pub fn high_res_timer_active() -> bool {
+    HIGH_RES_HOLDERS.load(Ordering::Relaxed) != 0
 }
 
 static FWD_EVENTS: AtomicU64 = AtomicU64::new(0); // forwarded MouseMove flushes (Windows)
@@ -884,6 +994,16 @@ fn clear_held_forwarded() {
 ///   * Else (up of an un-tracked key) → don't forward; the
 ///     local OS gets it as usual.
 pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
+    route_keystroke_with_target(code, down, cursor_in_remote, None)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn route_keystroke_with_target(
+    code: u16,
+    down: bool,
+    cursor_in_remote: bool,
+    target: Option<bool>,
+) -> bool {
     let mut held = HELD_FORWARDED.lock();
     let i = code as usize;
     if !peer_session_ready() {
@@ -900,7 +1020,7 @@ pub fn route_keystroke(code: u16, down: bool, cursor_in_remote: bool) -> bool {
         }
         true
     } else if down {
-        let decide = should_forward_keys(cursor_in_remote);
+        let decide = target.unwrap_or_else(|| should_forward_keys(cursor_in_remote));
         if decide && i < 1024 {
             held[i] = true;
         }
@@ -1167,6 +1287,7 @@ static LOCAL_CLICK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 static PEER_ACTIVITY_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn bump_local_click() {
+    note_paste_interaction();
     LOCAL_CLICK_AT.store(now_ms(), Ordering::Relaxed);
 }
 

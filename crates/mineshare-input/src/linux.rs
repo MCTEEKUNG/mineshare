@@ -2,8 +2,8 @@
 //!
 //! Capture: read raw events from `/dev/input/event*`. Requires the user to
 //! be in group `input` (or a udev rule that grants read access). The daemon
-//! discovers eligible devices by enumerating and looking for relative axes
-//! (mice/touchpads) or `KEY_A`/`KEY_LEFTCTRL` (keyboards).
+//! discovers relative mice, indirect multitouch pads and keyboards by their
+//! advertised evdev capabilities.
 //!
 //! Inject: a virtual `uinput` device that the OS treats as a real HID. Needs
 //! `/dev/uinput` to be writable by the daemon's user.
@@ -13,11 +13,10 @@
 //!
 //!   * `LOCAL` — events flow to the OS unchanged. We integrate the
 //!     `REL_X` deltas into a clamped `CURSOR_X` estimate; the OS
-//!     clamps the real cursor at the screen edge while evdev keeps
-//!     reporting the overshoot, so any time the user drags into the
-//!     real left edge our estimate self-syncs to 0. Sustained leftward
-//!     overshoot past 0 (≥ `ENTER_PRESSURE_PX`) is the signal that the
-//!     user is actively pushing into the edge → enter `REMOTE`. Any
+//!     estimate is only a candidate detector. X11 or the read-only GNOME
+//!     Wayland extension must confirm the real cursor is at that edge.
+//!     Without authoritative coordinates automatic crossing fails closed.
+//!     Sustained outward pressure at a confirmed edge enters `REMOTE`. Any
 //!     rightward dx cancels an in-flight press.
 //!   * `REMOTE` — every relevant device is `EVIOCGRAB`-ed so the OS no
 //!     longer sees motion or keystrokes; we forward them to the peer
@@ -64,9 +63,24 @@ const GRAB_POLL_MS: u16 = 4;
 
 use super::{Button, InputCapture, InputEvent, InputInject, KeyCode};
 
+mod capture_start;
 mod keyboard_broker;
 mod keyboard_routes;
 mod pointer;
+mod touchpad;
+mod touchpad_capture;
+
+pub(super) fn paste_window() -> Option<u64> {
+    pointer::paste_window()
+}
+
+pub(super) fn touchpad_capabilities() -> u32 {
+    let mut capabilities = touchpad::capabilities();
+    if touchpad_capture::available() {
+        capabilities |= super::TOUCHPAD_CAP_FRAME_CAPTURE;
+    }
+    capabilities
+}
 
 #[cfg(test)]
 mod edge_tests {
@@ -130,7 +144,7 @@ mod edge_tests {
     }
 
     #[test]
-    fn failed_x11_query_cannot_authorize_crossing_but_wayland_keeps_fallback() {
+    fn missing_position_cannot_authorize_crossing_on_any_backend() {
         let motion = local_motion(
             (0, 500),
             (-20, 0),
@@ -149,7 +163,57 @@ mod edge_tests {
                 pointer::Sample::Unsupported
             )
             .overshoot,
-            Some(20)
+            None
+        );
+    }
+
+    #[test]
+    fn wayland_logical_geometry_overrides_physical_size_and_drift() {
+        let actual = pointer::Sample::Desktop {
+            x: 800,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        let motion = local_motion(
+            (0, 350),
+            (-400, 0),
+            (1920, 1080),
+            super::super::PeerSide::Left,
+            actual,
+        );
+        assert_eq!(motion.overshoot, None);
+        assert!(motion.cancel);
+        assert_eq!(motion.position, (800, 350));
+        let edge = pointer::Sample::Desktop {
+            x: 1279,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        let motion = local_motion(
+            (1279, 350),
+            (20, 0),
+            (1920, 1080),
+            super::super::PeerSide::Right,
+            edge,
+        );
+        assert_eq!(motion.overshoot, Some(20));
+        let outside = pointer::Sample::Desktop {
+            x: 1400,
+            y: 350,
+            width: 1280,
+            height: 720,
+        };
+        assert!(
+            local_motion(
+                (1279, 350),
+                (20, 0),
+                (1920, 1080),
+                super::super::PeerSide::Right,
+                outside
+            )
+            .cancel
         );
     }
 
@@ -185,6 +249,21 @@ fn local_motion(
     side: super::PeerSide,
     actual: pointer::Sample,
 ) -> LocalMotion {
+    if let pointer::Sample::Desktop {
+        x,
+        y,
+        width,
+        height,
+    } = actual
+    {
+        return local_motion(
+            previous,
+            delta,
+            (width, height),
+            side,
+            pointer::Sample::Position(x, y),
+        );
+    }
     let (dx, dy) = delta;
     let (w, h) = size;
     let raw_x = previous.0.saturating_add(dx);
@@ -216,7 +295,8 @@ fn local_motion(
                 }
         }
         pointer::Sample::Unavailable => false,
-        pointer::Sample::Unsupported => true,
+        pointer::Sample::Unsupported => false,
+        pointer::Sample::Desktop { .. } => unreachable!(),
     };
     if !confirmed {
         // Do not bank pressure while merely near the edge, even if the old
@@ -644,7 +724,7 @@ impl EvdevCapture {
         }
         if devices.is_empty() {
             anyhow::bail!(
-                "no evdev mouse/keyboard found. Add user to group `input` and re-login, \
+                "no evdev mouse, touchpad or keyboard found. Add user to group `input` and re-login, \
                  or install a udev rule granting read access to /dev/input/event*"
             );
         }
@@ -670,24 +750,25 @@ fn is_relevant(d: &Device) -> bool {
         .supported_keys()
         .map(|k| k.contains(EvKey::BTN_LEFT) || k.contains(EvKey::BTN_RIGHT))
         .unwrap_or(false);
-    has_rel || has_keyboard || has_mouse_btns
+    has_rel || has_keyboard || has_mouse_btns || touchpad_capture::is_touchpad(d)
 }
 
-/// Classify a device as "pointer-like" — has actual relative-axis
-/// motion. Used to scope EVIOCGRAB more narrowly when the peer
+/// Classify a device as "pointer-like" — has relative-axis motion or
+/// type-B touchpad contacts. Used to scope EVIOCGRAB when the peer
 /// is driving us: only mouse-class devices need to be grabbed
 /// (to prevent the user's HW cursor fighting the injected one).
 /// Keyboards stay free so the user can keep typing on their own
 /// machine even while the peer's cursor is borrowing the screen.
 ///
-/// We deliberately key off REL_X / REL_Y *only*, not BTN_LEFT —
+/// For mice we deliberately key off REL_X / REL_Y, not BTN_LEFT —
 /// many gaming keyboards expose media-key BTN_* codes the kernel
 /// happens to share with mouse buttons, and the original
 /// "has_mouse_btns" branch mis-classified them as pointers.
 fn is_pointer_device(d: &Device) -> bool {
-    d.supported_relative_axes()
-        .map(|a| a.contains(RelativeAxisCode::REL_X) || a.contains(RelativeAxisCode::REL_Y))
-        .unwrap_or(false)
+    touchpad_capture::is_touchpad(d)
+        || d.supported_relative_axes()
+            .map(|a| a.contains(RelativeAxisCode::REL_X) || a.contains(RelativeAxisCode::REL_Y))
+            .unwrap_or(false)
 }
 
 impl InputCapture for EvdevCapture {
@@ -699,29 +780,34 @@ impl InputCapture for EvdevCapture {
         // doesn't strand pending motion in the coalescer. Idempotent —
         // safe to call across reconnects.
         start_flush_watchdog(sink.clone());
-        // Acquire all physical keyboards synchronously before publishing readiness.
-        // On any failure the prepared devices drop and release their grabs.
+        // Acquire the complete keyboard group before publishing readiness.
+        // A keyboard conflict releases its partial grabs and leaves mice usable.
         let broker_enabled = keyboard_broker::enabled();
         if broker_enabled {
             keyboard_broker::clear_readiness();
         }
-        let mut prepared = Vec::new();
-        let mut keyboard_count = 0;
-        for (path, mut device) in self.devices.drain(..) {
-            let broker = if broker_enabled && !is_pointer_device(&device) {
-                let broker = keyboard_broker::Broker::prepare(&mut device)
-                    .with_context(|| format!("prepare keyboard broker for {}", path.display()))?;
-                keyboard_count += 1;
-                Some(broker)
-            } else {
-                None
-            };
-            prepared.push((path, device, broker));
+        let prepared = capture_start::prepare(
+            self.devices.drain(..).collect(),
+            broker_enabled,
+            is_pointer_device,
+            keyboard_broker::Broker::prepare,
+        )?;
+        let keyboard_count = prepared.keyboard_count;
+        if let Some(error) = prepared.broker_error {
+            warn!(error = %format!("{error:#}"), "keyboard broker unavailable; skipping keyboard capture");
         }
-        if broker_enabled && keyboard_count == 0 {
-            anyhow::bail!("keyboard broker found no physical keyboard; Typeless startup must wait");
-        }
-        for (path, device, broker) in prepared {
+        for (path, device, broker) in prepared.devices {
+            if touchpad_capture::is_touchpad(&device) {
+                match touchpad_capture::start(path.clone(), sink.clone()) {
+                    Ok(()) => {
+                        info!(path = %path.display(), "evdev touchpad capture started");
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(%error, path = %path.display(), "evdev touchpad capture unavailable");
+                    }
+                }
+            }
             let sink = sink.clone(); // cheap Arc ref-count bump
             let is_pointer = is_pointer_device(&device);
             let name = device.name().unwrap_or("?").to_string();
@@ -736,7 +822,7 @@ impl InputCapture for EvdevCapture {
                 .spawn(move || pump_device(path, device, is_pointer, broker, sink))
                 .context("spawn evdev thread")?;
         }
-        if broker_enabled {
+        if broker_enabled && keyboard_count > 0 {
             keyboard_broker::ready(keyboard_count)?;
             info!(
                 keyboard_count,
@@ -905,6 +991,9 @@ fn pump_device(
                     _ => {}
                 },
                 EventSummary::Key(_, key, value) => {
+                    if value == 1 && key != EvKey::KEY_V {
+                        super::note_paste_interaction();
+                    }
                     // evdev key value semantics: 0 = release, 1 = press,
                     // 2 = auto-repeat. The previous code treated 2 as
                     // "released" which broke modifier tracking — holding
@@ -1051,8 +1140,37 @@ fn pump_device(
                         // A locally held key remains local even if a repeat arrives
                         // after crossing. Remote routing keeps its existing held tracker.
                         let local_held = broker.as_ref().is_some_and(|b| b.routes.is_local(key.0));
+                        if let Some(broker) = broker.as_mut()
+                            && broker.routes.is_consumed(key.0)
+                        {
+                            broker.routes.edge(key.0, value, false);
+                            continue;
+                        }
+                        let shortcut_target = if key == EvKey::KEY_TAB && value == 1 {
+                            broker.as_ref().and_then(|b| b.routes.tab_follows_alt())
+                        } else {
+                            None
+                        };
                         let remote = !local_held
-                            && super::route_keystroke(key.0, value != 0, cursor_in_remote);
+                            && super::route_keystroke_with_target(
+                                key.0,
+                                value != 0,
+                                cursor_in_remote,
+                                shortcut_target,
+                            );
+                        if let Some(broker) = broker.as_mut()
+                            && key == EvKey::KEY_V
+                            && value == 1
+                            && !remote
+                            && (broker.routes.is_local(29) || broker.routes.is_local(97))
+                            && ![42, 54, 56, 100, 125, 126]
+                                .iter()
+                                .any(|&code| broker.routes.is_local(code))
+                            && crate::request_file_paste()
+                        {
+                            broker.routes.consume(key.0);
+                            continue;
+                        }
                         let forward = if let Some(broker) = broker.as_mut() {
                             match broker.dispatch(key.0, value, remote) {
                                 Ok(forward) => forward && remote,
@@ -1144,9 +1262,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             return;
         }
 
-        // Track a coarse estimate, then confirm candidate overshoots against
-        // the real X11 pointer. Wayland retains the estimate fallback: global
-        // XWayland coordinates are not authoritative for a Wayland session.
+        // Raw mickeys are just a cheap candidate detector, never proof of an edge.
         let screen_w = SCREEN_W.load(Ordering::Relaxed);
         let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
@@ -1160,14 +1276,25 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         );
         // Raw mickeys are not screen pixels: acceleration and handback can
         // leave the estimate at the edge while the actual cursor is inside.
-        // Query X11 only on candidate edge reports, never the remote hot path.
-        if motion.overshoot.is_some() && !super::is_input_locked() {
+        // Unsupported samples fail closed. Calculate the candidate independently.
+        let candidate = match super::peer_side() {
+            super::PeerSide::Left => prev_x.saturating_add(dx) < 0,
+            super::PeerSide::Right => prev_x.saturating_add(dx) >= screen_w,
+            super::PeerSide::Top => prev_y.saturating_add(dy) < 0,
+            super::PeerSide::Bottom => prev_y.saturating_add(dy) >= screen_h,
+        };
+        if candidate && !super::is_input_locked() {
+            let actual = pointer::sample();
+            if let pointer::Sample::Desktop { width, height, .. } = actual {
+                SCREEN_W.store(width, Ordering::Relaxed);
+                SCREEN_H.store(height, Ordering::Relaxed);
+            }
             motion = local_motion(
                 (prev_x, prev_y),
                 (dx, dy),
                 (screen_w, screen_h),
                 super::peer_side(),
-                pointer::sample(),
+                actual,
             );
         }
         CURSOR_X.store(motion.position.0, Ordering::Relaxed);
@@ -1324,11 +1451,16 @@ enum HeldKey {
     MouseBtn(u16),
     /// KEY_* keyboard code emitted on the keyboard node.
     KbKey(u16),
+    GestureAlt,
+    PasteV,
 }
 
 pub struct UinputInject {
     mouse: parking_lot::Mutex<VirtualDevice>,
     keyboard: parking_lot::Mutex<VirtualDevice>,
+    touchpad: parking_lot::Mutex<Option<touchpad::Touchpad>>,
+    window_swipe: parking_lot::Mutex<touchpad::WindowSwipe>,
+    scroll_residue: parking_lot::Mutex<[f32; 2]>,
     /// Set of codes the peer has injected `down` without a matching
     /// `up`. Maintained per inject call; drained on
     /// `release_all_held` at session teardown.
@@ -1382,6 +1514,18 @@ impl UinputInject {
         Ok(Self {
             mouse: parking_lot::Mutex::new(mouse),
             keyboard: parking_lot::Mutex::new(keyboard),
+            touchpad: parking_lot::Mutex::new(match touchpad::Touchpad::new() {
+                Ok(device) => {
+                    info!("uinput virtual touchpad ready");
+                    Some(device)
+                }
+                Err(error) => {
+                    warn!(%error, "virtual touchpad unavailable; using wheel fallback");
+                    None
+                }
+            }),
+            scroll_residue: parking_lot::Mutex::new([0.0; 2]),
+            window_swipe: parking_lot::Mutex::default(),
             held: parking_lot::Mutex::new(HashSet::new()),
         })
     }
@@ -1396,6 +1540,84 @@ impl UinputInject {
             .lock()
             .emit(ev)
             .context("uinput emit (keyboard)")?;
+        Ok(())
+    }
+
+    fn keyboard_edge(&self, code: u16, down: bool) -> Result<()> {
+        self.emit_keyboard(&[evdev::InputEvent::new(
+            EventType::KEY.0,
+            code,
+            i32::from(down),
+        )])?;
+        super::note_key_injected_with_code(code, down);
+        Ok(())
+    }
+
+    fn end_window_switch(&self) -> Result<()> {
+        let mut held = self.held.lock();
+        if held.contains(&HeldKey::GestureAlt) {
+            if !held.contains(&HeldKey::KbKey(EvKey::KEY_LEFTALT.0)) {
+                self.keyboard_edge(EvKey::KEY_LEFTALT.0, false)?;
+            }
+            held.remove(&HeldKey::GestureAlt);
+        }
+        Ok(())
+    }
+
+    fn switch_window(&self, reverse: bool, count: usize) -> Result<()> {
+        let mut held = self.held.lock();
+        let alt = EvKey::KEY_LEFTALT.0;
+        let tab = EvKey::KEY_TAB.0;
+        let shift = EvKey::KEY_LEFTSHIFT.0;
+        // Avoid interfering with an in-progress keyboard shortcut.
+        if [
+            EvKey::KEY_TAB,
+            EvKey::KEY_LEFTSHIFT,
+            EvKey::KEY_RIGHTSHIFT,
+            EvKey::KEY_LEFTCTRL,
+            EvKey::KEY_RIGHTCTRL,
+            EvKey::KEY_RIGHTALT,
+            EvKey::KEY_LEFTMETA,
+            EvKey::KEY_RIGHTMETA,
+        ]
+        .iter()
+        .any(|key| held.contains(&HeldKey::KbKey(key.0)))
+        {
+            return Ok(());
+        }
+        let switcher = pointer::window_switcher().filter(|switcher| switcher.supports(reverse));
+        let starting = !held.contains(&HeldKey::GestureAlt);
+        if starting {
+            if !held.contains(&HeldKey::KbKey(alt)) {
+                self.keyboard_edge(alt, true)?;
+            }
+            held.insert(HeldKey::GestureAlt);
+        }
+        let use_shift = reverse && switcher.is_none();
+        if use_shift {
+            self.keyboard_edge(shift, true)?;
+            held.insert(HeldKey::KbKey(shift));
+        }
+        let tabs = if switcher.is_some() {
+            usize::from(starting)
+        } else {
+            count
+        };
+        for _ in 0..tabs {
+            self.keyboard_edge(tab, true)?;
+            held.insert(HeldKey::KbKey(tab));
+            self.keyboard_edge(tab, false)?;
+            held.remove(&HeldKey::KbKey(tab));
+        }
+        if use_shift {
+            self.keyboard_edge(shift, false)?;
+            held.remove(&HeldKey::KbKey(shift));
+        }
+        if let Some(switcher) = switcher {
+            switcher.move_by(reverse, count, starting);
+        } else if starting {
+            pointer::reveal_window_switcher();
+        }
         Ok(())
     }
 }
@@ -1425,6 +1647,9 @@ impl InputInject for UinputInject {
     }
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
+        if down {
+            super::note_paste_interaction();
+        }
         let key = key_from_button(btn);
         self.emit_mouse(&[evdev::InputEvent::new(
             EventType::KEY.0,
@@ -1441,13 +1666,32 @@ impl InputInject for UinputInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
-        self.emit_keyboard(&[evdev::InputEvent::new(
-            EventType::KEY.0,
-            code.0,
-            if down { 1 } else { 0 },
-        )])?;
-        super::note_key_injected_with_code(code.0, down);
+        if down && code.0 != EvKey::KEY_V.0 {
+            super::note_paste_interaction();
+        }
         let mut held = self.held.lock();
+        if code.0 == EvKey::KEY_V.0 {
+            if held.contains(&HeldKey::PasteV) {
+                if !down {
+                    held.remove(&HeldKey::PasteV);
+                }
+                return Ok(());
+            }
+            if down
+                && (held.contains(&HeldKey::KbKey(29)) || held.contains(&HeldKey::KbKey(97)))
+                && !held.contains(&HeldKey::GestureAlt)
+                && ![42, 54, 56, 100, 125, 126]
+                    .iter()
+                    .any(|&code| held.contains(&HeldKey::KbKey(code)))
+                && crate::request_file_paste()
+            {
+                held.insert(HeldKey::PasteV);
+                return Ok(());
+            }
+        }
+        if code.0 != EvKey::KEY_LEFTALT.0 || !held.contains(&HeldKey::GestureAlt) {
+            self.keyboard_edge(code.0, down)?;
+        }
         if down {
             held.insert(HeldKey::KbKey(code.0));
         } else {
@@ -1457,9 +1701,21 @@ impl InputInject for UinputInject {
     }
 
     fn release_all_held(&self) -> Result<()> {
-        let drained: Vec<HeldKey> = self.held.lock().drain().collect();
+        let mut swipe = self.window_swipe.lock();
+        *swipe = touchpad::WindowSwipe::default();
+        *self.scroll_residue.lock() = [0.0; 2];
+        let touchpad_result = self
+            .touchpad
+            .lock()
+            .as_mut()
+            .map_or(Ok(()), |pad| pad.release());
+        let mut held = self.held.lock();
+        if held.remove(&HeldKey::GestureAlt) {
+            held.insert(HeldKey::KbKey(EvKey::KEY_LEFTALT.0));
+        }
+        let drained: Vec<HeldKey> = held.drain().collect();
         if drained.is_empty() {
-            return Ok(());
+            return touchpad_result;
         }
         let count = drained.len();
         for h in drained {
@@ -1470,6 +1726,8 @@ impl InputInject for UinputInject {
                 HeldKey::MouseBtn(code) => {
                     self.emit_mouse(&[evdev::InputEvent::new(EventType::KEY.0, code, 0)])
                 }
+                HeldKey::GestureAlt => unreachable!(),
+                HeldKey::PasteV => Ok(()),
             };
             if let Err(e) = res {
                 warn!(error = %e, "failed to release held key on session end");
@@ -1479,23 +1737,26 @@ impl InputInject for UinputInject {
             count,
             "released stale held keys at session end (preventing stuck-key after peer disconnect)"
         );
-        Ok(())
+        touchpad_result
     }
 
     fn scroll(&self, dx: f32, dy: f32) -> Result<()> {
+        let mut residue = self.scroll_residue.lock();
+        let dx = touchpad::scroll_step(dx, &mut residue[0]);
+        let dy = touchpad::scroll_step(dy, &mut residue[1]);
         let mut events = Vec::new();
-        if dy != 0.0 {
+        if dy != 0 {
             events.push(evdev::InputEvent::new(
                 EventType::RELATIVE.0,
                 RelativeAxisCode::REL_WHEEL.0,
-                dy.round() as i32,
+                dy,
             ));
         }
-        if dx != 0.0 {
+        if dx != 0 {
             events.push(evdev::InputEvent::new(
                 EventType::RELATIVE.0,
                 RelativeAxisCode::REL_HWHEEL.0,
-                dx.round() as i32,
+                dx,
             ));
         }
         if !events.is_empty() {
@@ -1503,4 +1764,72 @@ impl InputInject for UinputInject {
         }
         Ok(())
     }
+
+    fn touchpad(&self, event: super::TouchpadEvent) -> Result<()> {
+        use touchpad::SwipeOutput;
+        let mut swipe = self.window_swipe.lock();
+        // A handback can race with the inject worker after its initial
+        // ownership check. Recheck while serialized with gesture cleanup.
+        if !event.is_terminal() && !crate::peer_in_remote() && !crate::is_game_receiving() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if swipe.expired(now) {
+            self.end_window_switch()?;
+        }
+        let output = swipe.update(event, now)?;
+        if matches!(output, SwipeOutput::Ignore) {
+            return Ok(());
+        }
+        if !swipe.switching() {
+            self.end_window_switch()?;
+        }
+        let mut touchpad = self.touchpad.lock();
+        let pad = touchpad
+            .as_mut()
+            .context("Linux touchpad receiver unavailable")?;
+        match output {
+            SwipeOutput::Native => pad.inject(event),
+            SwipeOutput::Replay(first) => {
+                pad.inject(first)?;
+                pad.inject(event)
+            }
+            SwipeOutput::Step { reverse, count } => {
+                pad.release()?;
+                self.switch_window(reverse, count)
+            }
+            SwipeOutput::Hold | SwipeOutput::Finish => pad.release(),
+            SwipeOutput::Ignore => unreachable!(),
+        }
+    }
+
+    fn expire_touchpad_gesture(&self) -> Result<()> {
+        let mut swipe = self.window_swipe.lock();
+        if swipe.switching()
+            && (swipe.expired(std::time::Instant::now())
+                || (!crate::peer_in_remote() && !crate::is_game_receiving()))
+        {
+            self.end_window_switch()?;
+        }
+        Ok(())
+    }
+
+    fn paste_in_window(&self, window: u64) -> Result<()> {
+        let held = self.held.lock();
+        if paste_window() != Some(window)
+            || MOD_ALT.load(Ordering::Relaxed)
+            || MOD_SHIFT_LEFT.load(Ordering::Relaxed)
+            || MOD_SHIFT_RIGHT.load(Ordering::Relaxed)
+            || held.contains(&HeldKey::GestureAlt)
+            || [42, 54, 56, 100, 125, 126]
+                .iter()
+                .any(|&code| held.contains(&HeldKey::KbKey(code)))
+        {
+            return Ok(());
+        }
+        let ctrl = held.contains(&HeldKey::KbKey(29)) || held.contains(&HeldKey::KbKey(97));
+        crate::paste_keys(ctrl, |code, down| self.keyboard_edge(code.0, down))
+    }
 }
+
+pub(crate) mod lock_feedback;

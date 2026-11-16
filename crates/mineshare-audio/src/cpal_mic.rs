@@ -19,7 +19,7 @@
 //! Windows) instead of mixing them into the sysout speaker path.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as WakeReceiver, SyncSender as WakeSender};
 use std::thread;
 use std::time::Duration;
@@ -27,15 +27,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, StreamTrait};
-use parking_lot::Mutex;
 use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Observer, Producer, Split};
-use tracing::{debug, info, warn};
+use ringbuf::traits::{Observer, Producer, Split};
+use tracing::{info, warn};
 
 use crate::codec::OpusEncoder;
 use crate::{
     AudioCapture, AudioFrame, BackendState, BackendStatus, CHANNELS, CaptureSink,
-    FRAME_SAMPLES_INTERLEAVED, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE, StreamKind,
+    FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind,
 };
 
 /// Capture-side ring sized for 96 kHz stereo × 5 frames = covers any
@@ -142,7 +141,7 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
     // exits cleanly when the version bumps, then we re-enter and
     // start over with the new device. A small audible glitch on
     // device switch is fine — manual operation only.
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, true)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, StreamKind::Mic)?;
     let mut seq: u32 = 0;
     loop {
         while !sink.is_active() {
@@ -177,10 +176,11 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
                 anyhow::bail!("input device reports 0 channels — driver issue");
             }
 
-            let rb = HeapRb::<f32>::new(CAPTURE_RING_CAP);
-            let (producer, consumer) = rb.split();
-            let producer = Arc::new(Mutex::new(producer));
-            let producer_cb = producer.clone();
+            let rb =
+                HeapRb::<f32>::new(CAPTURE_RING_CAP / in_channels as usize * in_channels as usize);
+            let (mut producer, consumer) = rb.split();
+            let dropped_samples = Arc::new(AtomicU64::new(0));
+            let dropped_cb = dropped_samples.clone();
             let (samples_ready_tx, samples_ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
             let samples_ready_cb = samples_ready_tx.clone();
             let stream_error = Arc::new(AtomicBool::new(false));
@@ -196,14 +196,8 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
                 SampleFormat::F32 => device.build_input_stream(
                     &cfg.config(),
                     move |data: &[f32], _| {
-                        let mut p = producer_cb.lock();
-                        let written = p.push_slice(data);
-                        if written != data.len() {
-                            debug!(
-                                dropped = data.len() - written,
-                                "mic ring full — dropping samples"
-                            );
-                        }
+                        let written = producer.push_slice(data);
+                        dropped_cb.fetch_add((data.len() - written) as u64, Ordering::Relaxed);
                         notify_samples_ready(&samples_ready_cb);
                     },
                     err_fn,
@@ -212,13 +206,15 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
                 SampleFormat::I16 => device.build_input_stream(
                     &cfg.config(),
                     move |data: &[i16], _| {
-                        let mut p = producer_cb.lock();
+                        let mut written = 0;
                         for &s in data {
                             let f = s as f32 / i16::MAX as f32;
-                            if p.try_push(f).is_err() {
+                            if producer.try_push(f).is_err() {
                                 break;
                             }
+                            written += 1;
                         }
+                        dropped_cb.fetch_add((data.len() - written) as u64, Ordering::Relaxed);
                         notify_samples_ready(&samples_ready_cb);
                     },
                     err_fn,
@@ -227,13 +223,15 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
                 SampleFormat::I32 => device.build_input_stream(
                     &cfg.config(),
                     move |data: &[i32], _| {
-                        let mut p = producer_cb.lock();
+                        let mut written = 0;
                         for &s in data {
                             let f = s as f32 / i32::MAX as f32;
-                            if p.try_push(f).is_err() {
+                            if producer.try_push(f).is_err() {
                                 break;
                             }
+                            written += 1;
                         }
+                        dropped_cb.fetch_add((data.len() - written) as u64, Ordering::Relaxed);
                         notify_samples_ready(&samples_ready_cb);
                     },
                     err_fn,
@@ -258,6 +256,7 @@ fn run_capture_thread(sink: CaptureSink, status: BackendStatus) -> Result<()> {
                 MicStreamSignals {
                     samples_ready: samples_ready_rx,
                     stream_error,
+                    dropped_samples,
                 },
             );
             drop(stream);
@@ -316,6 +315,7 @@ enum EncodeLoopExit {
 struct MicStreamSignals {
     samples_ready: WakeReceiver<()>,
     stream_error: Arc<AtomicBool>,
+    dropped_samples: Arc<AtomicU64>,
 }
 
 fn drive_encode_loop(
@@ -328,14 +328,15 @@ fn drive_encode_loop(
     signals: MicStreamSignals,
 ) -> EncodeLoopExit {
     let (in_rate, in_channels) = input_format;
-    let in_frames_per_out = ((in_rate as u64 * FRAME_SAMPLES_PER_CHANNEL as u64
-        + SAMPLE_RATE as u64 / 2)
-        / SAMPLE_RATE as u64) as usize
-        + 1;
-    let in_samples_per_out = in_frames_per_out * in_channels as usize;
-
-    let mut in_buf = vec![0f32; in_samples_per_out];
+    let mut pcm = match crate::mic_pcm::MicPcm::new(in_rate, in_channels) {
+        Ok(pcm) => pcm,
+        Err(error) => return EncodeLoopExit::Error(error),
+    };
     let mut out_buf = vec![0f32; FRAME_SAMPLES_INTERLEAVED];
+    if pcm.input_samples_needed() > CAPTURE_RING_CAP / in_channels as usize * in_channels as usize {
+        return EncodeLoopExit::Error(anyhow!("microphone format exceeds capture ring capacity"));
+    }
+    let mut health_report = std::time::Instant::now();
     let needs_resample = in_rate != SAMPLE_RATE;
     let needs_chmap = in_channels != CHANNELS;
     if needs_resample || needs_chmap {
@@ -349,7 +350,7 @@ fn drive_encode_loop(
     }
 
     loop {
-        while consumer.occupied_len() < in_samples_per_out {
+        while consumer.occupied_len() < pcm.input_samples_needed() {
             match capture_control(
                 sink.is_active(),
                 sink.is_closed(),
@@ -381,10 +382,6 @@ fn drive_encode_loop(
                 }
             }
         }
-        let n = consumer.pop_slice(&mut in_buf);
-        if n < in_samples_per_out {
-            continue;
-        }
         match capture_control(
             sink.is_active(),
             sink.is_closed(),
@@ -400,14 +397,16 @@ fn drive_encode_loop(
             }
         }
 
-        crate::resample::resample_and_chmap(
-            &in_buf[..n],
-            in_channels,
-            in_rate,
-            &mut out_buf,
-            CHANNELS,
-            SAMPLE_RATE,
-        );
+        if !pcm.read_frame(&mut consumer, &mut out_buf) {
+            continue;
+        }
+        if health_report.elapsed() >= Duration::from_secs(5) {
+            let dropped = signals.dropped_samples.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                warn!(dropped, "mic capture ring overflow");
+            }
+            health_report = std::time::Instant::now();
+        }
 
         let opus_bytes = match encoder.encode(&out_buf) {
             Ok(b) => b,

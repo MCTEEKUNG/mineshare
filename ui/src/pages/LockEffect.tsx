@@ -87,7 +87,7 @@ export default function LockEffectSection() {
         <button type="button" className={button} onClick={save}>{busy ? "Saving…" : "Save effect"}</button>
       </div>
     </fieldset> : <p className="text-sm text-ds-text-muted">Loading…</p>}
-    {message && <p role="status" className="text-sm text-emerald-500 mt-3">{message}</p>}
-    {error && <p role="alert" className="text-sm text-red-400 mt-3">{error}</p>}
+    {message && <p role="status" className="text-sm text-ds-success mt-3">{message}</p>}
+    {error && <p role="alert" className="text-sm text-ds-danger mt-3">{error}</p>}
   </section>;
 }

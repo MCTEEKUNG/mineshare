@@ -2,6 +2,7 @@
 //!
 //! Discovery (mDNS), pairing (Noise XX), transport, and wire protocol.
 
+pub mod connect;
 pub mod discovery;
 pub mod pairing;
 pub mod proto;

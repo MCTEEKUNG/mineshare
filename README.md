@@ -7,7 +7,8 @@
   <a href="#the-desk-workflow">See the workflow</a> ·
   <a href="#what-it-does">Explore features</a> ·
   <a href="#install">Set up MineShare</a> ·
-  <a href="docs/ubuntu-readiness.md">Ubuntu support</a>
+  <a href="docs/ubuntu-readiness.md">Ubuntu support</a> ·
+  <a href="Design.md">Design guideline</a>
   <br /><br />
 
   <img alt="Platforms: Windows 11 and Ubuntu" src="https://img.shields.io/badge/Windows_11_+_Ubuntu-LAN_bridge-bd9653?style=flat-square" />
@@ -24,7 +25,19 @@
 
 MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
 
-**Development snapshot:** `0.0.14` · resilient Windows keyboard capture and file-clipboard replay prevention. See [release notes](docs/releases/0.0.14.md). Ubuntu Typeless coexistence is opt-in and still awaits the post-login physical acceptance test. See [setup and limitations](docs/linux-typeless-keyboard-broker.md). Check the release tag when downloading; development changes are not necessarily published yet.
+**Development snapshot:** request-based pairing, file paste on demand (`control-v4`), microphone continuity fixes, and bounded audio/input queues. See [connection controls](docs/connection-controls.md). Both computers need a compatible build. Development changes are not necessarily published as installers.
+
+### Performance work: current status
+
+Round A was validated on Windows ↔ Windows and includes microphone sample continuity fixes and production build/symbol checks. The GUI retains its tested release profile; a ThinLTO candidate was rejected after audio quality testing.
+
+Round B adds bounded audio/input queues, fair scheduling, event-driven Windows capture, and a separate realtime transport runtime. Both Windows test machines now run the validated build. Rust verification passed **276 tests**, with **15 ignored**; Clippy and production installer checks also passed.
+
+In the measured Windows pair, continuous audio median/p95 changed from **190.29/191.49 → 180.81/182.19 ms** (desktop → laptop) and **125.16/136.68 → 120.32/124.63 ms** (laptop → desktop). All 512 continuous/sparse timing markers matched; the final continuous recordings had no observed quality events under the documented gate. The user confirmed smoother physical mouse/keyboard operation in both directions. These are results from this test pair, not a latency guarantee. See the [full Round B report and limitations](docs/performance-round-b-2026-10-30.md), [performance roadmap](docs/performance-roadmap-2026-10-27.md), and [measurement tools](tools/performance/README.md).
+
+**0.0.24 (input latency):** the receiving Windows machine paced mouse motion on the default ~15.6 ms timer tick: a 1 ms wait measured **p50 15.5 ms**. It now holds a 1 ms timer only while motion is flowing (released after 1 s idle), measured at **p50 1.5 ms**. It also opts out of Windows 11 timer throttling for the hidden tray app. Each side logs per-stage input timing every 5 s (`input stage timing`: queue age, send, OS inject, pacer overshoot), using only one machine's clock per stage. Reconnecting to an unreachable peer now backs off (0.25 s → 4 s cap, still within the 5 s recovery target) instead of redialling all night. A physical end-to-end latency comparison has not been measured yet.
+
+Ubuntu Typeless coexistence remains opt-in and awaits post-login physical acceptance. See [setup and limitations](docs/linux-typeless-keyboard-broker.md).
 
 ---
 
@@ -51,14 +64,31 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 | ⌨️ **Smart keyboard routing** | Keys follow whichever side you're actively using. Defaults to "Smart" mode: the most-recently-clicked machine wins focus, sticky during typing pauses. Pin to either side with **Ctrl+Alt+K**. |
 | 🔊 **System sound bridge** | What's playing on Win → audible on Ubuntu, and vice-versa. WASAPI loopback (Win) ↔ PipeWire monitor (Linux) ↔ Opus over UDP. |
 | 🎙️ **Microphone bridge** | Your mic on either PC becomes an input device on the peer (PipeWire null-sink on Linux, VB-CABLE on Win). |
-| 📋 **Clipboard sync** | Text copy/paste flows both directions automatically. |
+| 📋 **Clipboard sync** | Text syncs automatically. File bytes transfer only when you press **Ctrl+V** on the paired destination. |
 | 📁 **File transfer** | Drag a file onto the MineShare window → streams to peer over the encrypted channel, lands at `Downloads/MineShare/<name>` with SHA-256 integrity check. Live progress + cancel. |
 | 🔒 **Encrypted by default** | Noise XX handshake → ChaCha20-Poly1305 AEAD on every byte. PIN-pairing once per device, trust-on-first-use. |
 | 📡 **Zero-config discovery** | mDNS announces `_mineshare._tcp.local.`; both ends auto-connect on the same LAN. |
 | 🎮 **Game-mode lock** | User-controlled lock on the focused desktop; toggle with **Ctrl+Shift+L**. Opening a game does not automatically enable the lock. |
-| 📊 **Latency telemetry** | Round-trip Ping/Pong every 500 ms with rolling histogram in the GUI. |
+| 📊 **Latency telemetry** | Round-trip Ping/Pong every 500 ms with rolling histogram in the GUI, plus per-stage input timing (p50/p95/p99/max) in the daemon log every 5 s. |
 
 **Non-goals:** macOS, internet/NAT traversal, video mirroring.
+
+MineShare connects one peer at a time. On **Home**, use **Choose a computer** to
+see devices on the LAN, select one, and confirm **Send request**. The other
+computer must accept before a first-time PIN exchange begins. Discovery never
+pairs new computers automatically. Your selected paired computer reconnects
+after an outage; **Disconnect & pause** blocks reconnection until you resume.
+Both computers need compatible builds with staged clipboard file paste support.
+
+Copy files as usual with **Ctrl+C**, then press **Ctrl+V** in the destination
+window within two minutes. A newer local copy takes precedence. If you switch
+windows or continue interacting during the transfer, MineShare skips the delayed
+paste. Clipboard files are staged in a temporary directory so the file manager
+can paste them into the chosen folder. Explicit file transfers still use
+`Downloads/MineShare`. On Ubuntu Wayland, enable the updated MineShare GNOME pointer extension
+for the focus check. Pasting with the physical Ubuntu keyboard also requires
+MineShare keyboard capture through the keyboard broker.
+See [connection controls](docs/connection-controls.md).
 
 ---
 
@@ -103,6 +133,8 @@ An existing installation is detected and updated in its original directory, reta
 ### Ubuntu / Debian
 
 For current cross-platform checks, runtime requirements, and physical acceptance steps, see [Ubuntu readiness](docs/ubuntu-readiness.md). CI checks both Ubuntu 22.04 and 24.04; passing compilation is not a physical Wayland/X11 input test.
+
+See [Linux touchpad sharing](docs/linux-touchpad.md) for gesture mappings, input permissions, and compatibility with DEB and RPM installs.
 
 Download `mineshare_<ver>_amd64.deb` and install:
 
@@ -149,7 +181,8 @@ sudo apt install -y \
     libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
     libayatana-appindicator3-dev librsvg2-dev \
     libasound2-dev libpipewire-0.3-dev pulseaudio-utils \
-    libopus-dev pkg-config build-essential
+    libopus-dev libudev-dev cmake libarchive-tools \
+    pkg-config build-essential
 ```
 
 Then:

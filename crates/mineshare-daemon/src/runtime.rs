@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use bincode::config::standard;
-use mineshare_audio::{AudioFrame, AudioPlayback};
+use mineshare_audio::{AudioFrame, AudioPlayback, CapturedAudio};
 use mineshare_core::DeviceId;
 use mineshare_input::{
     Button, ForwardedInputState, InputEvent, InputInject, make_capture, make_inject,
@@ -30,7 +30,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
+use crate::audio_pipeline::{AudioHub, MAX_AUDIO_AGE, SendBudget};
 use crate::identity::Identity;
+use crate::input_pipeline::{InputHub, merge_motion};
 use crate::logs;
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
@@ -38,13 +40,159 @@ const STANDBY_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 static SESSIONS: crate::session::Sessions = crate::session::Sessions::new();
+static NEARBY: std::sync::LazyLock<Mutex<HashMap<DeviceId, PeerAdvert>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+pub use crate::session::ConnectionControl;
+
+#[derive(Clone, Serialize)]
+pub struct NearbyPeer {
+    device_id: DeviceId,
+    display_name: String,
+    os: String,
+    addresses: Vec<IpAddr>,
+    trusted: bool,
+    connected: bool,
+    request_supported: bool,
+}
+pub fn nearby_peers() -> Vec<NearbyPeer> {
+    let connected = SESSIONS.control().connected_peer_id;
+    let trusted = crate::trust::list_trusted();
+    let mut peers: Vec<_> = NEARBY
+        .lock()
+        .values()
+        .map(|peer| NearbyPeer {
+            device_id: peer.device_id,
+            display_name: peer.display_name.clone(),
+            os: peer.os.clone(),
+            addresses: peer.addresses.clone(),
+            trusted: trusted
+                .iter()
+                .any(|known| known.device_id == peer.device_id.to_string()),
+            connected: crate::status::peer_connected()
+                && connected.as_deref() == Some(&peer.device_id.to_string()),
+            request_supported: peer.pairing_protocol == 1,
+        })
+        .collect();
+    peers.sort_by(|a, b| {
+        a.display_name
+            .cmp(&b.display_name)
+            .then(a.device_id.to_string().cmp(&b.device_id.to_string()))
+    });
+    peers
+}
+pub fn request_pairing(device_id: &str) -> Result<()> {
+    let id = DeviceId(uuid::Uuid::parse_str(device_id).context("invalid device ID")?);
+    let peer = NEARBY
+        .lock()
+        .get(&id)
+        .cloned()
+        .context("computer is no longer nearby")?;
+    anyhow::ensure!(
+        peer.pairing_protocol == 1,
+        "update MineShare on the other computer before pairing"
+    );
+    anyhow::ensure!(
+        !peer.addresses.is_empty(),
+        "computer has no reachable address"
+    );
+    anyhow::ensure!(
+        SESSIONS.control().connected_peer_id.as_deref() != Some(device_id),
+        "computer is already connected"
+    );
+    SESSIONS.request(device_id)?;
+    Ok(())
+}
+
+pub fn connection_control() -> ConnectionControl {
+    let mut control = SESSIONS.control();
+    control.selected_peer = selected_peer_info(
+        crate::trust::selected_peer().as_deref(),
+        &crate::trust::list_trusted(),
+        &NEARBY.lock(),
+    );
+    control
+}
+
+fn selected_peer_info(
+    selected: Option<&str>,
+    trusted: &[crate::trust::TrustedPeer],
+    nearby: &HashMap<DeviceId, PeerAdvert>,
+) -> Option<crate::session::SelectedPeer> {
+    let peer = trusted
+        .iter()
+        .find(|peer| Some(peer.device_id.as_str()) == selected)?;
+    // Discovery only supplies a display hint for the matching saved identity.
+    // Legacy trust records contain no OS, so do not guess one for an offline peer.
+    let os = nearby
+        .values()
+        .find(|advert| advert.device_id.to_string() == peer.device_id)
+        .map(|advert| advert.os.clone())
+        .filter(|os| !os.is_empty());
+    Some(crate::session::SelectedPeer {
+        device_id: peer.device_id.clone(),
+        display_name: peer.display_name.clone(),
+        os,
+    })
+}
+pub fn set_connections_paused(paused: bool) {
+    SESSIONS.set_paused(paused);
+    if paused {
+        crate::pairing::set_phase(crate::pairing::PairingPhase::None);
+    }
+}
+pub fn set_pairing_enabled(enabled: bool) -> Result<()> {
+    SESSIONS.set_pairing_enabled(enabled)?;
+    if !enabled {
+        crate::pairing::set_phase(crate::pairing::PairingPhase::None);
+    }
+    Ok(())
+}
 static LOCAL_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
+
+/// Wakes reconnect loops that are backing off: a peer re-announcing itself,
+/// a user connect request, or resuming from pause means "dial now".
+static RECONNECT_KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub(crate) fn kick_reconnect() {
+    RECONNECT_KICK.notify_waiters();
+}
+
+/// A session that stayed up this long counts as healthy, so its failure
+/// restarts backoff from the fastest retry.
+const RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(10);
+const RECONNECT_MIN_DELAY: Duration = Duration::from_millis(250);
+/// Kept low on purpose: a trusted peer that returns after a LAN outage may
+/// never re-announce (see `forget_offline_peer`), so no kick arrives and
+/// this cap bounds recovery toward the 5 s reconnect target.
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(4);
+
+/// Retry delay after `failures` consecutive failed dials. The first retries
+/// stay fast for a transient Wi-Fi blip; an unreachable peer settles at the
+/// cap, roughly halving overnight dials versus retrying right after each
+/// 4 s connect timeout. A [`kick_reconnect`] while waiting cuts the delay
+/// short (one landing mid-dial is not retained).
+fn reconnect_backoff(failures: u32) -> Duration {
+    if failures <= 2 {
+        return RECONNECT_MIN_DELAY;
+    }
+    let exp = (failures - 2).min(6);
+    (Duration::from_secs(1) * (1u32 << exp) / 2).clamp(RECONNECT_MIN_DELAY, RECONNECT_MAX_DELAY)
+}
 
 fn reconnect_initial_delay(local_id: DeviceId, peer_id: DeviceId) -> Duration {
     if local_id.0 < peer_id.0 {
         Duration::ZERO
     } else {
         STANDBY_RECONNECT_DELAY
+    }
+}
+
+fn forget_offline_peer(peers: &mut HashMap<DeviceId, PeerAdvert>, id: DeviceId, trusted: bool) {
+    // mDNS expiry is a discovery hint, not a revocation of a paired device.
+    // Retain its last endpoint so the existing worker can redial even if the
+    // router never sends a fresh advertisement after a temporary LAN outage.
+    if !trusted {
+        peers.remove(&id);
     }
 }
 
@@ -126,6 +274,7 @@ struct InjectDispatcher {
 struct PendingInject {
     event: InputEvent,
     merged_motion: bool,
+    queued_at: std::time::Instant,
 }
 
 struct InjectQueue {
@@ -145,12 +294,35 @@ impl MotionPacer {
         }
     }
 
-    fn wait_before_motion(&mut self) {
+    fn wait_before_motion(&mut self, queue: &InjectQueue) {
         let now = std::time::Instant::now();
         let interval = Duration::from_micros(mineshare_input::target_flush_us().max(1));
         let (wait, next) = motion_pacing_step(now, self.next_deadline, interval);
         if !wait.is_zero() {
-            thread::sleep(wait);
+            let deadline = now + wait;
+            let mut pending = queue.pending.lock();
+            while !queue.stopped.load(Ordering::Acquire)
+                && !pending
+                    .iter()
+                    .any(|entry| pointer_lane(entry.event).is_none())
+                && std::time::Instant::now() < deadline
+            {
+                queue.wake.wait_for(
+                    &mut pending,
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                );
+            }
+            if queue.stopped.load(Ordering::Acquire)
+                || pending
+                    .iter()
+                    .any(|entry| pointer_lane(entry.event).is_none())
+            {
+                self.next_deadline = Some(std::time::Instant::now() + interval);
+                return;
+            }
+            // Only an uninterrupted wait says anything about timer resolution.
+            crate::input_timing::PACER_OVERSHOOT
+                .record(std::time::Instant::now().saturating_duration_since(deadline));
         }
         self.next_deadline = Some(next);
     }
@@ -180,6 +352,11 @@ struct InjectSender {
 /// adjacent samples still amortise AEAD/UDP overhead during a short scheduler
 /// delay, while bounding spatial quantisation at 250 Hz for a 1,000 Hz source.
 const MAX_WIRE_MOTION_MERGE: usize = 4;
+const MAX_INJECT_QUEUE: usize = 1_024;
+const MAX_INJECT_AGE: Duration = Duration::from_millis(250);
+/// Keep the raised timer briefly after the last motion so a pause between
+/// strokes does not toggle the system-wide resolution on every flick.
+const HIGH_RES_TIMER_IDLE_RELEASE: Duration = Duration::from_secs(1);
 
 fn can_merge_wire_motion(merged_samples: usize) -> bool {
     merged_samples < MAX_WIRE_MOTION_MERGE
@@ -239,7 +416,9 @@ impl InjectSender {
                     entry.merged_motion = true;
                     coalesced = true;
                 }
-                (InputEvent::Touchpad(current), InputEvent::Touchpad(next)) => {
+                (InputEvent::Touchpad(current), InputEvent::Touchpad(next))
+                    if current.can_coalesce_with(&next) =>
+                {
                     *current = next;
                     entry.merged_motion = false;
                     coalesced = true;
@@ -248,13 +427,20 @@ impl InjectSender {
             }
         }
         if !coalesced {
+            if pending.len() >= MAX_INJECT_QUEUE {
+                pending.clear();
+                self.queue.stopped.store(true, Ordering::Release);
+                self.queue.wake.notify_all();
+                return Err("input inject overload; ending session to release held input");
+            }
             pending.push_back(PendingInject {
                 event,
                 merged_motion: false,
+                queued_at: std::time::Instant::now(),
             });
         }
         drop(pending);
-        if was_empty {
+        if was_empty || pointer_lane(event).is_none() {
             self.queue.wake.notify_one();
         }
         Ok(())
@@ -274,11 +460,26 @@ impl InjectDispatcher {
             .spawn(move || {
                 raise_input_thread_priority();
                 let mut motion_pacer = MotionPacer::new();
+                // 1 ms timer only while motion is flowing, so pacing waits are
+                // not rounded up to the default ~15.6 ms Windows tick.
+                let mut timer: Option<mineshare_input::HighResTimer> = None;
+                let mut last_motion = std::time::Instant::now();
                 loop {
                     let entry = {
                         let mut pending = worker_queue.pending.lock();
                         while pending.is_empty() && !worker_queue.stopped.load(Ordering::Acquire) {
-                            worker_queue.wake.wait(&mut pending);
+                            if timer.is_some() {
+                                let idle = last_motion.elapsed();
+                                if idle >= HIGH_RES_TIMER_IDLE_RELEASE {
+                                    timer = None;
+                                    continue;
+                                }
+                                worker_queue
+                                    .wake
+                                    .wait_for(&mut pending, HIGH_RES_TIMER_IDLE_RELEASE - idle);
+                            } else {
+                                worker_queue.wake.wait(&mut pending);
+                            }
                         }
                         if worker_queue.stopped.load(Ordering::Acquire) {
                             break;
@@ -286,10 +487,36 @@ impl InjectDispatcher {
                         pending.pop_front()
                     };
                     if let Some(entry) = entry {
-                        if matches!(entry.event, InputEvent::MouseMove { .. }) {
-                            motion_pacer.wait_before_motion();
+                        if entry.queued_at.elapsed() > MAX_INJECT_AGE {
+                            worker_queue.stopped.store(true, Ordering::Release);
+                            worker_queue.pending.lock().clear();
+                            warn!("input injection exceeded its age limit; releasing session");
+                            break;
                         }
-                        dispatch_inject_event(&*inject, &stats, entry.event, entry.merged_motion);
+                        if matches!(entry.event, InputEvent::MouseMove { .. }) {
+                            if timer.is_none() {
+                                timer = Some(mineshare_input::HighResTimer::acquire());
+                            }
+                            last_motion = std::time::Instant::now();
+                            motion_pacer.wait_before_motion(&worker_queue);
+                        }
+                        if worker_queue.stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        crate::input_timing::INJECT_QUEUE_AGE.record(entry.queued_at.elapsed());
+                        let inject_started = std::time::Instant::now();
+                        let injected = dispatch_inject_event(
+                            &*inject,
+                            &stats,
+                            entry.event,
+                            entry.merged_motion,
+                        );
+                        crate::input_timing::INJECT_CALL.record(inject_started.elapsed());
+                        if !injected {
+                            worker_queue.stopped.store(true, Ordering::Release);
+                            worker_queue.pending.lock().clear();
+                            break;
+                        }
                     }
                 }
             })
@@ -341,12 +568,12 @@ fn dispatch_inject_event(
     stats: &SessionStats,
     event: InputEvent,
     merged_motion: bool,
-) {
+) -> bool {
     if matches!(event, InputEvent::Touchpad(touchpad) if !touchpad.is_terminal())
         && !mineshare_input::peer_in_remote()
         && !mineshare_input::is_game_receiving()
     {
-        return;
+        return true;
     }
     // A single untrusted/pathological delta still passes through `dispatch`
     // and its safety clamp. A sum of several already-validated motion events
@@ -359,8 +586,10 @@ fn dispatch_inject_event(
     if let Err(e) = result {
         warn!(error = %e, "inject failed");
         stats.inject_errs.fetch_add(1, Ordering::Relaxed);
+        false
     } else {
         stats.injected.fetch_add(1, Ordering::Relaxed);
+        true
     }
 }
 
@@ -379,6 +608,40 @@ struct PortAnnounce {
     screen_w: u32,
     screen_h: u32,
     touchpad_capabilities: u32,
+}
+
+const CONNECTION_MAGIC: [u8; 8] = *b"MSPAIR04";
+// The legacy announce field is a bitset. Use a non-touchpad bit so older
+// peers can still connect without seeing the new clipboard-only message.
+const STAGED_PASTE_CAPABILITY: u32 = 1 << 31;
+#[derive(Debug, Serialize, Deserialize)]
+struct ConnectionHello {
+    magic: [u8; 8],
+    device_id: DeviceId,
+    display_name: String,
+    trusts_peer: bool,
+    requested: bool,
+}
+impl ConnectionHello {
+    fn validate_for(&self, expected: Option<DeviceId>) -> Result<()> {
+        anyhow::ensure!(
+            self.magic == CONNECTION_MAGIC,
+            "incompatible pairing protocol: update MineShare on both computers"
+        );
+        anyhow::ensure!(
+            !self.display_name.is_empty()
+                && self.display_name.len() <= 256
+                && !self.display_name.chars().any(char::is_control),
+            "invalid computer name"
+        );
+        if let Some(expected) = expected {
+            anyhow::ensure!(
+                self.device_id == expected,
+                "the responding computer is not the selected device"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Streamed messages on the encrypted TCP control channel after the
@@ -447,6 +710,8 @@ pub enum ControlMsg {
     /// between peers.
     Ping {
         ts_us: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lock_visual: Option<crate::status::LockVisual>,
     },
     Pong {
         ts_us: u64,
@@ -502,9 +767,24 @@ pub enum ControlMsg {
         epoch: u64,
     },
     /// IDs of verified FileEnd transfers to publish as a native file clipboard.
-    ClipboardFiles(Vec<u64>),
+    ClipboardFiles {
+        offer: u64,
+        ids: Vec<u64>,
+    },
     InputLockRequest(mineshare_input::LockRequest),
     InputLockReply(mineshare_input::LockReply),
+    PairingDecision {
+        accepted: bool,
+        reason: String,
+    },
+    ClipboardFileOffer(u64),
+    ClipboardFilePaste(u64),
+    ClipboardFileTransfer {
+        offer: u64,
+        id: u64,
+        name: String,
+        size_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -729,29 +1009,17 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     crate::settings::install_loaded();
 
     // --- Input capture ----------------------------------------------------
-    // SPLIT channels for priority:
-    //   * `input_bcast` — small, high-priority. Mouse/keyboard events
-    //     bypass the audio queue so a burst of audio frames sitting in
-    //     the wire channel can't add ~20-40 ms (one Opus frame each) of
-    //     latency to cursor motion.
-    //   * `wire_bcast` — larger, audio + future bulk traffic.
-    //
-    // The per-peer UDP-send task subscribes to BOTH and uses
-    // `tokio::select! { biased; … }` with the input arm first so it
-    // drains pending input on every wakeup before touching audio.
-    //
-    // Capacity 64 on the input channel is ~64 ms of headroom at a
-    // 1000 Hz polling mouse — large enough to ride out a momentary
-    // tokio-runtime stall, small enough that we don't ship a backlog
-    // of stale motion after a network blip (the `RecvError::Lagged`
-    // arm logs the drop and recovers).
-    let (input_bcast, _) = broadcast::channel::<InputEvent>(64);
-    let (wire_bcast, _) = broadcast::channel::<WireFrame>(1024);
+    // Separate bounded ingress for input and per-stream audio freshness.
+    // Input merges adjacent legal pointer updates before capacity pressure.
+    // A discrete overflow fails the session closed; teardown releases held keys.
+    // Audio has independent per-stream mailboxes with a capture-ingress deadline.
+    let input_bcast = InputHub::default();
+    let wire_bcast = AudioHub::default();
 
     let input_for_cap = input_bcast.clone();
     let cap_sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static> =
         std::sync::Arc::new(move |ev: InputEvent| {
-            let _ = input_for_cap.send(ev);
+            input_for_cap.send(ev);
         });
 
     let cap_started = if opts.capture {
@@ -781,9 +1049,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // Capture is real-time and lossy by nature. Bound the cross-thread queue
     // so a stalled runtime cannot accumulate minutes of stale audio or grow
     // memory without limit during long-running sessions.
-    const AUDIO_CAPTURE_QUEUE_CAPACITY: usize = 8;
+    const AUDIO_CAPTURE_QUEUE_CAPACITY: usize = 4;
     let (audio_cap_tx, mut audio_cap_rx) =
-        mpsc::channel::<AudioFrame>(AUDIO_CAPTURE_QUEUE_CAPACITY);
+        mpsc::channel::<CapturedAudio>(AUDIO_CAPTURE_QUEUE_CAPACITY);
+    let (mic_cap_tx, mut mic_cap_rx) = mpsc::channel::<CapturedAudio>(AUDIO_CAPTURE_QUEUE_CAPACITY);
     let audio_cap_started = if opts.capture && sysout_capture_enabled {
         let sysout_wire = wire_bcast.clone();
         let sysout_sink = mineshare_audio::CaptureSink::new(audio_cap_tx.clone(), move || {
@@ -824,7 +1093,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // mixing them with sysout into the speakers.
     let mic_cap_started = if opts.capture && mic_capture_enabled {
         let mic_wire = wire_bcast.clone();
-        let mic_sink = mineshare_audio::CaptureSink::new(audio_cap_tx, move || {
+        let mic_sink = mineshare_audio::CaptureSink::new(mic_cap_tx, move || {
             crate::audio_status::SEND_MIC.load(Ordering::Relaxed) && mic_wire.receiver_count() != 0
         });
         match mineshare_audio::make_mic_capture() {
@@ -856,7 +1125,19 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     tokio::spawn(async move {
         let mut sysout_wire_seq = 0u32;
         let mut mic_wire_seq = 0u32;
-        while let Some(mut frame) = audio_cap_rx.recv().await {
+        let mut sysout_open = true;
+        let mut mic_open = true;
+        loop {
+            let captured = tokio::select! {
+                frame = audio_cap_rx.recv(), if sysout_open => { if frame.is_none() {sysout_open=false;} frame },
+                frame = mic_cap_rx.recv(), if mic_open => { if frame.is_none() {mic_open=false;} frame },
+                else => break,
+            };
+            let Some(mut frame) = captured else { continue };
+            if frame.captured_at.elapsed() > MAX_AUDIO_AGE {
+                bcast_for_audio_drain.note_capture_expired();
+                continue;
+            }
             // GUI-driven outbound toggle — flipped from the Audio
             // tab. Off → drop the frame before it hits the broadcast
             // (capture pipeline keeps running so re-enable is
@@ -904,7 +1185,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                     seq
                 }
             };
-            let _ = bcast_for_audio_drain.send(WireFrame::Audio(frame));
+            bcast_for_audio_drain.send(frame);
         }
         debug!("audio capture pump terminated");
     });
@@ -1045,7 +1326,10 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         display_name: identity_arc.display_name.clone(),
         os: identity_arc.os.clone(),
         control_port: local_port,
-        addresses: detect_local_addresses(),
+        // mDNS follows all active interfaces, including ones that return after
+        // startup. A one-time default-route lookup freezes stale DHCP addresses.
+        addresses: Vec::new(),
+        pairing_protocol: 1,
     };
     discovery.announce(&advert)?;
 
@@ -1063,13 +1347,29 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let known = known_peers.clone();
     let local_id = identity_arc.device_id;
 
-    while let Some(evt) = rx.recv().await {
+    let recovery_interval = Duration::from_secs(5);
+    let mut recovery = tokio::time::interval_at(
+        tokio::time::Instant::now() + recovery_interval,
+        recovery_interval,
+    );
+    recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let evt = tokio::select! {
+            event = rx.recv() => match event { Some(event) => event, None => break },
+            _ = recovery.tick() => {
+                if !SESSIONS.control().paused && !crate::status::peer_connected() {
+                    discovery.refresh_browse();
+                }
+                continue;
+            }
+        };
         match evt {
             DiscoveryEvent::PeerOnline(peer) => {
                 if peer.device_id == local_id {
                     debug!("ignoring own advert");
                     continue;
                 }
+                NEARBY.lock().insert(peer.device_id, peer.clone());
                 // Always refresh the stored advert so the endpoint is
                 // current. A live reconnect loop re-reads `known_peers`
                 // every iteration, so a peer that restarted with a new
@@ -1111,6 +1411,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                         let mut f = in_flight.lock();
                         if f.contains(&peer.device_id) {
                             debug!(peer = %peer.device_id, "reconnect loop already running — it will pick up the refreshed endpoint");
+                            kick_reconnect();
                             continue;
                         }
                         f.insert(peer.device_id);
@@ -1136,6 +1437,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             debug!(peer = %peer_id, ?initial_delay, "standby reconnect armed");
                             tokio::time::sleep(initial_delay).await;
                         }
+                        let mut failures = 0u32;
                         loop {
                             let peer_now = {
                                 let k = known_for_loop.lock();
@@ -1151,12 +1453,21 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             // The lower device id normally dials first. The
                             // other side is a failover for one-sided mDNS and
                             // must stay idle while either session is healthy.
-                            if crate::status::peer_connected() {
+                            let peer_id_string = peer_id.to_string();
+                            let selected_trusted =
+                                crate::trust::selected_peer().as_deref() == Some(&peer_id_string);
+                            if peer_now.pairing_protocol != 1
+                                || !SESSIONS.can_dial(&peer_id_string, selected_trusted)
+                            {
                                 tokio::time::sleep(Duration::from_millis(250)).await;
                                 continue;
                             }
-                            match dial_and_run(
+                            let request = SESSIONS.outgoing_for(&peer_id_string);
+                            let dial_started = std::time::Instant::now();
+                            let result = dial_and_run(
                                 &peer_now,
+                                &known_for_loop,
+                                request.clone(),
                                 &init_static,
                                 init_identity.clone(),
                                 inject.clone(),
@@ -1165,21 +1476,48 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                                 input_bcast_for_loop.clone(),
                                 bcast.clone(),
                             )
-                            .await
+                            .await;
+                            if let Some(request) = &request
+                                && SESSIONS.finish_request(request.id)
+                                && let Err(error) = &result
                             {
+                                crate::pairing::set_phase(crate::pairing::PairingPhase::Failed {
+                                    reason: error.to_string(),
+                                });
+                            }
+                            if result.is_ok() || dial_started.elapsed() >= RECONNECT_HEALTHY_SESSION
+                            {
+                                failures = 0;
+                            }
+                            if result.is_err() {
+                                failures = failures.saturating_add(1);
+                            }
+                            let delay = if SESSIONS.outgoing_for(&peer_id_string).is_some() {
+                                RECONNECT_MIN_DELAY
+                            } else {
+                                reconnect_backoff(failures)
+                            };
+                            match result {
                                 Ok(()) => info!(peer = %peer_id, "session ended — will reconnect"),
                                 Err(e) => {
-                                    warn!(peer = %peer_id, error = %e, "session error — will reconnect")
+                                    warn!(peer = %peer_id, error = %e, failures, retry_ms = delay.as_millis() as u64, "session error — will reconnect")
                                 }
                             }
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                _ = RECONNECT_KICK.notified() => {}
+                            }
                         }
                     });
                 }
             }
             DiscoveryEvent::PeerOffline(id) => {
-                known.lock().remove(&id);
-                info!(peer = %id, "peer offline");
+                NEARBY.lock().remove(&id);
+                let trusted = crate::trust::list_trusted()
+                    .iter()
+                    .any(|peer| peer.device_id == id.to_string());
+                forget_offline_peer(&mut known.lock(), id, trusted);
+                info!(peer = %id, retrying = trusted, "peer no longer advertised");
             }
         }
     }
@@ -1195,13 +1533,16 @@ async fn accept_loop(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
-    input_bcast: broadcast::Sender<InputEvent>,
-    bcast: broadcast::Sender<WireFrame>,
+    input_bcast: InputHub,
+    bcast: AudioHub,
 ) {
     let handshakes = Arc::new(tokio::sync::Semaphore::new(8));
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                if SESSIONS.control().paused {
+                    continue;
+                }
                 let Ok(permit) = handshakes.clone().try_acquire_owned() else {
                     debug!(%addr, "too many pending peer connections");
                     continue;
@@ -1248,8 +1589,8 @@ async fn handle_inbound(
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
-    input_bcast: broadcast::Sender<InputEvent>,
-    bcast: broadcast::Sender<WireFrame>,
+    input_bcast: InputHub,
+    bcast: AudioHub,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
     stream.set_nodelay(true)?;
@@ -1267,6 +1608,7 @@ async fn handle_inbound(
         session,
         identity,
         false, // is_initiator: we accepted, peer dialed us
+        None,
         inject,
         playback,
         mic_playback,
@@ -1279,49 +1621,31 @@ async fn handle_inbound(
 #[allow(clippy::too_many_arguments)]
 async fn dial_and_run(
     peer: &PeerAdvert,
+    known: &Arc<Mutex<HashMap<DeviceId, PeerAdvert>>>,
+    request: Option<crate::session::OutgoingRequest>,
     static_priv: &[u8],
     identity: Arc<crate::identity::Identity>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
-    input_bcast: broadcast::Sender<InputEvent>,
-    bcast: broadcast::Sender<WireFrame>,
+    input_bcast: InputHub,
+    bcast: AudioHub,
 ) -> Result<()> {
-    if peer.addresses.is_empty() {
-        anyhow::bail!("peer has no addresses");
-    }
-    // Try every advertised address with a short per-address timeout.
-    // During a DHCP-IP change mdns-sd can briefly advertise BOTH the old
-    // (dead) and new IP; without bounding the connect, a dead old IP can
-    // hang ~20 s on the OS default before we'd even try the live one and
-    // before the reconnect loop could cycle. 4 s keeps re-arming snappy.
-    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-    let mut stream = {
-        let mut connected = None;
-        let mut last_err: Option<String> = None;
-        for addr in peer.addresses.iter().copied() {
-            let sock = SocketAddr::new(addr, peer.control_port);
-            debug!(%sock, "dialing peer");
-            match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(sock)).await {
-                Ok(Ok(s)) => {
-                    connected = Some(s);
-                    break;
-                }
-                Ok(Err(e)) => last_err = Some(format!("{sock}: {e}")),
-                Err(_) => {
-                    last_err = Some(format!(
-                        "{sock}: connect timed out after {CONNECT_TIMEOUT:?}"
-                    ))
-                }
-            }
-        }
-        connected.with_context(|| {
-            format!(
-                "all addresses failed (last: {})",
-                last_err.as_deref().unwrap_or("none")
-            )
-        })?
-    };
+    // One deadline across the advertised routes: disconnected/virtual adapters
+    // must not hold a user request behind repeated per-address timeouts.
+    let started = std::time::Instant::now();
+    let mut stream = mineshare_net::connect::connect_peer_refreshing(|| {
+        let peers = known.lock();
+        let latest = peers.get(&peer.device_id).unwrap_or(peer);
+        (latest.addresses.clone(), latest.control_port)
+    })
+    .await?;
+    info!(
+        peer = %peer.device_id,
+        address = %stream.peer_addr()?,
+        elapsed_ms = started.elapsed().as_millis(),
+        "peer TCP route connected"
+    );
     stream.set_nodelay(true)?;
     let mut init = Initiator::new(static_priv)?;
     let session = tokio::time::timeout(SETUP_TIMEOUT, init.handshake(&mut stream))
@@ -1337,6 +1661,7 @@ async fn dial_and_run(
         session,
         identity,
         true, // is_initiator: we dialed
+        Some((peer.device_id, request)),
         inject,
         playback,
         mic_playback,
@@ -1358,22 +1683,93 @@ async fn run_peer_session(
     session: NoiseSession,
     identity: Arc<crate::identity::Identity>,
     is_initiator: bool,
+    target: Option<(DeviceId, Option<crate::session::OutgoingRequest>)>,
     inject: Arc<dyn InputInject>,
     playback: Arc<dyn AudioPlayback>,
     mic_playback: Arc<dyn AudioPlayback>,
-    input_bcast: broadcast::Sender<InputEvent>,
-    bcast: broadcast::Sender<WireFrame>,
+    input_bcast: InputHub,
+    bcast: AudioHub,
 ) -> Result<()> {
     let peer_static = session.remote_static;
     let local_wins_control_collision =
         identity.noise_static_pub.as_slice() < peer_static.as_slice();
-    let mut claim = SESSIONS.claim(&peer_static, is_initiator == local_wins_control_collision)?;
+    let trusted = crate::trust::is_trusted(&peer_static);
+    let aead = EncryptedSession::from(session);
+    let request = target.as_ref().and_then(|(_, request)| request.as_ref());
+    if let Some(request) = request {
+        anyhow::ensure!(
+            SESSIONS.request_is_current(request),
+            "pairing request was cancelled or expired"
+        );
+    }
+    let hello = ConnectionHello {
+        magic: CONNECTION_MAGIC,
+        device_id: identity.device_id,
+        display_name: identity.display_name.clone(),
+        trusts_peer: trusted,
+        requested: request.is_some(),
+    };
+    let exchange = async {
+        write_encrypted(&mut stream, &aead, &hello).await?;
+        read_encrypted::<_, ConnectionHello>(&mut stream, &aead).await
+    };
+    let remote = tokio::time::timeout(SETUP_TIMEOUT, exchange)
+        .await
+        .context("pairing hello timed out")??;
+    remote.validate_for(target.as_ref().map(|(id, _)| *id))?;
+    anyhow::ensure!(
+        remote.device_id != identity.device_id,
+        "cannot connect to this computer itself"
+    );
+    anyhow::ensure!(
+        !is_initiator || !remote.requested,
+        "unexpected reverse pairing request"
+    );
+    let peer_id = remote.device_id.to_string();
+    let trusted = crate::trust::matches_identity(&peer_id, &peer_static) && remote.trusts_peer;
+    let consent = hello.requested || remote.requested;
+    if !consent {
+        anyhow::ensure!(
+            trusted && crate::trust::selected_peer().as_deref() == Some(&peer_id),
+            "select this computer and send a pairing request first"
+        );
+    }
+    if let Some(request) = request {
+        anyhow::ensure!(
+            SESSIONS.request_is_current(request),
+            "pairing request was cancelled or expired"
+        );
+    }
+    let claim = SESSIONS.claim(
+        &peer_static,
+        &peer_id,
+        is_initiator == local_wins_control_collision,
+        trusted,
+        consent,
+        request,
+    );
+    if let Err(error) = &claim
+        && consent
+    {
+        let _ = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            write_encrypted(
+                &mut stream,
+                &aead,
+                &ControlMsg::PairingDecision {
+                    accepted: false,
+                    reason: error.to_string(),
+                },
+            ),
+        )
+        .await;
+    }
+    let mut claim = claim?;
     let _lifetime = tokio::select! {
         biased;
         _ = claim.cancelled() => anyhow::bail!("duplicate session superseded"),
         guard = SESSIONS.lifetime.lock() => guard,
     };
-    let aead = EncryptedSession::from(session);
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
     // it a silently-broken connection (mid-game Wi-Fi drop, peer
@@ -1404,52 +1800,63 @@ async fn run_peer_session(
     // the trust list is what stops them from sending input events
     // at us. New peers go through a one-time PIN exchange before
     // we let them past the handshake.
-    if !crate::trust::is_trusted(&peer_static) {
+    if consent {
+        let _attempt = crate::pairing::Attempt::begin();
         info!(%peer_addr, "peer not in trust list — running PIN pairing");
-        let pairing = pair_peer(
-            &mut stream,
-            &aead,
-            &peer_static,
-            peer_addr,
-            is_initiator,
-            &identity,
-        );
+        let pairing = async {
+            let accepted =
+                request_consent(&mut stream, &aead, &remote, peer_addr, is_initiator).await?;
+            if !accepted {
+                return Ok(None);
+            }
+            let paired = if trusted {
+                (peer_id.clone(), remote.display_name.clone())
+            } else {
+                pair_peer(
+                    &mut stream,
+                    &aead,
+                    &peer_static,
+                    peer_addr,
+                    is_initiator,
+                    &identity,
+                    &remote,
+                )
+                .await?
+            };
+            crate::trust::select_peer(&paired.0)?;
+            Ok(Some(paired))
+        };
         let pairing_result = tokio::select! {
             biased;
             _ = claim.cancelled() => anyhow::bail!("pairing superseded by preferred connection"),
-            result = pairing => result,
+            result = tokio::time::timeout(Duration::from_secs(90), pairing) =>
+                result.context("pairing timed out").and_then(|result| result),
         };
         match pairing_result {
-            Ok(peer_id) => {
+            Ok(Some(peer_id)) => {
+                anyhow::ensure!(claim.is_current(), "pairing session was superseded");
                 info!(peer_device = %peer_id.0, "pairing succeeded");
                 crate::pairing::set_phase(crate::pairing::PairingPhase::Trusted {
                     peer_name: peer_id.1.clone(),
                 });
-                // Clear back to None after a brief delay so the
-                // GUI's "trusted" toast lingers.
-                tokio::spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                claim.mark_trusted();
+            }
+            Ok(None) => {
+                if claim.is_current() {
                     crate::pairing::set_phase(crate::pairing::PairingPhase::None);
-                });
+                    let _ = SESSIONS.set_pairing_enabled(false);
+                }
+                return Ok(());
             }
             Err(e) => {
                 warn!(%peer_addr, error = %e, "pairing failed — closing session");
+                if !claim.is_current() {
+                    return Err(e);
+                }
                 crate::pairing::set_phase(crate::pairing::PairingPhase::Failed {
                     reason: e.to_string(),
                 });
-                // Auto-dismiss the Failed banner after a few
-                // seconds so the GUI doesn't stay stuck on a
-                // stale error after the conflicting peer goes
-                // away (common cause: an old standalone daemon
-                // still running alongside the GUI app on the
-                // other side, conflicting on mDNS).
-                tokio::spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                    let cur = crate::pairing::current_phase();
-                    if matches!(cur, crate::pairing::PairingPhase::Failed { .. }) {
-                        crate::pairing::set_phase(crate::pairing::PairingPhase::None);
-                    }
-                });
+                let _ = SESSIONS.set_pairing_enabled(false);
                 return Err(e);
             }
         }
@@ -1474,7 +1881,8 @@ async fn run_peer_session(
         daemon_version: crate::build_id(),
         screen_w: local_w,
         screen_h: local_h,
-        touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire),
+        touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire)
+            | STAGED_PASTE_CAPABILITY,
     };
     let exchange = async {
         write_encrypted(&mut stream, &aead, &announce).await?;
@@ -1498,15 +1906,17 @@ async fn run_peer_session(
     // Complete all fallible setup before publishing shared session state or
     // spawning workers. Otherwise a `?` skips teardown and strands the bridge.
     let inject_dispatcher = InjectDispatcher::start(inject.clone(), stats.clone())?;
-    crate::status::set_peer_connected(peer_addr.to_string(), None);
+    crate::status::set_peer_connected(peer_addr.to_string(), Some(remote.display_name.clone()));
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
     mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
-    mineshare_input::set_peer_touchpad_capabilities(peer_announce.touchpad_capabilities);
+    let staged_paste = peer_announce.touchpad_capabilities & STAGED_PASTE_CAPABILITY != 0;
+    let peer_touchpad_capabilities = peer_announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
+    mineshare_input::set_peer_touchpad_capabilities(peer_touchpad_capabilities);
     crate::status::set_peer_version(Some(peer_announce.daemon_version.clone()));
-    let local_touchpad_capabilities = announce.touchpad_capabilities;
+    let local_touchpad_capabilities = announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
     let touchpad_mode = if mineshare_input::native_touchpad_pair_available(
         local_touchpad_capabilities,
-        peer_announce.touchpad_capabilities,
+        peer_touchpad_capabilities,
     ) {
         "native"
     } else {
@@ -1520,7 +1930,7 @@ async fn run_peer_session(
         local_screen = ?(local_w, local_h),
         peer_screen = ?(peer_announce.screen_w, peer_announce.screen_h),
         local_touchpad_capabilities = format_args!("{local_touchpad_capabilities:#x}"),
-        peer_touchpad_capabilities = format_args!("{:#x}", peer_announce.touchpad_capabilities),
+        peer_touchpad_capabilities = format_args!("{peer_touchpad_capabilities:#x}"),
         touchpad_mode,
         "input UDP channel established"
     );
@@ -1546,7 +1956,6 @@ async fn run_peer_session(
     let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<crate::clipboard::ClipboardEvent>(
         crate::clipboard::queue_capacity(),
     );
-    crate::clipboard::ensure_watcher(clip_tx);
     let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
     crate::layout::set_propagate_sender(side_tx);
     // Stage 8.5 RTT plumbing: a generic ControlMsg pipe used by
@@ -1588,6 +1997,7 @@ async fn run_peer_session(
                     Some(crate::clipboard::ClipboardEvent::Text(text)) => {
                         ControlMsg::ClipboardText(text)
                     }
+                    Some(crate::clipboard::ClipboardEvent::FileOffer(id)) => ControlMsg::ClipboardFileOffer(id),
                     Some(crate::clipboard::ClipboardEvent::ImageStart {
                         id,
                         width,
@@ -1632,6 +2042,7 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
+    crate::clipboard::ensure_watcher(clip_tx, file_tx.clone(), inject.clone(), staged_paste);
     crate::files::set_session_tx(file_tx);
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
@@ -1648,7 +2059,16 @@ async fn run_peer_session(
         loop {
             tick.tick().await;
             let ts_us = crate::latency::now_us();
-            if ping_tx.send(ControlMsg::Ping { ts_us }).is_err() {
+            if ping_tx
+                .send(ControlMsg::Ping {
+                    ts_us,
+                    lock_visual: Some(crate::status::LockVisual {
+                        locked: mineshare_input::is_input_locked(),
+                        effect: mineshare_input::current_lock_effect(),
+                    }),
+                })
+                .is_err()
+            {
                 // Writer task is gone → session ended; bail out.
                 break;
             }
@@ -1791,12 +2211,14 @@ async fn run_peer_session(
                         warn!(error = %e, "failed to apply peer clipboard");
                     }
                 }
-                Ok(ControlMsg::ClipboardFiles(ids)) => {
-                    if let Err(e) = crate::files::received_clipboard_paths(&ids)
-                        .and_then(crate::clipboard::apply_files_from_peer)
-                    {
-                        warn!(error = %e, "failed to apply peer clipboard files");
-                    }
+                Ok(ControlMsg::ClipboardFileOffer(offer)) => {
+                    crate::clipboard::offer_from_peer(offer);
+                }
+                Ok(ControlMsg::ClipboardFilePaste(offer)) => {
+                    crate::clipboard::request_from_peer(offer);
+                }
+                Ok(ControlMsg::ClipboardFiles { offer, ids }) => {
+                    crate::clipboard::finish_file_paste(offer, &ids);
                 }
                 Ok(ControlMsg::ClipboardImageStart {
                     id,
@@ -1844,7 +2266,9 @@ async fn run_peer_session(
                         warn!(error = %e, "failed to apply peer layout");
                     }
                 }
-                Ok(ControlMsg::PinAttempt { .. }) | Ok(ControlMsg::PinAck { .. }) => {
+                Ok(ControlMsg::PinAttempt { .. })
+                | Ok(ControlMsg::PinAck { .. })
+                | Ok(ControlMsg::PairingDecision { .. }) => {
                     // Pairing messages should only arrive during
                     // the dedicated pairing handshake before the
                     // session reader is up. A peer sending these
@@ -1853,7 +2277,8 @@ async fn run_peer_session(
                     // log + ignore.
                     warn!("received pairing message mid-session — ignored");
                 }
-                Ok(ControlMsg::Ping { ts_us }) => {
+                Ok(ControlMsg::Ping { ts_us, lock_visual }) => {
+                    crate::status::set_peer_lock_visual(lock_visual);
                     // Echo it straight back; the peer's writer will
                     // measure round-trip from its own clock. Failure
                     // to send means the writer task is gone — fine,
@@ -1872,6 +2297,22 @@ async fn run_peer_session(
                     if let Err(e) = crate::files::begin_incoming(id, &name, size_bytes).await {
                         warn!(id, error = %e, "failed to start incoming file");
                         crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    }
+                }
+                Ok(ControlMsg::ClipboardFileTransfer {
+                    offer,
+                    id,
+                    name,
+                    size_bytes,
+                }) => {
+                    if !staged_paste {
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    } else if let Err(error) =
+                        crate::clipboard::begin_clipboard_receive(offer, id, &name, size_bytes)
+                            .await
+                    {
+                        debug!(id, %error, "clipboard file rejected");
                         let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
@@ -1920,6 +2361,7 @@ async fn run_peer_session(
     let playback_recv = playback.clone();
     let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
+    let inject_for_gesture_timeout = inject.clone();
     let mut recv_handle = tokio::spawn(async move {
         // Buffer must fit the largest WireFrame: input events are
         // tiny but Opus frames + AEAD tag + bincode framing top out
@@ -1935,8 +2377,16 @@ async fn run_peer_session(
         let mut route_tick = tokio::time::interval(Duration::from_millis(20));
         route_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            if inject_tx.queue.stopped.load(Ordering::Acquire) {
+                break;
+            }
             let received = tokio::select! {
                 _ = route_tick.tick() => {
+                    if inject_tx.queue.stopped.load(Ordering::Acquire) {break;}
+                    if let Err(error) = inject_for_gesture_timeout.expire_touchpad_gesture() {
+                        warn!(%error, "failed to release timed-out touchpad gesture");
+                        break;
+                    }
                     playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
                     mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
                     continue;
@@ -1999,6 +2449,7 @@ async fn run_peer_session(
                                     if let Err(e) = inject_tx.send(ev) {
                                         warn!(error = %e, "inject queue closed");
                                         stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
+                                        break;
                                     } else {
                                         injected_state.apply_event(ev);
                                     }
@@ -2025,6 +2476,7 @@ async fn run_peer_session(
                                         if let Err(e) = inject_tx.send(correction) {
                                             warn!(error = %e, "held-input reconciliation queue closed");
                                             stats_recv.inject_errs.fetch_add(1, Ordering::Relaxed);
+                                            break;
                                         } else {
                                             snapshot_press_deduper
                                                 .observe_snapshot_correction(correction);
@@ -2127,7 +2579,10 @@ async fn run_peer_session(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut prev = StatsSnapshot::default();
         loop {
-            interval.tick().await;
+            let scheduled = interval.tick().await;
+            let tick_late_ms = tokio::time::Instant::now()
+                .saturating_duration_since(scheduled)
+                .as_millis();
             let curr = stats_tick.snapshot();
             crate::status::publish_counters(
                 curr.sent_pkts,
@@ -2141,6 +2596,7 @@ async fn run_peer_session(
             if delta.sent_pkts != 0 || delta.recv_pkts != 0 {
                 info!(
                     peer = %peer_label,
+                    tick_late_ms,
                     sent_pkts = delta.sent_pkts,
                     sent_bytes = delta.sent_bytes,
                     recv_pkts = delta.recv_pkts,
@@ -2162,18 +2618,15 @@ async fn run_peer_session(
     // break out, tearing down every other task in the session so the
     // caller's reconnect loop can redial.
     //
-    // PRIORITY: input events drain before audio.  `tokio::select!` with
-    // `biased;` polls arms top-to-bottom, so when a mouse-motion event
-    // arrives while an audio frame is also pending the input arm wins
-    // and the cursor goes out immediately.  Without this, a backlog of
-    // 1–2 Opus frames (~20–40 ms each) sitting ahead of input in the
-    // shared queue added a corresponding ~20–40 ms of perceived ping
-    // to drag-across motion.
+    // Keep input-edge/snapshot ordering, while a bounded work/time budget
+    // guarantees audio a service opportunity even under continuous input.
     let mut input_sub = input_bcast.subscribe();
     let mut sub = bcast.subscribe();
     // Only allow capture to consume hardware after both data/control paths
     // exist; otherwise the first input after connection can have no subscriber.
     mineshare_input::set_remote_event_sender(rev_tx);
+    let mut send_budget = SendBudget::new(std::time::Instant::now());
+    let mut queue_report = std::time::Instant::now();
     let mut next_input_seq = 0u64;
     let mut next_state_seq = 0u64;
     let mut input_state_tick = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -2209,12 +2662,38 @@ async fn run_peer_session(
                 let event = $event;
                 let seq = next_input_seq;
                 next_input_seq = next_input_seq.wrapping_add(1);
+                let send_started = std::time::Instant::now();
                 send_wire!(WireFrame::Input { seq, event }, "input");
+                crate::input_timing::SEND_CALL.record(send_started.elapsed());
+                send_budget.input_sent();
             }};
+        }
+        if queue_report.elapsed() >= Duration::from_secs(5) {
+            info!(input_queue=?input_sub.diagnostics(), audio_queue=?sub.diagnostics(), capture_expired=bcast.capture_expired(), capture_full=?mineshare_audio::capture_queue_drops(), "realtime queue health (depth/coalesce/age and depth/expiry/replacement/age)");
+            let timing = crate::input_timing::InputTimingReport::take();
+            if !timing.is_empty() {
+                info!(
+                    send_queue_age = %timing.send_queue_age,
+                    send_call = %timing.send_call,
+                    inject_queue_age = %timing.inject_queue_age,
+                    inject_call = %timing.inject_call,
+                    pacer_overshoot = %timing.pacer_overshoot,
+                    high_res_timer = mineshare_input::high_res_timer_active(),
+                    "input stage timing (single-clock, last 5 s)"
+                );
+            }
+            queue_report = std::time::Instant::now();
+        }
+        if send_budget.audio_due(std::time::Instant::now()) {
+            send_budget.audio_serviced(std::time::Instant::now());
+            if let Ok(frame) = sub.try_recv() {
+                send_wire!(WireFrame::Audio(frame.frame.clone()), "audio-budget");
+                continue;
+            }
         }
         tokio::select! {
             biased;
-            _ = claim.cancelled() => break "preferred connection replaced duplicate",
+            _ = claim.cancelled() => break "connection cancelled or replaced",
             _ = &mut reader_handle => {
                 break "TCP control reader ended";
             }
@@ -2243,9 +2722,10 @@ async fn run_peer_session(
                     while can_merge_wire_motion(merged_samples) {
                         match input_sub.try_recv() {
                             Ok(InputEvent::MouseMove { dx: ndx, dy: ndy }) => {
-                                dx = dx.saturating_add(ndx);
-                                dy = dy.saturating_add(ndy);
-                                merged_samples += 1;
+                                match merge_motion(InputEvent::MouseMove{dx,dy}, InputEvent::MouseMove{dx:ndx,dy:ndy}) {
+                                    Some(InputEvent::MouseMove{dx:x,dy:y}) => {dx=x;dy=y;merged_samples+=1;},
+                                    _ => {trailer=Some(InputEvent::MouseMove{dx:ndx,dy:ndy});break;}
+                                }
                             }
                             Ok(other) => { trailer = Some(other); break; }
                             Err(broadcast::error::TryRecvError::Empty) => break,
@@ -2266,20 +2746,21 @@ async fn run_peer_session(
                 // Touchpad contact frames are absolute active-contact
                 // snapshots. When UDP backpressure leaves several updates
                 // queued for the same stream, only the newest one is useful:
-                // it contains all current contacts and the receiver derives
-                // any missing DOWN/UPDATE/UP transitions from it. Terminal
-                // frames and direct actions are never coalesced.
+                // while the active contact IDs remain the same. Contact
+                // changes, terminal frames and direct actions are barriers.
                 Ok(InputEvent::Touchpad(mut latest))
                     if latest.coalescible_stream().is_some() =>
                 {
                     let stream_id = latest.coalescible_stream().unwrap();
                     let mut trailer: Option<InputEvent> = None;
-                    loop {
+                    let mut merged_samples = 1;
+                    while can_merge_wire_motion(merged_samples) {
                         match input_sub.try_recv() {
                             Ok(InputEvent::Touchpad(next))
-                                if next.coalescible_stream() == Some(stream_id) =>
+                                if latest.can_coalesce_with(&next) =>
                             {
                                 latest = next;
+                                merged_samples += 1;
                             }
                             Ok(other) => {
                                 trailer = Some(other);
@@ -2306,12 +2787,12 @@ async fn run_peer_session(
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "input subscriber lagged — events dropped");
                 }
-                Err(broadcast::error::RecvError::Closed) => break "input broadcast closed",
+                Err(broadcast::error::RecvError::Closed) => break "input ingress failed closed or ended",
             },
             // State snapshots must yield to already-queued input edges. If a
             // tick wins while a key-down waits in the input channel, the
             // snapshot can describe that key before its event has a sequence.
-            _ = input_state_tick.tick() => {
+            _ = input_state_tick.tick(), if input_sub.is_empty() => {
                 state_heartbeat_ticks = state_heartbeat_ticks.saturating_add(1);
                 let heartbeat_due = state_heartbeat_ticks >= INPUT_STATE_HEARTBEAT_TICKS;
                 let state = mineshare_input::forwarded_input_state();
@@ -2341,7 +2822,7 @@ async fn run_peer_session(
             }
             // LOWER-PRIORITY: audio + future bulk traffic.
             recv = sub.recv() => match recv {
-                Ok(ev) => { send_wire!(ev, "wire"); }
+                Ok(frame) => { send_wire!(WireFrame::Audio(frame.frame.clone()), "audio"); send_budget.audio_serviced(std::time::Instant::now()); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "broadcast subscriber lagged — events dropped");
                 }
@@ -2379,6 +2860,7 @@ async fn run_peer_session(
     // Drop the file-transfer session sender + fail any in-flight
     // transfers so the GUI doesn't show a stuck progress bar.
     crate::files::clear_session_tx();
+    crate::clipboard::clear_file_session();
     // Reset cross-session coordination state so the next handshake
     // doesn't inherit a stale belief that the peer holds Remote.
     mineshare_input::force_local_exit_remote();
@@ -2444,6 +2926,69 @@ fn hex_short(bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
+/// A request is tied to this authenticated TCP/Noise channel, never a LAN-wide window.
+async fn request_consent(
+    stream: &mut TcpStream,
+    aead: &EncryptedSession,
+    peer: &ConnectionHello,
+    addr: SocketAddr,
+    initiator: bool,
+) -> Result<bool> {
+    use crate::pairing::{self, PairingPhase};
+    if initiator {
+        pairing::set_phase(PairingPhase::WaitingApproval {
+            peer_name: peer.display_name.clone(),
+            peer_addr: addr.to_string(),
+        });
+        match read_encrypted::<_, ControlMsg>(stream, aead).await? {
+            ControlMsg::PairingDecision { accepted: true, .. } => Ok(true),
+            ControlMsg::PairingDecision { reason, .. } => {
+                let reason: String = reason
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(200)
+                    .collect();
+                anyhow::bail!("pairing request declined: {reason}");
+            }
+            _ => anyhow::bail!("expected pairing approval"),
+        }
+    } else {
+        pairing::set_phase(PairingPhase::IncomingRequest {
+            peer_name: peer.display_name.clone(),
+            peer_addr: addr.to_string(),
+        });
+        let response = async {
+            loop {
+                if let Some(accepted) = pairing::take_response() {
+                    break accepted;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let accepted = tokio::select! {
+            accepted = response => accepted,
+            result = read_encrypted::<_, ControlMsg>(stream, aead) => {
+                if result.is_err() { return Ok(false); }
+                anyhow::bail!("unexpected message before approval");
+            }
+        };
+        write_encrypted(
+            stream,
+            aead,
+            &ControlMsg::PairingDecision {
+                accepted,
+                reason: if accepted {
+                    String::new()
+                } else {
+                    "declined on the other computer".into()
+                },
+            },
+        )
+        .await?;
+        Ok(accepted)
+    }
+}
+
 /// PIN-based pairing handshake over the just-completed Noise
 /// channel. Returns the peer's `(device_id, display_name)` on
 /// success so the caller can persist the pairing into the trust
@@ -2456,6 +3001,7 @@ async fn pair_peer(
     peer_addr: SocketAddr,
     is_initiator: bool,
     identity: &crate::identity::Identity,
+    peer: &ConnectionHello,
 ) -> Result<(String, String)> {
     use std::time::Duration;
     use tokio::time::timeout;
@@ -2469,19 +3015,26 @@ async fn pair_peer(
         // user has to type it in. Surface that to the GUI and
         // poll for the typed value.
         crate::pairing::set_phase(crate::pairing::PairingPhase::AwaitingPin {
-            peer_name: format!("{peer_addr}"),
+            peer_name: peer.display_name.clone(),
             peer_addr: peer_addr.to_string(),
         });
-        let pin = timeout(pair_timeout, async {
+        let entered_pin = async {
             loop {
                 if let Some(p) = crate::pairing::take_submitted_pin() {
                     break p;
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-        })
-        .await
-        .context("user did not enter PIN within timeout")?;
+        };
+        // Notice EOF while the human is typing; otherwise a disconnected peer
+        // strands this modal until the full PIN-entry timeout expires.
+        let pin = tokio::select! {
+            pin = entered_pin => pin,
+            result = read_encrypted::<_, ControlMsg>(stream, aead) => {
+                result.context("peer disconnected during PIN entry")?;
+                anyhow::bail!("unexpected message while waiting for PIN");
+            }
+        };
 
         crate::pairing::set_phase(crate::pairing::PairingPhase::Verifying);
         write_encrypted(
@@ -2504,13 +3057,17 @@ async fn pair_peer(
                 device_id,
                 display_name,
             } => {
+                anyhow::ensure!(
+                    device_id == peer.device_id.to_string(),
+                    "PIN acknowledgement came from a different device"
+                );
                 crate::trust::add_trusted(&device_id, &display_name, peer_static)?;
                 Ok((device_id, display_name))
             }
             ControlMsg::PinAck { ok: false, .. } => {
                 anyhow::bail!("peer rejected the PIN");
             }
-            other => anyhow::bail!("expected PinAck, got {other:?}"),
+            _ => anyhow::bail!("expected PinAck"),
         }
     } else {
         // We accepted — generate the PIN, show it on the local
@@ -2519,7 +3076,7 @@ async fn pair_peer(
         let pin = crate::pairing::generate_pin();
         crate::pairing::set_phase(crate::pairing::PairingPhase::DisplayingPin {
             pin: pin.clone(),
-            peer_name: format!("{peer_addr}"),
+            peer_name: peer.display_name.clone(),
             peer_addr: peer_addr.to_string(),
         });
 
@@ -2532,10 +3089,13 @@ async fn pair_peer(
                 device_id,
                 display_name,
             } => (pin, device_id, display_name),
-            other => anyhow::bail!("expected PinAttempt, got {other:?}"),
+            _ => anyhow::bail!("expected PinAttempt"),
         };
 
-        let ok = got_pin == pin;
+        let ok = got_pin == pin && peer_id == peer.device_id.to_string();
+        if ok {
+            crate::trust::add_trusted(&peer_id, &peer_name, peer_static)?;
+        }
         write_encrypted(
             stream,
             aead,
@@ -2548,9 +3108,8 @@ async fn pair_peer(
         .await
         .context("send PinAck")?;
         if !ok {
-            anyhow::bail!("PIN mismatch (got {got_pin}, expected {pin})");
+            anyhow::bail!("PIN mismatch");
         }
-        crate::trust::add_trusted(&peer_id, &peer_name, peer_static)?;
         Ok((peer_id, peer_name))
     }
 }
@@ -2575,21 +3134,6 @@ fn enable_tcp_keepalive(stream: &TcpStream) -> Result<()> {
     let ka = ka.with_retries(3);
     sock.set_tcp_keepalive(&ka)?;
     Ok(())
-}
-
-fn detect_local_addresses() -> Vec<IpAddr> {
-    use std::net::UdpSocket;
-    let mut addrs = Vec::new();
-    if let Ok(s) = UdpSocket::bind("0.0.0.0:0")
-        && s.connect("8.8.8.8:80").is_ok()
-        && let Ok(local) = s.local_addr()
-    {
-        addrs.push(local.ip());
-    }
-    if addrs.is_empty() {
-        addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    }
-    addrs
 }
 
 #[derive(Default)]
@@ -2722,6 +3266,174 @@ impl Drop for PlaybackRoute {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_display_keeps_offline_saved_identity_instead_of_a_nearby_namesake() {
+        let selected_id = mineshare_core::DeviceId(uuid::Uuid::from_u128(1));
+        let other_id = mineshare_core::DeviceId(uuid::Uuid::from_u128(2));
+        let trusted = vec![crate::trust::TrustedPeer {
+            device_id: selected_id.to_string(),
+            display_name: "Tee".into(),
+            noise_static_hex: "saved-key".into(),
+            paired_at: 0,
+        }];
+        let mut nearby = std::collections::HashMap::from([(
+            other_id,
+            mineshare_net::PeerAdvert {
+                device_id: other_id,
+                display_name: "Tee".into(),
+                os: "windows".into(),
+                control_port: 1234,
+                addresses: vec![],
+                pairing_protocol: 1,
+            },
+        )]);
+        let selected = selected_id.to_string();
+        let offline = super::selected_peer_info(Some(&selected), &trusted, &nearby).unwrap();
+        assert_eq!(offline.device_id, selected);
+        assert_eq!(offline.display_name, "Tee");
+        assert_eq!(
+            offline.os, None,
+            "another installation's OS must not be borrowed"
+        );
+        assert!(super::selected_peer_info(None, &trusted, &nearby).is_none());
+        assert!(super::selected_peer_info(Some("unknown"), &trusted, &nearby).is_none());
+        nearby.insert(
+            selected_id,
+            mineshare_net::PeerAdvert {
+                device_id: selected_id,
+                display_name: "Unverified new name".into(),
+                os: "linux".into(),
+                control_port: 1234,
+                addresses: vec![],
+                pairing_protocol: 1,
+            },
+        );
+        let online = super::selected_peer_info(Some(&selected), &trusted, &nearby).unwrap();
+        assert_eq!(online.display_name, "Tee");
+        assert_eq!(online.os.as_deref(), Some("linux"));
+    }
+
+    #[test]
+    fn connection_hello_is_bound_to_the_selected_device_and_protocol() {
+        let id = mineshare_core::DeviceId::new();
+        let mut hello = super::ConnectionHello {
+            magic: super::CONNECTION_MAGIC,
+            device_id: id,
+            display_name: "Chosen PC".into(),
+            trusts_peer: false,
+            requested: true,
+        };
+        assert!(hello.validate_for(Some(id)).is_ok());
+        assert!(
+            hello
+                .validate_for(Some(mineshare_core::DeviceId::new()))
+                .is_err()
+        );
+        hello.magic = *b"MSPAIR02";
+        assert!(hello.validate_for(Some(id)).is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypted_pairing_request_waits_for_human_approval_and_honors_decline() {
+        use crate::pairing::{self, PairingPhase};
+        let _serial = pairing::TEST_GUARD.lock().await;
+        for answer in [Some(true), Some(false), None] {
+            let init_key = mineshare_net::pairing::generate_static_key().unwrap();
+            let resp_key = mineshare_net::pairing::generate_static_key().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let session = mineshare_net::Responder::new(&resp_key.private)
+                    .unwrap()
+                    .handshake(&mut stream)
+                    .await
+                    .unwrap();
+                let aead = mineshare_net::EncryptedSession::from(session);
+                let _attempt = pairing::Attempt::begin();
+                let hello = super::ConnectionHello {
+                    magic: super::CONNECTION_MAGIC,
+                    device_id: mineshare_core::DeviceId::new(),
+                    display_name: "Requested PC".into(),
+                    trusts_peer: false,
+                    requested: true,
+                };
+                super::request_consent(&mut stream, &aead, &hello, address, false)
+                    .await
+                    .unwrap()
+            });
+            let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+            let session = mineshare_net::Initiator::new(&init_key.private)
+                .unwrap()
+                .handshake(&mut client)
+                .await
+                .unwrap();
+            let aead = mineshare_net::EncryptedSession::from(session);
+            let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let snapshot = pairing::snapshot();
+                    if matches!(snapshot.phase, PairingPhase::IncomingRequest { .. }) {
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if let Some(accept) = answer {
+                let mut decision = Box::pin(super::read_encrypted::<_, super::ControlMsg>(
+                    &mut client,
+                    &aead,
+                ));
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(30), &mut decision)
+                        .await
+                        .is_err(),
+                    "peer advanced before user approval"
+                );
+                assert!(
+                    pairing::respond_to_request(true, snapshot.attempt_id.wrapping_sub(1)).is_err()
+                );
+                pairing::respond_to_request(accept, snapshot.attempt_id).unwrap();
+                let message = tokio::time::timeout(std::time::Duration::from_secs(2), decision)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(message, super::ControlMsg::PairingDecision { accepted, .. } if accepted == accept)
+                );
+            } else {
+                drop(client);
+            }
+            let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted, answer.unwrap_or(false));
+            assert!(matches!(pairing::current_phase(), PairingPhase::None));
+        }
+    }
+
+    #[test]
+    fn trusted_peer_keeps_a_reconnect_target_after_discovery_expires() {
+        let id = mineshare_core::DeviceId::new();
+        let peer = mineshare_net::PeerAdvert {
+            device_id: id,
+            display_name: "paired PC".into(),
+            pairing_protocol: 1,
+            os: "test".into(),
+            control_port: 5000,
+            addresses: vec!["192.168.1.2".parse().unwrap()],
+        };
+        let mut peers = std::collections::HashMap::from([(id, peer)]);
+        super::forget_offline_peer(&mut peers, id, true);
+        assert!(
+            peers.contains_key(&id),
+            "LAN loss removed the only reconnect target"
+        );
+        super::forget_offline_peer(&mut peers, id, false);
+        assert!(!peers.contains_key(&id));
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
     use std::time::Duration;
@@ -2743,6 +3455,113 @@ mod tests {
         control_collision_action, legacy_echo_guard_policy, motion_pacing_step,
         reconnect_initial_delay, retry_stale_owned_input, should_send_input_state,
     };
+    /// Manual probe: `cargo test -p mineshare-daemon -- --ignored --nocapture
+    /// pacer_wait_resolution`. Runs from a window-less process, which is the
+    /// tray-hidden case Windows 11 may throttle.
+    #[test]
+    #[ignore = "manual timer-resolution probe; prints, does not assert"]
+    fn pacer_wait_resolution_probe() {
+        fn sample() -> (u128, u128, u128) {
+            let lock = parking_lot::Mutex::new(());
+            let cv = parking_lot::Condvar::new();
+            let mut waits: Vec<u128> = (0..200)
+                .map(|_| {
+                    let mut guard = lock.lock();
+                    let start = std::time::Instant::now();
+                    cv.wait_for(&mut guard, Duration::from_millis(1));
+                    start.elapsed().as_micros()
+                })
+                .collect();
+            waits.sort_unstable();
+            (waits[100], waits[190], waits[199])
+        }
+        let before = sample();
+        let timer = mineshare_input::HighResTimer::acquire();
+        let during = sample();
+        drop(timer);
+        println!("1 ms Condvar wait (p50/p95/max us): default={before:?} high_res={during:?}");
+    }
+
+    #[test]
+    fn reconnect_backoff_stays_fast_for_blips_and_caps_for_an_offline_peer() {
+        use super::{RECONNECT_MAX_DELAY, RECONNECT_MIN_DELAY, reconnect_backoff};
+        assert_eq!(reconnect_backoff(0), RECONNECT_MIN_DELAY);
+        assert_eq!(reconnect_backoff(2), RECONNECT_MIN_DELAY);
+        assert_eq!(reconnect_backoff(3), Duration::from_secs(1));
+        assert_eq!(reconnect_backoff(4), Duration::from_secs(2));
+        assert_eq!(reconnect_backoff(5), RECONNECT_MAX_DELAY);
+        assert!(RECONNECT_MAX_DELAY <= Duration::from_secs(4));
+        assert_eq!(reconnect_backoff(u32::MAX), RECONNECT_MAX_DELAY);
+        let mut previous = Duration::ZERO;
+        for failures in 0..40 {
+            let delay = reconnect_backoff(failures);
+            assert!(delay >= previous, "backoff must never shrink while failing");
+            previous = delay;
+        }
+    }
+
+    #[test]
+    fn a_discrete_edge_interrupts_mouse_pacing_without_overtaking_motion() {
+        let queue = Arc::new(InjectQueue {
+            pending: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            wake: parking_lot::Condvar::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut pacer = super::MotionPacer {
+                next_deadline: Some(std::time::Instant::now() + Duration::from_secs(1)),
+            };
+            started_tx.send(()).unwrap();
+            pacer.wait_before_motion(&queue);
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        sender
+            .send(InputEvent::Key {
+                code: KeyCode(30),
+                down: true,
+            })
+            .unwrap();
+        done_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("key edge remained trapped behind the mouse pacing sleep");
+        worker.join().unwrap();
+    }
+    #[test]
+    fn injection_backlog_is_bounded_and_overload_stops_the_queue() {
+        let queue = Arc::new(InjectQueue {
+            pending: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            wake: parking_lot::Condvar::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        for i in 0..super::MAX_INJECT_QUEUE {
+            sender
+                .send(InputEvent::Key {
+                    code: KeyCode(30),
+                    down: i % 2 == 0,
+                })
+                .unwrap();
+        }
+        assert!(
+            sender
+                .send(InputEvent::Key {
+                    code: KeyCode(30),
+                    down: false
+                })
+                .is_err()
+        );
+        assert!(queue.stopped.load(Ordering::Acquire));
+        assert!(queue.pending.lock().is_empty());
+    }
     #[cfg(target_os = "windows")]
     use super::{should_arm_sysout_echo_guard, should_suppress_outbound_sysout};
 
@@ -2934,6 +3753,55 @@ mod tests {
         InputEvent::Touchpad(
             TouchpadEvent::frame(stream_id, &[TouchpadContact { id: 1, x, y: 20 }], false).unwrap(),
         )
+    }
+
+    #[test]
+    fn inject_queue_preserves_finger_count_changes_within_a_stream() {
+        let queue = Arc::new(InjectQueue {
+            pending: Default::default(),
+            wake: Default::default(),
+            stopped: Default::default(),
+        });
+        let sender = InjectSender {
+            queue: queue.clone(),
+        };
+        let single = touchpad_frame(77, 100);
+        let three = InputEvent::Touchpad(
+            TouchpadEvent::frame(
+                77,
+                &[
+                    TouchpadContact {
+                        id: 1,
+                        x: 100,
+                        y: 20,
+                    },
+                    TouchpadContact {
+                        id: 2,
+                        x: 200,
+                        y: 20,
+                    },
+                    TouchpadContact {
+                        id: 3,
+                        x: 300,
+                        y: 20,
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        );
+        for event in [single, three, single] {
+            sender.send(event).unwrap();
+        }
+        assert_eq!(
+            queue
+                .pending
+                .lock()
+                .iter()
+                .map(|entry| entry.event)
+                .collect::<Vec<_>>(),
+            vec![single, three, single]
+        );
     }
 
     #[test]
@@ -3261,6 +4129,53 @@ mod tests {
         assert!(
             !deduper.suppress_live_event(press),
             "a real typematic repeat after the original edge must still pass"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_visual_tests {
+    use super::ControlMsg;
+    #[test]
+    fn heartbeat_visual_is_optional_and_keeps_timestamp_compatible() {
+        let old = ControlMsg::Ping {
+            ts_us: 17,
+            lock_visual: None,
+        };
+        let bytes = serde_json::to_vec(&old).unwrap();
+        let old_shape: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("lock_visual")
+        );
+        assert!(matches!(
+            serde_json::from_slice::<ControlMsg>(&bytes).unwrap(),
+            ControlMsg::Ping {
+                ts_us: 17,
+                lock_visual: None
+            }
+        ));
+        #[derive(serde::Deserialize)]
+        enum LegacyControl {
+            Ping { ts_us: u64 },
+        }
+        let new = ControlMsg::Ping {
+            ts_us: 17,
+            lock_visual: Some(crate::status::LockVisual {
+                locked: true,
+                effect: mineshare_input::LockEffect::default(),
+            }),
+        };
+        let value = serde_json::to_value(new).unwrap();
+        assert_ne!(old_shape, value);
+        let LegacyControl::Ping { ts_us } = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            ts_us, 17,
+            "old peers must accept the extra display metadata"
+        );
+        assert!(
+            matches!(serde_json::from_value::<ControlMsg>(value).unwrap(), ControlMsg::Ping { ts_us:17, lock_visual:Some(v) } if v.locked)
         );
     }
 }

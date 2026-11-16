@@ -1,254 +1,54 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useT } from "../i18n";
 
 type DeviceInfo = { name: string; is_default: boolean };
 type DevicesSnapshot = {
-  outputs: DeviceInfo[];
-  inputs: DeviceInfo[];
-  selected_output: string | null;
-  selected_input: string | null;
-  selected_sysout_capture: string | null;
+  outputs: DeviceInfo[]; inputs: DeviceInfo[];
+  selected_output: string | null; selected_input: string | null; selected_sysout_capture: string | null;
 };
 type Direction = "output" | "input" | "sysout_capture";
 
-/**
- * Devices tab — pick the cpal output / input device the bridge
- * uses for the peer's sysout playback and the local mic capture.
- */
 export default function DevicesPage() {
-  const [devs, setDevs] = useState<DevicesSnapshot | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [pending, setPending] = useState<Direction | null>(null);
-
-  async function refresh(force = false) {
-    try {
-      if (force) await invoke("refresh_audio_devices");
-      const s = await invoke<DevicesSnapshot>("list_audio_devices");
-      setDevs(s);
-      setErr(null);
-    } catch (e) {
-      setErr(String(e));
-    }
-  }
-
+  const { t } = useT();
+  const [devices, setDevices] = useState<DevicesSnapshot | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 10_000);
-    return () => clearInterval(id);
+    let active = true;
+    const tick = () => invoke<DevicesSnapshot>("list_audio_devices").then(value => { if (active) setDevices(value); }).catch(e => { if (active) setError(String(e)); });
+    tick();
+    const timer = setInterval(tick, 5000);
+    return () => { active = false; clearInterval(timer); };
   }, []);
-
-  async function pick(dir: Direction, name: string | null) {
-    setPending(dir);
-    setErr(null);
+  async function pick(direction: Direction, name: string | null) {
+    setBusy(true); setError("");
+    const command = direction === "output" ? "set_audio_output_device" : direction === "input" ? "set_audio_input_device" : "set_sysout_capture_device";
     try {
-      const cmd =
-        dir === "output"
-          ? "set_audio_output_device"
-          : dir === "input"
-            ? "set_audio_input_device"
-            : "set_sysout_capture_device";
-      await invoke(cmd, { name });
-      const selectedKey =
-        dir === "output"
-          ? "selected_output"
-          : dir === "input"
-            ? "selected_input"
-            : "selected_sysout_capture";
-      setDevs((s) =>
-        s ? { ...s, [selectedKey]: name } : s,
-      );
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setPending(null);
-    }
+      await invoke(command, { name });
+      setDevices(current => current && ({ ...current, [`selected_${direction}`]: name }));
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
   }
-
-  if (!devs) {
-    return (
-      <p className="text-sm text-ds-text-muted">
-        {err ? `failed: ${err}` : "loading devices…"}
-      </p>
-    );
-  }
-
-  return (
-    <section className="grid gap-6">
-      <DeviceList
-        icon={<IconSpeaker className="size-5 text-ds-text-muted" />}
-        title="System audio source"
-        subtitle="Which local output MineShare captures and sends to the peer."
-        devices={devs.outputs}
-        selected={devs.selected_sysout_capture}
-        busy={pending === "sysout_capture"}
-        onPick={(n) => pick("sysout_capture", n)}
-        onRefresh={() => refresh(true)}
-      />
-      <DeviceList
-        icon={<IconSpeaker className="size-5 text-ds-text-muted" />}
-        title="Audio output"
-        subtitle="Where peer sysout (and peer mic on Win, when VB-CABLE is installed) renders."
-        devices={devs.outputs}
-        selected={devs.selected_output}
-        busy={pending === "output"}
-        onPick={(n) => pick("output", n)}
-        onRefresh={() => refresh(true)}
-      />
-      <DeviceList
-        icon={<IconMic className="size-5 text-ds-text-muted" />}
-        title="Audio input"
-        subtitle="Where the bridge captures your mic. Pick a non-default device for headset / USB mic / OBS virtual cam, etc."
-        devices={devs.inputs}
-        selected={devs.selected_input}
-        busy={pending === "input"}
-        onPick={(n) => pick("input", n)}
-        onRefresh={() => refresh(true)}
-      />
-      {err ? <p className="text-xs text-red-400">{err}</p> : null}
-    </section>
-  );
-}
-
-function DeviceList({
-  icon,
-  title,
-  subtitle,
-  devices,
-  selected,
-  busy,
-  onPick,
-  onRefresh,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  subtitle: string;
-  devices: DeviceInfo[];
-  selected: string | null;
-  busy: boolean;
-  onPick: (name: string | null) => void;
-  onRefresh: () => void;
-}) {
-  const followingDefault = selected === null;
-  return (
-    <div className="rounded-xl border border-ds-border bg-ds-surface overflow-hidden">
-      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-ds-border">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="shrink-0">{icon}</span>
-          <div className="min-w-0">
-            <p className="text-base font-semibold text-ds-text leading-tight">{title}</p>
-            <p className="text-xs text-ds-text-muted mt-0.5 max-w-md truncate">{subtitle}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {busy ? <span className="text-[11px] text-ds-text-muted">switching…</span> : null}
-          <button
-            onClick={onRefresh}
-            className="text-[11px] text-ds-text-muted hover:text-ds-text px-2 py-1 rounded-lg hover:bg-ds-hover transition-colors"
-            title="Re-scan devices"
-          >
-            ↻ refresh
-          </button>
-        </div>
-      </div>
-
-      <ul className="divide-y divide-ds-border">
-        <DeviceRow
-          name="Follow system default"
-          hint="Whatever the OS picks; the bridge re-targets if it changes."
-          active={followingDefault}
-          onClick={() => onPick(null)}
-        />
-        {devices.map((d, i) => (
-          <DeviceRow
-            key={i}
-            name={d.name}
-            hint={d.is_default ? "current OS default" : undefined}
-            active={selected === d.name}
-            onClick={() => onPick(d.name)}
-          />
-        ))}
-        {devices.length === 0 ? (
-          <li className="px-5 py-8 text-center text-sm text-ds-text-muted">
-            none reported by cpal
-          </li>
-        ) : null}
-      </ul>
-    </div>
-  );
-}
-
-function DeviceRow({
-  name,
-  hint,
-  active,
-  onClick,
-}: {
-  name: string;
-  hint?: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <li>
-      <button
-        onClick={onClick}
-        title={name}
-        className={
-          "w-full flex items-center justify-between gap-4 px-5 py-3 transition-colors text-left " +
-          (active
-            ? "bg-ds-accent-soft"
-            : "hover:bg-ds-hover")
-        }
-      >
-        <div className="min-w-0 flex-1">
-          <p className={
-            "text-sm truncate " +
-            (active ? "font-semibold text-ds-accent" : "font-medium text-ds-text")
-          }>
-            {name}
-          </p>
-          {hint ? <p className="text-[11px] text-ds-text-muted mt-0.5">{hint}</p> : null}
-        </div>
-        <span
-          className={
-            "shrink-0 inline-flex items-center justify-center size-5 rounded-full transition-colors " +
-            (active
-              ? "bg-ds-accent text-ds-on-accent"
-              : "border border-ds-border")
-          }
-          aria-hidden
-        >
-          {active ? <CheckIcon /> : null}
-        </span>
-      </button>
-    </li>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="size-3">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-function IconSpeaker({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-      <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
-    </svg>
-  );
-}
-
-function IconMic({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-      <line x1="12" y1="19" x2="12" y2="23" />
-      <line x1="8" y1="23" x2="16" y2="23" />
-    </svg>
-  );
+  return <section className="panel p-5">
+    <h2 className="text-base font-semibold">{t("devices_title")}</h2>
+    <p className="muted mt-2 mb-5">{t("devices_hint")}</p>
+    {devices ? <fieldset disabled={busy} className="space-y-5">{([
+      { direction: "sysout_capture", label: "devices_capture", list: devices.outputs },
+      { direction: "output", label: "devices_output", list: devices.outputs },
+      { direction: "input", label: "devices_input", list: devices.inputs },
+    ] as const).map(({ direction, label, list }) => {
+      const selected = devices[`selected_${direction}`];
+      return <label className="block" key={direction}>
+        <span className="block mb-2 text-sm">{t(label)}</span>
+        <select className="w-full min-w-0 rounded-xl bg-ds-elevated border border-ds-border px-3 py-2.5 text-sm" value={selected === null ? "default" : `device:${selected}`} onChange={e => pick(direction, e.target.value === "default" ? null : e.target.value.slice(7))}>
+          <option value="default">{t("devices_default")}</option>
+          {selected !== null && !list.some(device => device.name === selected) && <option value={`device:${selected}`}>{selected}</option>}
+          {list.map(device => <option key={device.name} value={`device:${device.name}`}>{device.name}{device.is_default ? " ✓" : ""}</option>)}
+        </select>
+        {list.length === 0 && <span className="block mt-2 text-xs text-ds-text-muted">{t("devices_empty")}</span>}
+      </label>;
+    })}</fieldset> : !error && <p className="muted">{t("devices_loading")}</p>}
+    {error && <p role="alert" className="text-sm text-ds-danger mt-3">{error}</p>}
+  </section>;
 }

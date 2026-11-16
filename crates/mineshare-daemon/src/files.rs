@@ -103,6 +103,7 @@ pub struct TransferSnapshot {
 /// sender task owns its own.
 struct Transfer {
     id: u64,
+    clipboard: bool,
     direction: Direction,
     status: Status,
     name: String,
@@ -246,6 +247,10 @@ fn publish_without_overwrite(from: &Path, to: &Path) -> std::io::Result<()> {
 // ----------------------------------------------------------------------------
 
 pub fn register_outgoing(id: u64, source_path: &Path, size_bytes: u64) {
+    register_outgoing_file(id, source_path, size_bytes, false);
+}
+
+fn register_outgoing_file(id: u64, source_path: &Path, size_bytes: u64, clipboard: bool) {
     let name = source_path
         .file_name()
         .and_then(|s| s.to_str())
@@ -253,6 +258,7 @@ pub fn register_outgoing(id: u64, source_path: &Path, size_bytes: u64) {
         .to_string();
     let t = Transfer {
         id,
+        clipboard,
         direction: Direction::Sending,
         status: Status::Pending,
         name,
@@ -370,6 +376,7 @@ pub fn snapshot() -> Vec<TransferSnapshot> {
     with_state(|m| {
         let mut v: Vec<_> = m
             .values()
+            .filter(|t| !t.clipboard)
             .map(|t| TransferSnapshot {
                 id: t.id,
                 direction: t.direction,
@@ -402,7 +409,22 @@ pub async fn begin_incoming(id: u64, name: &str, size_bytes: u64) -> Result<()> 
     begin_incoming_at(id, name, size_bytes, &download_dir()).await
 }
 
-async fn begin_incoming_at(id: u64, name: &str, size_bytes: u64, dir: &Path) -> Result<()> {
+pub(crate) async fn begin_incoming_at(
+    id: u64,
+    name: &str,
+    size_bytes: u64,
+    dir: &Path,
+) -> Result<()> {
+    begin_incoming_file(id, name, size_bytes, dir, false).await
+}
+
+pub(crate) async fn begin_incoming_file(
+    id: u64,
+    name: &str,
+    size_bytes: u64,
+    dir: &Path,
+    clipboard: bool,
+) -> Result<()> {
     validate_offer(name, size_bytes)?;
     anyhow::ensure!(
         !with_state(|m| m.contains_key(&id)),
@@ -433,6 +455,7 @@ async fn begin_incoming_at(id: u64, name: &str, size_bytes: u64, dir: &Path) -> 
             id,
             Transfer {
                 id,
+                clipboard,
                 direction: Direction::Receiving,
                 status: Status::Active,
                 name: display_name,
@@ -633,7 +656,7 @@ pub fn start_send(source_path: PathBuf) -> Result<u64> {
     register_outgoing(id, &source_path, size_bytes);
 
     tokio::spawn(async move {
-        if let Err(e) = drive_send(id, source_path, size_bytes, tx.clone()).await {
+        if let Err(e) = drive_send(id, source_path, size_bytes, tx.clone(), None).await {
             mark_failed(id, format!("{e:#}"));
             let _ = tx.send(crate::runtime::ControlMsg::FileCancel { id }).await;
         }
@@ -642,20 +665,19 @@ pub fn start_send(source_path: PathBuf) -> Result<u64> {
 }
 
 pub const MAX_CLIPBOARD_FILES: usize = 64;
-const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Reuse the verified, non-overwriting transfer pipeline; clipboard references
 /// follow FileEnd on the SAME FIFO, never before the bytes are present.
-pub fn send_clipboard(paths: Vec<PathBuf>, runtime: &tokio::runtime::Handle) -> Result<()> {
+pub async fn send_clipboard(paths: Vec<PathBuf>, offer: u64, tx: ControlSender) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty() && paths.len() <= MAX_CLIPBOARD_FILES,
         "clipboard file count out of range"
     );
-    let tx = session_tx().context("no peer connected")?;
     let mut sources = Vec::with_capacity(paths.len());
     let mut total = 0u64;
     for path in paths {
-        let metadata = std::fs::metadata(&path)?;
+        let metadata = tokio::fs::metadata(&path).await?;
         anyhow::ensure!(metadata.is_file(), "clipboard folders are not supported");
         total = total
             .checked_add(metadata.len())
@@ -672,24 +694,24 @@ pub fn send_clipboard(paths: Vec<PathBuf>, runtime: &tokio::runtime::Handle) -> 
         )?;
         sources.push((path, metadata.len()));
     }
-    // This runs only on the dedicated clipboard OS thread, like send_image.
-    // Serialize copies so a slow old batch cannot overwrite a newer clipboard.
-    runtime.block_on(async move {
-        let mut ids = Vec::with_capacity(sources.len());
-        for (path, size) in sources {
-            let id = next_id();
-            register_outgoing(id, &path, size);
-            if let Err(e) = drive_send(id, path, size, tx.clone()).await {
-                mark_failed(id, format!("{e:#}"));
-                let _ = tx.send(crate::runtime::ControlMsg::FileCancel { id }).await;
-                return Err(e);
-            }
-            ids.push(id);
+    let mut ids = Vec::with_capacity(sources.len());
+    for (path, size) in sources {
+        let id = next_id();
+        register_outgoing_file(id, &path, size, true);
+        let result = drive_send(id, path, size, tx.clone(), Some(offer)).await;
+        if let Err(e) = &result {
+            mark_failed(id, format!("{e:#}"));
         }
-        tx.send(crate::runtime::ControlMsg::ClipboardFiles(ids))
-            .await
-            .context("control channel closed before clipboard publication")
-    })
+        with_state(|m| m.remove(&id));
+        if let Err(e) = result {
+            let _ = tx.send(crate::runtime::ControlMsg::FileCancel { id }).await;
+            return Err(e);
+        }
+        ids.push(id);
+    }
+    tx.send(crate::runtime::ControlMsg::ClipboardFiles { offer, ids })
+        .await
+        .context("control channel closed before clipboard publication")
 }
 
 pub fn received_clipboard_paths(ids: &[u64]) -> Result<Vec<PathBuf>> {
@@ -716,11 +738,24 @@ pub fn received_clipboard_paths(ids: &[u64]) -> Result<Vec<PathBuf>> {
     })
 }
 
+pub(crate) fn discard_clipboard_receives(ids: &[u64]) {
+    with_state(|m| {
+        for id in ids {
+            if m.get(id)
+                .is_some_and(|t| t.clipboard && t.direction == Direction::Receiving)
+            {
+                m.remove(id);
+            }
+        }
+    });
+}
+
 async fn drive_send(
     id: u64,
     source_path: PathBuf,
     size_bytes: u64,
     tx: ControlSender,
+    clipboard_offer: Option<u64>,
 ) -> Result<()> {
     use crate::runtime::ControlMsg as M;
 
@@ -740,13 +775,22 @@ async fn drive_send(
 
     // Send the offer up front so the receiver has the file size
     // and can render the progress bar from byte 0.
-    tx.send(M::FileOffer {
-        id,
-        name: name.clone(),
-        size_bytes,
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("control channel closed"))?;
+    let message = match clipboard_offer {
+        Some(offer) => M::ClipboardFileTransfer {
+            offer,
+            id,
+            name: name.clone(),
+            size_bytes,
+        },
+        None => M::FileOffer {
+            id,
+            name: name.clone(),
+            size_bytes,
+        },
+    };
+    tx.send(message)
+        .await
+        .map_err(|_| anyhow::anyhow!("control channel closed"))?;
     mark_active(id);
 
     loop {

@@ -21,10 +21,29 @@ import {
 } from "react";
 
 export type Locale = "en" | "th";
+import { workspaceEn, workspaceTh } from "./workspaceStrings";
 
 type Strings = Record<string, string>;
 
 const en: Strings = {
+  ...workspaceEn,
+  connections_title: "Connections",
+  connections_paused: "Connections paused",
+  connections_description: "Reconnects to your selected computer automatically. One computer at a time.",
+  connections_pause: "Disconnect & pause",
+  connections_resume: "Resume connections",
+  pair_start: "Choose a computer",
+  pair_stop: "Cancel pairing request",
+  pair_cancel: "Cancel / stop pairing",
+  pair_window: "Only the selected computer receives this request. It must accept before pairing starts.",
+  theme_system: "System (follow OS)",
+  theme_light: "Light",
+  theme_dark: "Dark",
+  startup_title: "Start with operating system",
+  startup_description: "Launch MineShare automatically when you sign in to this device.",
+  startup_loading: "Checking startup settings…",
+  startup_managed: "Startup is managed together with Typeless. Keep the ordered launcher to avoid keyboard conflicts.",
+  startup_enabled: "Start MineShare at sign-in",
   // Nav
   nav_status: "Status",
   nav_layout: "Layout",
@@ -103,13 +122,13 @@ const en: Strings = {
     "Two pipes per stream — outbound from this machine and inbound from the peer. Toggle either side off and the capture / playback keeps running for stats but the frames stop crossing the silent half. Takes effect on the next audio frame, no daemon restart.",
   audio_sysout_title: "System sound",
   audio_sysout_sub:
-    "WASAPI loopback (Win) / PipeWire monitor (Linux) — captures whatever your default speakers are playing",
+    "Sound playing on this computer",
   audio_mic_title: "Microphone",
-  audio_mic_sub: "cpal default input — your physical mic",
+  audio_mic_sub: "Voice from your selected microphone",
   audio_send: "Send to peer",
-  audio_send_hint: "forward locally captured frames",
+  audio_send_hint: "Share sound from this computer",
   audio_play: "Receive from peer",
-  audio_play_hint: "render peer's frames here",
+  audio_play_hint: "Use sound from the other computer",
 
   // Pairing
   pair_title_request: "Pairing request from",
@@ -121,7 +140,7 @@ const en: Strings = {
   pair_after_note:
     "Once paired, this peer auto-connects forever — no PIN next time.",
   pair_cancel_note:
-    "Cancel by closing this window or letting it time out (60 s).",
+    "Use Cancel / stop pairing to close this request and prevent automatic retries.",
   pair_verifying: "Verifying…",
   pair_verifying_sub: "checking the PIN with the peer",
   pair_success_title: "✓ Paired",
@@ -135,6 +154,24 @@ const en: Strings = {
 };
 
 const th: Strings = {
+  ...workspaceTh,
+  connections_title: "การเชื่อมต่อ",
+  connections_paused: "พักการเชื่อมต่ออยู่",
+  connections_description: "เชื่อมต่อกลับไปยังเครื่องที่เลือกให้อัตโนมัติ ใช้งานได้ครั้งละหนึ่งเครื่อง",
+  connections_pause: "ตัดการเชื่อมต่อ / พัก",
+  connections_resume: "เชื่อมต่ออีกครั้ง",
+  pair_start: "เลือกเครื่องในเครือข่าย",
+  pair_stop: "ยกเลิกคำขอจับคู่",
+  pair_cancel: "ยกเลิก / หยุดจับคู่",
+  pair_window: "ส่งคำขอถึงเครื่องที่เลือกเท่านั้น อีกฝั่งต้องยอมรับก่อนเริ่มจับคู่",
+  theme_system: "System (ตามระบบ)",
+  theme_light: "สว่าง",
+  theme_dark: "มืด",
+  startup_title: "เริ่มพร้อมระบบปฏิบัติการ",
+  startup_description: "เปิด MineShare อัตโนมัติเมื่อลงชื่อเข้าใช้เครื่องนี้",
+  startup_loading: "กำลังตรวจการเริ่มพร้อมระบบ…",
+  startup_managed: "จัดลำดับ startup ร่วมกับ Typeless อยู่ ต้องเก็บ launcher นี้ไว้เพื่อป้องกันคีย์บอร์ดขัดแย้งกัน",
+  startup_enabled: "เปิด MineShare เมื่อลงชื่อเข้าใช้",
   nav_status: "สถานะ",
   nav_layout: "ตำแหน่งจอ",
   nav_devices: "อุปกรณ์",
@@ -204,13 +241,13 @@ const th: Strings = {
     "มี 2 ทิศต่อ 1 stream — outbound จากเครื่องนี้ และ inbound จาก peer ปิดฝั่งใดฝั่งหนึ่ง capture/playback ยังทำงาน แต่ frames จะไม่ข้ามเครือข่าย ผลทันทีในเฟรมถัดไป ไม่ต้องรีสตาร์ท",
   audio_sysout_title: "เสียงระบบ",
   audio_sysout_sub:
-    "WASAPI loopback (Win) / PipeWire monitor (Linux) — จับเสียงจากลำโพง default",
+    "เสียงที่กำลังเล่นอยู่บนเครื่องนี้",
   audio_mic_title: "ไมโครโฟน",
-  audio_mic_sub: "cpal default input — ไมค์จริงของเครื่องนี้",
-  audio_send: "ส่งไป peer",
-  audio_send_hint: "forward frames ที่ capture ได้",
-  audio_play: "รับจาก peer",
-  audio_play_hint: "เล่น frames ของ peer ที่นี่",
+  audio_mic_sub: "เสียงพูดจากไมโครโฟนที่คุณเลือก",
+  audio_send: "ส่งไปอีกเครื่อง",
+  audio_send_hint: "แชร์เสียงจากเครื่องนี้",
+  audio_play: "รับจากอีกเครื่อง",
+  audio_play_hint: "ใช้เสียงที่ส่งมาจากอีกเครื่อง",
 
   pair_title_request: "คำขอจับคู่จาก",
   pair_title_pair_with: "จับคู่กับ",
@@ -219,7 +256,7 @@ const th: Strings = {
   pair_button: "จับคู่",
   pair_button_sending: "กำลังส่ง…",
   pair_after_note: "หลังจับคู่แล้ว peer จะเชื่อมต่ออัตโนมัติตลอด ไม่ต้องใส่ PIN อีก",
-  pair_cancel_note: "ยกเลิกได้โดยปิดหน้าต่างหรือปล่อย timeout (60 วินาที)",
+  pair_cancel_note: "กดยกเลิก / หยุดจับคู่ เพื่อปิดคำขอนี้และหยุดการลองจับคู่ซ้ำ",
   pair_verifying: "กำลังตรวจสอบ…",
   pair_verifying_sub: "เช็ค PIN กับ peer",
   pair_success_title: "✓ จับคู่สำเร็จ",
@@ -306,6 +343,8 @@ export function LanguageToggle() {
     <div className="inline-flex items-center text-[11px] font-medium border border-ds-border rounded-md overflow-hidden">
       <button
         onClick={() => setLocale("en")}
+        aria-label="English"
+        aria-pressed={locale === "en"}
         className={
           "px-2 py-1 transition-colors " +
           (locale === "en"
@@ -317,6 +356,8 @@ export function LanguageToggle() {
       </button>
       <button
         onClick={() => setLocale("th")}
+        aria-label="ภาษาไทย"
+        aria-pressed={locale === "th"}
         className={
           "px-2 py-1 transition-colors " +
           (locale === "th"

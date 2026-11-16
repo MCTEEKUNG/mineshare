@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeBundleCommand": "node ../installer/linux/build-deb-hooks.mjs"
+  }
+}

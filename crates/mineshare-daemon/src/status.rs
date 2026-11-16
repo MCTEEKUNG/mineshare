@@ -14,7 +14,21 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Display-only peer state; never changes input ownership or lock routing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LockVisual {
+    pub locked: bool,
+    pub effect: mineshare_input::LockEffect,
+}
+static PEER_LOCK_VISUAL: Mutex<Option<LockVisual>> = Mutex::new(None);
+pub(crate) fn set_peer_lock_visual(value: Option<LockVisual>) {
+    *PEER_LOCK_VISUAL.lock() = value.map(|v| LockVisual {
+        effect: v.effect.clamped(),
+        ..v
+    });
+}
 
 static PEER_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SENT_PKTS: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +66,8 @@ pub struct StatusSnapshot {
     /// move between machines.
     pub input_locked: bool,
     pub remote_input_locked: bool,
+    pub lock_effect: mineshare_input::LockEffect,
+    pub peer_lock_visual: Option<LockVisual>,
     /// "off" | "driving" | "receiving" — Game Drive state for the GUI.
     pub game_drive: &'static str,
     /// Set when the foreground process matches the anti-cheat-
@@ -100,6 +116,8 @@ pub fn snapshot() -> StatusSnapshot {
         peer_in_remote: mineshare_input::peer_in_remote(),
         input_locked: mineshare_input::is_input_locked(),
         remote_input_locked: mineshare_input::remote_input_locked(),
+        lock_effect: mineshare_input::current_lock_effect(),
+        peer_lock_visual: *PEER_LOCK_VISUAL.lock(),
         game_drive: match mineshare_input::game_drive() {
             mineshare_input::GameDrive::Driving => "driving",
             mineshare_input::GameDrive::Receiving => "receiving",
@@ -117,6 +135,7 @@ pub fn snapshot() -> StatusSnapshot {
 // --- runtime-side setters --------------------------------------------
 
 pub(crate) fn set_peer_connected(addr: String, name: Option<String>) {
+    set_peer_lock_visual(None);
     *PEER_ADDR.lock() = Some(addr);
     *PEER_NAME.lock() = name;
     PEER_CONNECTED.store(true, Ordering::Relaxed);
@@ -124,6 +143,7 @@ pub(crate) fn set_peer_connected(addr: String, name: Option<String>) {
 
 pub(crate) fn clear_peer_connected() {
     PEER_CONNECTED.store(false, Ordering::Relaxed);
+    set_peer_lock_visual(None);
     *PEER_ADDR.lock() = None;
     *PEER_NAME.lock() = None;
     *PEER_VERSION.lock() = None;
@@ -174,8 +194,20 @@ mod tests {
             ),
             (11, 12, 13, 14, 2, 3)
         );
+        set_peer_lock_visual(Some(LockVisual {
+            locked: true,
+            effect: mineshare_input::LockEffect {
+                duration_ms: 9000,
+                ..Default::default()
+            },
+        }));
+        assert_eq!(
+            snapshot().peer_lock_visual.unwrap().effect.duration_ms,
+            3000
+        );
         clear_peer_connected();
         let s = snapshot();
+        assert!(s.peer_lock_visual.is_none());
         assert_eq!(
             (
                 s.sent_pkts,

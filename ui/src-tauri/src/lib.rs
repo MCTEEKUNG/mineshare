@@ -5,8 +5,43 @@
 //! installs (M4) keep working with the standalone daemon binary;
 //! the Tauri shell is for users who want a window.
 
+mod linux_setup;
+mod startup;
 mod state;
 mod tray;
+
+#[tauri::command]
+async fn get_linux_setup_status() -> Result<linux_setup::Status, String> {
+    tauri::async_runtime::spawn_blocking(linux_setup::status)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn configure_linux_setup(
+    options: linux_setup::Options,
+) -> Result<linux_setup::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || linux_setup::configure(options))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_startup_status() -> Result<startup::Status, String> {
+    tauri::async_runtime::spawn_blocking(startup::status)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_startup_enabled(enabled: bool) -> Result<startup::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || startup::set(enabled))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
 
 use mineshare_daemon::audio_status::AudioStatus;
 use mineshare_daemon::latency::LatencySnapshot;
@@ -142,13 +177,43 @@ fn patch_settings(
 }
 
 #[tauri::command]
-fn get_pairing_phase() -> mineshare_daemon::pairing::PairingPhase {
-    mineshare_daemon::pairing::current_phase()
+fn get_pairing_phase() -> mineshare_daemon::pairing::PairingSnapshot {
+    mineshare_daemon::pairing::snapshot()
 }
 
 #[tauri::command]
-fn submit_pin(pin: String) {
-    mineshare_daemon::pairing::submit_pin(pin);
+fn submit_pin(pin: String, attempt_id: u64) -> Result<(), String> {
+    mineshare_daemon::pairing::submit_pin(pin, attempt_id)
+}
+
+#[tauri::command]
+fn get_connection_control() -> mineshare_daemon::runtime::ConnectionControl {
+    mineshare_daemon::runtime::connection_control()
+}
+
+#[tauri::command]
+fn set_connections_paused(paused: bool) {
+    mineshare_daemon::runtime::set_connections_paused(paused);
+}
+
+#[tauri::command]
+fn set_pairing_enabled(enabled: bool) -> Result<(), String> {
+    mineshare_daemon::runtime::set_pairing_enabled(enabled).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_nearby_peers() -> Vec<mineshare_daemon::runtime::NearbyPeer> {
+    mineshare_daemon::runtime::nearby_peers()
+}
+
+#[tauri::command]
+fn send_pairing_request(device_id: String) -> Result<(), String> {
+    mineshare_daemon::runtime::request_pairing(&device_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn respond_pairing_request(accept: bool, attempt_id: u64) -> Result<(), String> {
+    mineshare_daemon::pairing::respond_to_request(accept, attempt_id)
 }
 
 #[tauri::command]
@@ -252,6 +317,7 @@ fn promote_taskbar_window_icon(window: &tauri::WebviewWindow) -> tauri::Result<(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    initialize_gui_logging();
     info!("MineShare GUI starting");
 
     tauri::Builder::default()
@@ -303,6 +369,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_linux_setup_status,
+            configure_linux_setup,
+            get_startup_status,
+            set_startup_enabled,
             get_status,
             get_layout,
             set_layout,
@@ -327,12 +397,27 @@ pub fn run() {
             patch_settings,
             preview_lock_effect,
             get_pairing_phase,
+            get_connection_control,
+            set_connections_paused,
+            set_pairing_enabled,
+            list_nearby_peers,
+            send_pairing_request,
+            respond_pairing_request,
             submit_pin,
             list_trusted_peers,
             revoke_trusted_peer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn initialize_gui_logging() {
+    // Window/WebView creation can fail before Tauri calls `.setup()`. Install
+    // the existing file logger and panic hook now so automatic-launch failures
+    // leave a diagnosis. The keyboard worker returns in main before this path.
+    if let Err(error) = mineshare_daemon::logs::init() {
+        eprintln!("GUI logging initialization failed: {error:#}");
+    }
 }
 
 #[cfg(test)]

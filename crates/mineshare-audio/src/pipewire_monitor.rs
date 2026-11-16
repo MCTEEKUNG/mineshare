@@ -158,7 +158,7 @@ impl AudioCapture for PipewireMonitor {
 }
 
 fn drive_encode_loop<R: Read>(mut reader: R, sink: CaptureSink) -> Result<()> {
-    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, false)?;
+    let mut encoder = OpusEncoder::new(OPUS_BITRATE_BPS, StreamKind::SysOut)?;
     // 20 ms frame = 1920 interleaved f32 samples = 7680 bytes.
     let bytes_per_frame = FRAME_SAMPLES_INTERLEAVED * std::mem::size_of::<f32>();
     let mut byte_buf = vec![0u8; bytes_per_frame];

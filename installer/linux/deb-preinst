@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+# Lifecycle functions are embedded by build-deb-hooks.mjs, not loaded from disk.
+case "${1:-}" in
+    install|upgrade) ms_prepare_upgrade ;;
+esac

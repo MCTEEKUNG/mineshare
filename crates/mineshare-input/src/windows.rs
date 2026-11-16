@@ -69,16 +69,52 @@ mod touchpad;
 
 pub use keyboard_worker::{enable_gui_keyboard_worker, run_keyboard_worker_if_requested};
 
-/// RAII guard that releases the raised system timer resolution
-/// (`timeBeginPeriod(1)`) on drop. Held for the lifetime of the
-/// forward watchdog thread so the finer scheduler tick is only in
-/// effect while the bridge is actively forwarding motion.
-struct HighResTimerGuard;
+/// Raise the system timer to 1 ms for one [`super::HighResTimer`] holder.
+///
+/// Since Windows 11, a process with no visible or audible window (this app
+/// hidden in the tray) is not guaranteed a resolution finer than the default
+/// ~15.6 ms tick, so `timeBeginPeriod(1)` alone can silently do nothing. Opt
+/// out of that throttling once, as documented for `SetProcessInformation`.
+/// Holders are only taken while motion is actively forwarded or injected, so
+/// idle power use is unchanged.
+pub(crate) fn begin_high_res_timer() {
+    honor_timer_resolution_when_hidden();
+    unsafe { timeBeginPeriod(1) };
+}
 
-impl Drop for HighResTimerGuard {
-    fn drop(&mut self) {
-        unsafe { timeEndPeriod(1) };
-    }
+pub(crate) fn end_high_res_timer() {
+    unsafe { timeEndPeriod(1) };
+}
+
+fn honor_timer_resolution_when_hidden() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // ControlMask selects the policy; a cleared StateMask means "do not
+        // throttle", i.e. always honour timer-resolution requests.
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let result = unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+                mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            )
+        };
+        match result {
+            Ok(()) => info!("timer resolution requests honoured while hidden"),
+            // Pre-Windows 11 builds reject the flag; they never throttled it.
+            Err(error) => debug!(%error, "timer-resolution throttling opt-out unavailable"),
+        }
+    });
 }
 
 const MODE_LOCAL: u8 = 0;
@@ -411,8 +447,7 @@ fn start_motion_flush_watchdog() {
                 // The default Windows scheduler tick is ~15.6 ms. Raise it
                 // only for an active remote-driving interval, then release it
                 // as soon as control returns local.
-                unsafe { timeBeginPeriod(1) };
-                let timer_guard = HighResTimerGuard;
+                let timer_guard = super::HighResTimer::acquire();
                 while forwarding_active() {
                     let now_us = monotonic_us();
                     let deadline = NEXT_FLUSH_DEADLINE_US.load(Ordering::Acquire);
@@ -1657,6 +1692,16 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         let scan = info.scanCode;
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
         let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+        static FILE_PASTE_HELD: AtomicBool = AtomicBool::new(false);
+        if scan == 0x2f && FILE_PASTE_HELD.load(Ordering::Relaxed) {
+            if up {
+                FILE_PASTE_HELD.store(false, Ordering::Relaxed);
+            }
+            return LRESULT(1);
+        }
+        if down && scan != 0x2f {
+            super::note_paste_interaction();
+        }
         // A held shortcut is one toggle, not a stream of lock/unlock flashes.
         if scan == SCAN_HOTKEY_LOCK && LOCK_HOTKEY_HELD.load(Ordering::Relaxed) {
             if up {
@@ -1772,6 +1817,16 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
             let pass_local_release =
                 up && touchpad::take_legacy_passthrough_release(scan, extended);
             let routed = route_physical_key(scan, info.vkCode, extended, down, mode == MODE_REMOTE);
+            if down
+                && !routed
+                && scan == 0x2f
+                && win_key_down(0x11)
+                && !paste_modifier_conflict()
+                && super::request_file_paste()
+            {
+                FILE_PASTE_HELD.store(true, Ordering::Relaxed);
+                return LRESULT(1);
+            }
             if matches!(scan, 0x2a | 0x36) {
                 info!(
                     scan,
@@ -1806,6 +1861,20 @@ unsafe fn process_keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         }
     }
     LRESULT(0)
+}
+
+fn win_key_down(vk: i32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    (unsafe { GetAsyncKeyState(vk) }) < 0
+}
+
+fn paste_modifier_conflict() -> bool {
+    [0x10, 0x12, 0x5b, 0x5c].into_iter().any(win_key_down)
+}
+
+pub(super) fn paste_window() -> Option<u64> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    (!hwnd.0.is_null()).then_some(hwnd.0 as usize as u64)
 }
 
 fn route_physical_key(
@@ -1849,6 +1918,7 @@ pub(super) fn route_touchpad_capture_key(scan: u32, vk: u32, extended: bool, dow
 /// knows whether to call enigo's button() or key() to clear it.
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 enum HeldKey {
+    PasteV,
     MouseBtn(Button),
     Key(u16),
 }
@@ -1988,22 +2058,73 @@ fn should_emit_mouse_motion_packet(
     game_foreground: bool,
     game_drive: super::GameDrive,
     mouse_button_held: bool,
-    cursor_suppressed: bool,
+    cursor_needs_motion_packet: bool,
 ) -> bool {
     should_use_true_relative_injection(game_foreground, game_drive)
         || mouse_button_held
-        || cursor_suppressed
+        || cursor_needs_motion_packet
 }
 
-fn desktop_cursor_suppressed() -> bool {
+fn desktop_cursor_needs_motion_packet() -> bool {
     let mut info = CURSORINFO {
         cbSize: std::mem::size_of::<CURSORINFO>() as u32,
         ..Default::default()
     };
-    // Touch/pen suppression is distinct from a game or application choosing
-    // to hide its pointer. Never change ShowCursor's per-thread display count
-    // or steal foreground to recover this OS-owned state.
-    unsafe { GetCursorInfo(&mut info) }.is_ok() && info.flags.0 & CURSOR_SUPPRESSED.0 != 0
+    // A terminal may hide the pointer without touch/pen suppression (flags=0).
+    // Let the foreground app see mouse motion and decide whether to restore it;
+    // never force ShowCursor's per-thread count or change foreground ownership.
+    unsafe { GetCursorInfo(&mut info) }.is_ok() && cursor_flags_need_motion_packet(info.flags.0)
+}
+
+fn cursor_flags_need_motion_packet(flags: u32) -> bool {
+    flags & CURSOR_SHOWING.0 == 0 || flags & CURSOR_SUPPRESSED.0 != 0
+}
+
+fn terminal_needs_pointer_notification(flags: u32, class: &str) -> bool {
+    flags == 0 && class == "CASCADIA_HOSTING_WINDOW_CLASS"
+}
+
+fn notify_hidden_terminal_of_peer_motion() {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, PostMessageW, WM_POINTERUPDATE};
+    let mut ci = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetCursorInfo(&mut ci) }.is_err() || ci.flags.0 != 0 {
+        return;
+    }
+    // Windows Terminal hides via its own ShowCursor count, and restores only
+    // on pointer updates or activation, not legacy WM_MOUSEMOVE (IslandWindow::
+    // ShowCursorMaybe). Notify its host, not its content/input child: there is
+    // no button or activation. Avoid WM_NCPOINTERUPDATE, whose default handling
+    // can select a non-client window-resize cursor over terminal content.
+    // Source: microsoft/terminal/src/cascadia/WindowsTerminal/IslandWindow.cpp.
+    let target = unsafe { GetAncestor(WindowFromPoint(ci.ptScreenPos), GA_ROOT) };
+    let mut class = [0u16; 128];
+    let len = unsafe { GetClassNameW(target, &mut class) };
+    if len <= 0
+        || !terminal_needs_pointer_notification(
+            ci.flags.0,
+            &String::from_utf16_lossy(&class[..len as usize]),
+        )
+    {
+        return;
+    }
+    // Posting is nonblocking even when Terminal is busy. Do not time-throttle:
+    // a key can hide it again immediately after restoration, and a single new
+    // mouse movement must still restore it. Only actual hidden peer motion
+    // posts a notice; visible motion and idle time never do.
+    let point = (ci.ptScreenPos.x as u16 as u32) | ((ci.ptScreenPos.y as u16 as u32) << 16);
+    // Pointer ID zero deliberately supplies no client pointer to dispatch;
+    // Terminal's host uses only the message kind to balance its hidden state.
+    let _ = unsafe {
+        PostMessageW(
+            Some(target),
+            WM_POINTERUPDATE,
+            WPARAM(0),
+            LPARAM(point as isize),
+        )
+    };
 }
 
 impl InputInject for EnigoInject {
@@ -2023,16 +2144,18 @@ impl InputInject for EnigoInject {
             game_foreground,
             game_drive,
             mouse_button_held,
-            !mouse_button_held && desktop_cursor_suppressed(),
+            !mouse_button_held && desktop_cursor_needs_motion_packet(),
         ) {
             // Drag-sensitive Windows surfaces (notably the Win+Shift+S
             // snipping overlay) require real mouse-move packets while a
             // button is held. A touch-first desktop (including after boot)
-            // also needs a mouse packet to exit CURSOR_SUPPRESSED. SetCursorPos
-            // only moves the position; it cannot restore the input modality.
+            // also needs a mouse packet to exit CURSOR_SUPPRESSED. Terminals
+            // hiding the pointer need motion notification too: SetCursorPos
+            // alone changes position without restoring their hidden pointer.
             // Send the requested movement once, without clicks, extra motion,
             // foreground changes, or an unbalanced ShowCursor call.
             send_desktop_mouse_move(dx, dy)?;
+            notify_hidden_terminal_of_peer_motion();
         } else {
             // An already-visible desktop deliberately avoids SendInput. Every SendInput
             // call traverses the machine-wide low-level-hook chain; on the
@@ -2046,6 +2169,9 @@ impl InputInject for EnigoInject {
     }
 
     fn mouse_button(&self, btn: Button, down: bool) -> Result<()> {
+        if down {
+            super::note_paste_interaction();
+        }
         if down {
             // A real click chooses its own target; never override it later.
             REMOTE_FOCUS_HANDOFF.arm(false);
@@ -2078,6 +2204,9 @@ impl InputInject for EnigoInject {
     }
 
     fn key(&self, code: KeyCode, down: bool) -> Result<()> {
+        if down && code.0 != 47 {
+            super::note_paste_interaction();
+        }
         let trace_alt_tab = matches!(code.0, 15 | 56 | 100);
         let started = trace_alt_tab.then(Instant::now);
         if down {
@@ -2085,6 +2214,23 @@ impl InputInject for EnigoInject {
         }
         let edge = HeldKey::Key(code.0);
         let mut held = self.held.lock();
+        if code.0 == 47 {
+            if held.contains(&HeldKey::PasteV) {
+                if !down {
+                    held.remove(&HeldKey::PasteV);
+                }
+                return Ok(());
+            }
+            if down
+                && !held.contains(&edge)
+                && (held.contains(&HeldKey::Key(29)) || held.contains(&HeldKey::Key(97)))
+                && !paste_modifier_conflict()
+                && super::request_file_paste()
+            {
+                held.insert(HeldKey::PasteV);
+                return Ok(());
+            }
+        }
         if !should_inject_owned_edge(&held, edge, down) {
             debug!(scancode = code.0, "ignored unowned injected key release");
             return Ok(());
@@ -2130,6 +2276,7 @@ impl InputInject for EnigoInject {
                         .context("enigo button release")
                 }
                 HeldKey::Key(code) => self.inject_key(KeyCode(code), false),
+                HeldKey::PasteV => Ok(()),
             };
             match res {
                 Ok(()) => released += 1,
@@ -2165,6 +2312,14 @@ impl InputInject for EnigoInject {
 
     fn touchpad(&self, event: TouchpadEvent) -> Result<()> {
         touchpad::inject(event)
+    }
+
+    fn paste_in_window(&self, window: u64) -> Result<()> {
+        let _held = self.held.lock();
+        if paste_window() == Some(window) && !paste_modifier_conflict() {
+            super::paste_keys(win_key_down(0x11), |code, down| self.inject_key(code, down))?;
+        }
+        Ok(())
     }
 }
 
@@ -2356,6 +2511,85 @@ const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hidden_terminal_cursor_needs_motion_without_a_click() {
+        assert!(cursor_flags_need_motion_packet(0));
+        assert!(cursor_flags_need_motion_packet(CURSOR_SUPPRESSED.0));
+        assert!(!cursor_flags_need_motion_packet(CURSOR_SHOWING.0));
+    }
+
+    #[test]
+    fn pointer_visibility_notice_is_scoped_to_hidden_windows_terminal() {
+        assert!(terminal_needs_pointer_notification(
+            0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            CURSOR_SHOWING.0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            CURSOR_SUPPRESSED.0,
+            "CASCADIA_HOSTING_WINDOW_CLASS"
+        ));
+        assert!(!terminal_needs_pointer_notification(
+            0,
+            "ConsoleWindowClass"
+        ));
+        assert!(!terminal_needs_pointer_notification(0, "Roblox"));
+    }
+
+    #[test]
+    #[ignore = "live Windows desktop: reopen OpenCode to hide cursor; moves cursor one pixel"]
+    fn live_peer_motion_restores_terminal_hidden_cursor() {
+        let inject = EnigoInject::new().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(180);
+        loop {
+            let mut ci = CURSORINFO {
+                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                ..Default::default()
+            };
+            unsafe { GetCursorInfo(&mut ci) }.unwrap();
+            if ci.flags.0 == 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "precondition: terminal-hidden cursor not reproduced"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!game_foreground(), "test requires a non-game foreground");
+        let foreground = unsafe { GetForegroundWindow() };
+        inject.mouse_move_rel(1, 0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetCursorInfo(&mut ci) }.unwrap();
+        assert_ne!(
+            ci.flags.0 & CURSOR_SHOWING.0,
+            0,
+            "peer movement left terminal cursor hidden"
+        );
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW,
+        };
+        for resize in [IDC_SIZEWE, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZENESW] {
+            assert_ne!(
+                ci.hCursor,
+                unsafe { LoadCursorW(None, resize) }.unwrap(),
+                "recovery left a resize cursor; reproduce over terminal content"
+            );
+        }
+        assert_eq!(
+            unsafe { GetForegroundWindow() },
+            foreground,
+            "motion stole foreground"
+        );
+    }
+
     #[test]
     #[ignore = "live Windows desktop: touch the screen first; moves cursor one pixel"]
     fn live_peer_motion_restores_touch_suppressed_cursor() {

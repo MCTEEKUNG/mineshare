@@ -5,8 +5,15 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 config=${XDG_CONFIG_HOME:-$HOME/.config}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
-[[ -x "$HOME/.local/bin/mineshare-app" && -x /opt/Typeless/typeless ]]
-[[ -f "$config/autostart/MineShare.desktop" ]]
+if [[ ${1:-} == --keyboard-only ]]; then
+    mkdir -p "$config/MineShare"
+    printf 'enabled\n' > "$config/MineShare/keyboard-broker.enabled"
+    echo 'Keyboard broker enabled. Restart MineShare when ready.'
+    exit 0
+fi
+launcher="${1:-/usr/bin/mineshare-app}"
+if [[ ! -x $launcher ]]; then launcher="$HOME/.local/bin/mineshare-app"; fi
+[[ -x "$launcher" ]]
 backup="$data/MineShare/backups/typeless-compat-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$backup" "$config/MineShare" "$config/autostart" "$HOME/.local/bin"
 mkdir -p "$data/MineShare"
@@ -21,6 +28,7 @@ if [[ ! -f "$original" ]]; then
     else
         source=/usr/share/applications/typeless.desktop
     fi
+    [[ -r $source ]] || { echo 'Typeless desktop entry not found.' >&2; exit 1; }
     install -m 644 "$source" "$original"
 fi
 for name in MineShare.desktop typeless.desktop; do
@@ -29,6 +37,12 @@ for name in MineShare.desktop typeless.desktop; do
     fi
 done
 install -m 755 "$root/installer/linux/start-typeless-after-mineshare.sh" "$HOME/.local/bin/mineshare-typeless-start"
+for item in "$HOME/.local/bin/mineshare-typeless-prepare" "$data/MineShare/typeless-ordered.desktop"; do
+    [[ ! -e "$item" ]] || cp -a -- "$item" "$backup/$(basename "$item")"
+done
+install -m 755 "$root/installer/linux/prepare-typeless-autostart.sh" "$HOME/.local/bin/mineshare-typeless-prepare"
+# Remember the selected executable (path only, never a shell command).
+printf '%s\n' "$launcher" > "$data/MineShare/keyboard-broker-launcher"
 printf 'enabled\n' > "$config/MineShare/keyboard-broker.enabled"
 exec_path="$HOME/.local/bin/mineshare-typeless-start"
 exec_path=${exec_path//\\/\\\\}
@@ -49,6 +63,30 @@ X-GNOME-Autostart-enabled=true
 StartupNotify=false
 EOF
 done
+install -m 644 "$config/autostart/MineShare.desktop" "$data/MineShare/typeless-ordered.desktop"
+# GNOME 50 launches autostarts directly in app-gnome-*.scope. A drop-in on
+# app-typeless@autostart.service does not cover that path. Repair the managed
+# entries before the session manager can cache them, not at a later login target.
+session_guard="$config/systemd/user/gnome-session-manager@.service.d/50-mineshare-order.conf"
+mkdir -p "$(dirname "$session_guard")"
+[[ ! -e "$session_guard" ]] || cp -a -- "$session_guard" "$backup/gnome-session-manager.conf"
+# Do not prevent desktop login if optional MineShare files are damaged. The
+# helper itself checks the opt-in marker; never condition the GNOME unit on it.
+printf '[Service]\nExecStartPre=-"%%h/.local/bin/mineshare-typeless-prepare"\n' > "$session_guard"
+# Typeless can delete its per-user desktop override when its own login setting
+# is off. GNOME then falls back to the system-wide desktop entry and races our
+# coordinator. Keep a separate, conditional user-unit guard: only the opt-in
+# broker disables that duplicate autostart; manual launches remain untouched.
+guard="$config/systemd/user/app-typeless@autostart.service.d/50-mineshare-order.conf"
+mkdir -p "$(dirname "$guard")"
+[[ ! -e "$guard" ]] || cp -a -- "$guard" "$backup/50-mineshare-order.conf"
+condition="$config/MineShare/keyboard-broker.enabled"
+[[ "$condition" != *$'\n'* && "$condition" != *$'\r'* ]]
+condition=${condition//%/%%}
+printf '[Unit]\nConditionPathExists=!%s\n' "$condition" > "$guard"
+if [[ -n ${XDG_RUNTIME_DIR:-} && -S $XDG_RUNTIME_DIR/bus ]] && command -v systemctl >/dev/null; then
+    systemctl --user daemon-reload
+fi
 if command -v desktop-file-validate >/dev/null; then
     desktop-file-validate "$config/autostart/MineShare.desktop" "$config/autostart/typeless.desktop"
 fi

@@ -11,6 +11,12 @@
 
 set -e
 
+# An upgrade must retain the device-access rule until the new postinst succeeds.
+case "${1:-}" in
+    remove) ;;
+    *) exit 0 ;;
+esac
+
 rm -f /etc/udev/rules.d/60-mineshare.rules
 udevadm control --reload-rules >/dev/null 2>&1 || true
 

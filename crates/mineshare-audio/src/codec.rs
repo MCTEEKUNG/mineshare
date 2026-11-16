@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::{CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE};
+use crate::{CHANNELS, FRAME_SAMPLES_INTERLEAVED, SAMPLE_RATE, StreamKind};
 
 /// Maximum Opus payload size we expect to see. 1500 is well above the
 /// realistic worst case at our bitrate but keeps a safe ceiling for
@@ -20,10 +20,10 @@ pub struct OpusEncoder {
 }
 
 impl OpusEncoder {
-    /// `inband_fec`: enable Opus in-band FEC (LBRR). Worth it for the
-    /// mic/voice stream; near-useless for stereo music sysout, so the
-    /// callers pass `false` there.
-    pub fn new(bitrate_bps: i32, inband_fec: bool) -> Result<Self> {
+    /// Voice uses FEC and DTX. System audio must preserve quiet music and
+    /// short sounds even after the encoder has learned a loud noise floor.
+    pub fn new(bitrate_bps: i32, stream: StreamKind) -> Result<Self> {
+        let voice = matches!(stream, StreamKind::Mic);
         let mut enc = opus::Encoder::new(SAMPLE_RATE, channels(), opus::Application::Audio)
             .context("opus encoder init")?;
         enc.set_bitrate(opus::Bitrate::Bits(bitrate_bps))
@@ -31,10 +31,11 @@ impl OpusEncoder {
         // Explicit VBR — libopus defaults to VBR on, but set it so the
         // intent is visible and stable across crate versions.
         enc.set_vbr(true).context("opus set vbr")?;
-        // DTX lets the transport suppress comfort-noise frames while a
-        // source is silent instead of waking the Wi-Fi radio 50 times/s.
-        enc.set_dtx(true).context("opus set dtx")?;
-        if inband_fec {
+        // Speech DTX can mistake quiet system sounds for background noise.
+        // CELT's compact digital-silence payloads remain transport-suppressed
+        // without DTX; microphone speech keeps its existing DTX/FEC behavior.
+        enc.set_dtx(voice).context("opus set dtx")?;
+        if voice {
             enc.set_inband_fec(true).context("opus set inband fec")?;
             // Tell the encoder roughly how lossy the link is so it sizes
             // LBRR redundancy. 10% is a reasonable LAN-with-jitter default.
@@ -46,7 +47,7 @@ impl OpusEncoder {
                 opus::Bitrate::Bits(n) => n,
                 _ => -1,
             }),
-            inband_fec,
+            ?stream,
             "opus encoder configured"
         );
         Ok(Self {
@@ -153,7 +154,7 @@ mod tests {
 
     #[test]
     fn encoder_builds_with_fec_flag_and_encodes() {
-        let mut enc = OpusEncoder::new(128_000, true).expect("encoder");
+        let mut enc = OpusEncoder::new(128_000, StreamKind::Mic).expect("encoder");
         let pcm = vec![0.05f32; FRAME_SAMPLES_INTERLEAVED];
         let payload = enc.encode(&pcm).expect("encode");
         assert!(!payload.is_empty());
@@ -169,7 +170,7 @@ mod tests {
 
     #[test]
     fn silence_converges_to_a_tiny_dtx_payload() {
-        let mut encoder = OpusEncoder::new(48_000, true).unwrap();
+        let mut encoder = OpusEncoder::new(48_000, StreamKind::Mic).unwrap();
         let silence = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
         let mut last = Vec::new();
         for _ in 0..25 {
@@ -178,6 +179,58 @@ mod tests {
         assert!(
             last.len() <= 3,
             "DTX silence payload was {} bytes",
+            last.len()
+        );
+    }
+
+    #[test]
+    fn quiet_sysout_bursts_survive_after_loud_noise() {
+        let mut encoder = OpusEncoder::new(128_000, StreamKind::SysOut).unwrap();
+        let mut noise = 123_456_789u32;
+        let mut frame = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+        let mut fill_noise = |frame: &mut [f32], gain: f32| {
+            for stereo in frame.chunks_exact_mut(2) {
+                noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let value = ((noise >> 8) as f32 / 8_388_608.0 - 1.0) * gain;
+                stereo.fill(value);
+            }
+        };
+        // Reproduce the noise-floor history of an existing audio session,
+        // then short quiet notifications separated by digital silence.
+        for _ in 0..500 {
+            fill_noise(&mut frame, 0.3);
+            encoder.encode(&frame).unwrap();
+        }
+        let mut audible_bursts = 0;
+        for _ in 0..64 {
+            let mut audible = false;
+            for tick in 0..25 {
+                if tick < 2 {
+                    fill_noise(&mut frame, 0.0006);
+                } else {
+                    frame.fill(0.0);
+                }
+                let payload = encoder.encode(&frame).unwrap();
+                if tick < 4 && payload.len() > 3 {
+                    audible = true;
+                }
+            }
+            audible_bursts += usize::from(audible);
+        }
+        assert_eq!(audible_bursts, 64, "quiet sysout was suppressed as silence");
+    }
+
+    #[test]
+    fn sysout_digital_silence_stays_transport_suppressed() {
+        let mut encoder = OpusEncoder::new(128_000, StreamKind::SysOut).unwrap();
+        let silence = vec![0.0; FRAME_SAMPLES_INTERLEAVED];
+        let mut last = Vec::new();
+        for _ in 0..25 {
+            last = encoder.encode(&silence).unwrap();
+        }
+        assert!(
+            last.len() <= 3,
+            "idle sysout payload was {} bytes",
             last.len()
         );
     }

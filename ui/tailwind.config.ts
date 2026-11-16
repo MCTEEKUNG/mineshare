@@ -9,7 +9,8 @@ export default {
         sans: [
           "Segoe UI Variable",
           "Segoe UI",
-          "Inter",
+          "Leelawadee UI",
+          "Noto Sans Thai",
           "system-ui",
           "sans-serif",
         ],
@@ -17,6 +18,18 @@ export default {
       colors: {
         ds: {
           bg: "var(--ds-bg)",
+          "control-border": "var(--ds-control-border)",
+          "success": "var(--ds-success)",
+          "success-soft": "var(--ds-success-soft)",
+          "success-border": "var(--ds-success-border)",
+          "warning": "var(--ds-warning)",
+          "danger": "var(--ds-danger)",
+          "danger-soft": "var(--ds-danger-soft)",
+          "danger-border": "var(--ds-danger-border)",
+          "info": "var(--ds-info)",
+          "info-soft": "var(--ds-info-soft)",
+          "info-border": "var(--ds-info-border)",
+
           surface: "var(--ds-surface)",
           elevated: "var(--ds-elevated)",
           sidebar: "var(--ds-sidebar)",

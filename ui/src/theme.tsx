@@ -14,6 +14,7 @@ import {
   useEffect,
   useState,
 } from "react";
+import { useT } from "./i18n";
 
 export type ThemeChoice = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
@@ -26,9 +27,13 @@ export function resolveTheme(choice: ThemeChoice, prefersDark: boolean): Resolve
 const STORAGE_KEY = "mineshare.theme";
 const ThemeCtx = createContext<{ choice: ThemeChoice; setChoice: (c: ThemeChoice) => void } | null>(null);
 
+export function parseThemeChoice(value: string | null): ThemeChoice {
+  return value === "light" || value === "dark" ? value : "system";
+}
+
 function readChoice(): ThemeChoice {
-  const v = localStorage.getItem(STORAGE_KEY);
-  return v === "light" || v === "dark" || v === "system" ? v : "light";
+  try { return parseThemeChoice(localStorage.getItem(STORAGE_KEY)); }
+  catch { return "system"; }
 }
 
 export function applyTheme(choice: ThemeChoice) {
@@ -45,13 +50,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [choice, setChoiceState] = useState<ThemeChoice>(readChoice);
   const setChoice = useCallback((c: ThemeChoice) => {
     setChoiceState(c);
-    localStorage.setItem(STORAGE_KEY, c);
+    try { localStorage.setItem(STORAGE_KEY, c); } catch { /* Keep this session usable. */ }
     applyTheme(c);
   }, []);
   useEffect(() => {
     applyTheme(choice);
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => { if (readChoice() === "system") applyTheme("system"); };
+    const onChange = () => { if (choice === "system") applyTheme("system"); };
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, [choice]);
@@ -65,14 +70,15 @@ export function useTheme() {
 }
 
 export function ThemeSwitcher() {
+  const { t } = useT();
   const { choice, setChoice } = useTheme();
-  const opts: ThemeChoice[] = ["light", "dark", "system"];
+  const opts: ThemeChoice[] = ["system", "light", "dark"];
   return (
     <div className="inline-flex rounded-lg border border-ds-border overflow-hidden">
       {opts.map((o) => (
-        <button key={o} onClick={() => setChoice(o)}
+        <button key={o} onClick={() => setChoice(o)} aria-pressed={choice === o}
           className={"px-3 py-1.5 text-xs capitalize " + (choice === o ? "bg-ds-hover text-ds-text" : "text-ds-text-muted hover:text-ds-text")}>
-          {o}
+          {t(`theme_${o}`)}
         </button>
       ))}
     </div>

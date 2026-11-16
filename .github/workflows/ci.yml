@@ -43,11 +43,32 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check GUI and CLI production profiles
+        run: python tools/performance/check-release-profile.py
+
+      - name: Linux installer lifecycle tests
+        if: runner.os == 'Linux'
+        run: |
+          node installer/linux/build-deb-hooks.mjs
+          bash -n ui/src-tauri/target/deb-hooks/preinst ui/src-tauri/target/deb-hooks/postinst installer/linux/deb-prerm
+          bash installer/linux/test-deb-lifecycle.sh
+          node installer/linux/test-gnome-pointer.mjs
+          bash installer/linux/test-typeless-startup.sh
+          sudo --preserve-env=GITHUB_ACTIONS bash installer/linux/test-deb-upgrade.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace --all-targets --locked
+
+      - name: Private Wayland pointer bridge transport test
+        if: runner.os == 'Linux'
+        run: env -u DISPLAY -u WAYLAND_DISPLAY MINESHARE_TEST_PRIVATE_BUS=1 dbus-run-session -- cargo test -p mineshare-input private_bus_roundtrip_and_timeout --locked -- --ignored
 
   ui:
     name: ui (tauri) / ${{ matrix.os }}
@@ -110,6 +131,14 @@ jobs:
       - name: cargo check (tauri backend)
         working-directory: ui/src-tauri
         run: cargo check --all-targets --locked
+
+      - name: Ubuntu setup backend tests
+        if: runner.os == 'Linux'
+        working-directory: ui/src-tauri
+        run: |
+          sudo apt-get install -y pkexec
+          cargo test --lib linux_setup:: --locked
+          bash ../../installer/linux/test-setup-flow.sh
 
       - name: Windows installer helper checks
         if: runner.os == 'Windows'

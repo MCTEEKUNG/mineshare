@@ -30,6 +30,7 @@ serde = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 dirs = "6"
+tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 time = { workspace = true }
 bincode = { workspace = true }
@@ -43,8 +44,12 @@ sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hostname = "0.4"
+percent-encoding = "2"
+wl-clipboard-rs = "0.9"
+x11-clipboard = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+clipboard-win = "5.4.1"
 hostname = "0.4"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -53,3 +58,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_System_StationsAndDesktops"] }
