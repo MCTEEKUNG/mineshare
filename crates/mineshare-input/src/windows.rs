@@ -3312,6 +3312,46 @@ mod tests {
         );
     }
 
+    /// Manual: `cargo test -p mineshare-input --release --lib -- --ignored
+    /// --nocapture --test-threads=1 relative_sendinput_cadence_bench`.
+    /// The pointer-lock game path calls `SendInput` (which walks the
+    /// machine-wide low-level-hook chain) once per injected move. Alternating
+    /// +1/-1 px keeps the net movement zero. Prints call latency at 500 Hz and
+    /// 1,000 Hz so the cost of a faster receive rate can be judged.
+    #[test]
+    #[ignore = "manual live benchmark; briefly sends net-zero relative mouse moves"]
+    fn relative_sendinput_cadence_bench() {
+        for (hz, period_us) in [
+            (500u32, 2_000u64),
+            (1_000, 1_000),
+            (500, 2_000),
+            (1_000, 1_000),
+        ] {
+            let mut samples = Vec::with_capacity(3_000);
+            let start = std::time::Instant::now();
+            for i in 0u64..3_000 {
+                let at = start + std::time::Duration::from_micros(i * period_us);
+                while std::time::Instant::now() < at {
+                    std::hint::spin_loop();
+                }
+                let dx = if i % 2 == 0 { 1 } else { -1 };
+                let began = std::time::Instant::now();
+                send_relative_mouse_input(dx, 0).expect("SendInput relative move");
+                samples.push(began.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            let q = |p: usize| samples[(samples.len() - 1) * p / 100];
+            println!(
+                "SENDINPUT hz={hz} p50={} p90={} p99={} p99.9={} max={}",
+                q(50),
+                q(90),
+                q(99),
+                samples[(samples.len() - 1) * 999 / 1000],
+                samples[samples.len() - 1]
+            );
+        }
+    }
+
     #[test]
     #[ignore = "manual live latency gate; briefly moves the real Windows cursor"]
     fn desktop_inject_path_has_no_user_visible_stalls() {
