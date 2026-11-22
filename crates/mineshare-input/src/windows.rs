@@ -1436,6 +1436,15 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
         return;
     }
 
+    // Synthetic input (our own SendInput injection, which games receive as
+    // true-relative motion) reaches WM_INPUT with a NULL device handle. It is
+    // not this machine's hardware: counting it as local activity made the
+    // first injected move after a peer take-over look like the laptop's own
+    // mouse and released the peer's control within milliseconds.
+    if raw.header.hDevice.0.is_null() {
+        return;
+    }
+
     let dx = mouse.lLastX;
     let dy = mouse.lLastY;
     if dx == 0 && dy == 0 {
