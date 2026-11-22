@@ -303,6 +303,23 @@ mod tests {
             let sent: Arc<Vec<AtomicU64>> =
                 Arc::new((0..TOTAL).map(|_| AtomicU64::new(0)).collect());
             let ages = rt.block_on(async {
+                // HUB_SATURATE=1: two compute-bound tasks keep both workers
+                // permanently busy (a worst-case burst of file/audio work), so
+                // a realtime worker never blocks and must be demoted by the
+                // RLIMIT_RTTIME guard instead of killing the process.
+                if std::env::var_os("HUB_SATURATE").is_some() {
+                    for _ in 0..2 {
+                        tokio::spawn(async {
+                            loop {
+                                let until = Instant::now() + Duration::from_micros(40);
+                                while Instant::now() < until {
+                                    std::hint::spin_loop();
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                        });
+                    }
+                }
                 let sent_c = sent.clone();
                 let consumer = tokio::spawn(async move {
                     let mut cum = 0usize;

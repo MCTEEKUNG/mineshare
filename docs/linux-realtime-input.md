@@ -36,7 +36,10 @@ A realtime thread that never blocks can freeze a machine, so the process sets
 `RLIMIT_RTTIME` to 100 ms soft / 200 ms hard (rtkit's maximum). Exceeding it
 would normally kill the process with `SIGXCPU`; a handler instead puts the
 offending thread back on `SCHED_OTHER` (keeping `SCHED_RESET_ON_FORK`, which an
-unprivileged thread cannot clear). If rtkit is missing, refuses (it only serves
+unprivileged thread cannot clear) and re-arms the soft limit, because the kernel
+raises it by one second after each signal and a second runaway thread would
+otherwise be SIGKILLed at the hard limit (two permanently saturated transport
+workers killed the process before this was fixed). If rtkit is missing, refuses (it only serves
 the active graphical session and user services, not an SSH login), or rate-limits
 the request, the thread simply keeps normal scheduling.
 

@@ -45,13 +45,23 @@ mod imp {
     const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(300);
 
     extern "C" fn demote_on_sigxcpu(_signal: libc::c_int) {
-        // Async-signal-safe: one syscall, delivered to the offending thread.
+        // Async-signal-safe: two syscalls, run by the offending thread.
         // rtkit sets SCHED_RESET_ON_FORK, and an unprivileged thread may not
         // clear that flag (EPERM), so the demotion must keep it.
         let param = libc::sched_param { sched_priority: 0 };
-        unsafe {
-            libc::sched_setscheduler(0, libc::SCHED_OTHER | libc::SCHED_RESET_ON_FORK, &param)
+        let limit = libc::rlimit {
+            rlim_cur: RTTIME_SOFT_US,
+            rlim_max: RTTIME_HARD_US,
         };
+        unsafe {
+            libc::sched_setscheduler(0, libc::SCHED_OTHER | libc::SCHED_RESET_ON_FORK, &param);
+            // The kernel raises the process-wide soft limit by one second each
+            // time it signals, so a second runaway thread would never get its
+            // own SIGXCPU and would be SIGKILLed at the hard limit (measured:
+            // two saturated transport workers killed the process). Re-arm the
+            // soft limit so every runaway thread is demoted in turn.
+            libc::setrlimit(libc::RLIMIT_RTTIME, &limit);
+        }
     }
 
     fn install_runaway_guard() -> bool {
@@ -209,5 +219,30 @@ mod tests {
             .count();
         println!("granted {granted}/8");
         assert_eq!(granted, 8);
+    }
+
+    /// Manual, same launch as above. The kernel raises the shared soft limit
+    /// after signalling the first runaway thread, so without re-arming it the
+    /// second one is SIGKILLed at the hard limit and takes the process along.
+    #[test]
+    #[ignore = "needs rtkit from a graphical-session user; prints, asserts all demoted"]
+    fn several_runaway_realtime_threads_are_all_demoted() {
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    if !promote_current_thread_realtime("test-multi-runaway") {
+                        return None;
+                    }
+                    let start = std::time::Instant::now();
+                    while start.elapsed() < std::time::Duration::from_millis(800) {
+                        std::hint::spin_loop();
+                    }
+                    Some(policy())
+                })
+            })
+            .collect();
+        let after: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        println!("survived, policies_after={after:?}");
+        assert!(after.iter().flatten().all(|p| *p == libc::SCHED_OTHER));
     }
 }
