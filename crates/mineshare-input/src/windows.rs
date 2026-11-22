@@ -248,7 +248,11 @@ const RAW_INPUT_STALE_MS: u64 = 300;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
-static LAST_FLUSH_US: AtomicU64 = AtomicU64::new(0);
+/// Theoretical time of the next forward slot (GCRA "TAT"), zero when idle.
+/// Advanced from the previous slot rather than the actual (late) flush time,
+/// so watchdog wake-up overshoot cannot drag the forwarded rate below the
+/// setting (measured 411 Hz at a 500 Hz setting, 729 Hz at 1,000 Hz).
+static FLUSH_SLOT_US: AtomicU64 = AtomicU64::new(0);
 /// Absolute monotonic deadline for the currently pending motion window.
 /// Zero means no motion is armed. Producers only wake the watchdog when
 /// they win the 0 → deadline transition, avoiding one scheduler unpark per
@@ -300,7 +304,12 @@ fn flush_pending_motion(now_us: u64) {
     if dx == 0 && dy == 0 {
         return;
     }
-    LAST_FLUSH_US.store(now_us, Ordering::Release);
+    let flush_us = super::target_flush_us();
+    let slot = FLUSH_SLOT_US.load(Ordering::Acquire);
+    FLUSH_SLOT_US.store(
+        super::next_flush_slot(slot, now_us, flush_us),
+        Ordering::Release,
+    );
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
     #[cfg(test)]
     FLUSH_FWD_DISTANCE_X.fetch_add(dx as i64, Ordering::Relaxed);
@@ -323,12 +332,7 @@ fn arm_pending_motion(now_us: u64) -> bool {
         return false;
     }
     let flush_us = super::target_flush_us();
-    let last = LAST_FLUSH_US.load(Ordering::Acquire);
-    let deadline = if last == 0 || now_us.saturating_sub(last) >= flush_us {
-        now_us
-    } else {
-        last.saturating_add(flush_us)
-    };
+    let deadline = super::flush_deadline(FLUSH_SLOT_US.load(Ordering::Acquire), now_us, flush_us);
     NEXT_FLUSH_DEADLINE_US
         .compare_exchange(0, deadline, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -3198,6 +3202,80 @@ mod tests {
             wakeups <= 1,
             "idle watchdog polled {wakeups} times in 40 ms instead of parking"
         );
+    }
+
+    /// Manual benchmark: `cargo test -p mineshare-input --release --lib --
+    /// --ignored --nocapture --test-threads=1 forward_flush_bench`. Feeds a
+    /// jittered hardware mouse into the real forward coalescer + watchdog and
+    /// prints the forwarded rate and per-sample age at flush; does not assert.
+    #[test]
+    #[ignore = "manual forward-pacing benchmark; prints, does not assert"]
+    fn forward_flush_bench() {
+        let log: std::sync::Arc<Mutex<Vec<(std::time::Instant, i32)>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_log = log.clone();
+        *EVENT_SINK.get_or_init(|| Mutex::new(None)).lock() =
+            Some(std::sync::Arc::new(move |ev: InputEvent| {
+                if let InputEvent::MouseMove { dx, .. } = ev {
+                    sink_log.lock().push((std::time::Instant::now(), dx));
+                }
+            }));
+        super::super::set_game_drive(super::super::GameDrive::Off);
+        start_motion_flush_watchdog();
+        fn pct(v: &mut [u128], p: usize) -> u128 {
+            v.sort_unstable();
+            v[(v.len() - 1) * p / 100]
+        }
+        // (name, hardware period us, jitter span us)
+        for hz in [500u32, 1000] {
+            for (name, period, jitter) in [("mouse1k", 1_000u64, 300u64), ("mouse2k", 500, 150)] {
+                for rep in 0..5 {
+                    super::super::set_mouse_rate_hz(hz);
+                    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+                    wake_motion_flush_watchdog();
+                    thread::sleep(std::time::Duration::from_millis(20));
+                    log.lock().clear();
+                    let total = 2_000usize;
+                    let mut sent = Vec::with_capacity(total);
+                    let start = std::time::Instant::now();
+                    for i in 0..total as u64 {
+                        let jit = (i * 7_919) % jitter.max(1);
+                        let at = start + std::time::Duration::from_micros(i * period + jit);
+                        while std::time::Instant::now() < at {
+                            std::hint::spin_loop();
+                        }
+                        sent.push(std::time::Instant::now());
+                        queue_pending_motion(1, 0);
+                    }
+                    thread::sleep(std::time::Duration::from_millis(30));
+                    CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+                    wake_motion_flush_watchdog();
+                    thread::sleep(std::time::Duration::from_millis(5));
+                    let log = log.lock().clone();
+                    let mut cum = 0usize;
+                    let (mut oldest, mut newest) = (Vec::new(), Vec::new());
+                    for (at, dx) in &log {
+                        let first = cum;
+                        cum += *dx as usize;
+                        oldest.push(at.saturating_duration_since(sent[first]).as_micros());
+                        newest.push(at.saturating_duration_since(sent[cum - 1]).as_micros());
+                    }
+                    let span = log.last().unwrap().0.duration_since(log[0].0).as_secs_f64();
+                    println!(
+                        "FWD hz={hz} scen={name} rep={rep} flushes={} rate_hz={:.0} moved={cum} \
+                         oldest_age_us p50={} p95={} p99={} newest_age_us p50={} p95={}",
+                        log.len(),
+                        (log.len() - 1) as f64 / span,
+                        pct(&mut oldest, 50),
+                        pct(&mut oldest, 95),
+                        pct(&mut oldest, 99),
+                        pct(&mut newest, 50),
+                        pct(&mut newest, 95),
+                    );
+                }
+            }
+        }
+        *EVENT_SINK.get_or_init(|| Mutex::new(None)).lock() = None;
     }
 
     #[test]

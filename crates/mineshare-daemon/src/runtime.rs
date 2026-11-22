@@ -296,7 +296,7 @@ impl MotionPacer {
 
     fn wait_before_motion(&mut self, queue: &InjectQueue) {
         let now = std::time::Instant::now();
-        let interval = Duration::from_micros(mineshare_input::target_flush_us().max(1));
+        let interval = receive_pacing_interval();
         let (wait, next) = motion_pacing_step(now, self.next_deadline, interval);
         if !wait.is_zero() {
             let deadline = now + wait;
@@ -328,17 +328,35 @@ impl MotionPacer {
     }
 }
 
-/// Absolute-deadline pacing: an idle worker dispatches immediately, while a
-/// catch-up burst is spread at the configured mouse rate. Advancing from the
-/// previous deadline avoids drift; resetting when late avoids accumulating
-/// debt after the user pauses.
+/// The receiver spreads catch-up bursts at the slider ceiling, not its own
+/// mouse-rate setting: the sender's capture loop already enforces the rate
+/// chosen where the mouse is attached.
+fn receive_pacing_interval() -> Duration {
+    Duration::from_micros(mineshare_input::MAX_MOUSE_RATE_FLUSH_US)
+}
+
+/// Absolute-deadline pacing with one interval of burst tolerance (GCRA): an
+/// idle worker dispatches immediately, while a sustained catch-up burst is
+/// spread at the configured mouse rate. Advancing from the previous deadline
+/// avoids drift; resetting when late avoids accumulating debt after the user
+/// pauses.
+///
+/// The tolerance matters because the sender flushes at the same rate the
+/// receiver paces at. With zero tolerance, any sample arriving a little early
+/// waits for its deadline, and since the next sample is just as early the
+/// stream phase-locks into waiting up to a whole interval on every sample
+/// (measured p50 ~1 ms / p95 ~2 ms at 500 Hz). One interval of slack lets an
+/// on-rate stream through unchanged while the long-run rate stays capped.
 fn motion_pacing_step(
     now: std::time::Instant,
     next_deadline: Option<std::time::Instant>,
     interval: Duration,
 ) -> (Duration, std::time::Instant) {
     match next_deadline {
-        Some(deadline) if deadline > now => (deadline - now, deadline + interval),
+        Some(deadline) if deadline > now + interval => {
+            (deadline - interval - now, deadline + interval)
+        }
+        Some(deadline) if deadline > now => (Duration::ZERO, deadline + interval),
         _ => (Duration::ZERO, now + interval),
     }
 }
@@ -3482,6 +3500,118 @@ mod tests {
         println!("1 ms Condvar wait (p50/p95/max us): default={before:?} high_res={during:?}");
     }
 
+    /// Manual benchmark: `cargo test -p mineshare-daemon --release --
+    /// --ignored --nocapture --test-threads=1 pacer_burst_bench`. Drives the
+    /// real inject queue + motion pacer with a recording no-op inject and
+    /// prints raw microsecond latencies; does not assert.
+    #[test]
+    #[ignore = "manual pacing benchmark; prints, does not assert"]
+    fn pacer_burst_bench() {
+        struct Recorder {
+            log: parking_lot::Mutex<Vec<(std::time::Instant, i32)>>,
+            cpu: parking_lot::Mutex<Vec<u64>>,
+        }
+        fn thread_cpu_100ns() -> u64 {
+            // Thread cycle count (precise); GetThreadTimes ticks at 15.6 ms.
+            #[cfg(target_os = "windows")]
+            unsafe {
+                use windows_sys::Win32::System::Threading::GetCurrentThread;
+                use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
+                let mut cycles = 0u64;
+                QueryThreadCycleTime(GetCurrentThread(), &mut cycles);
+                cycles
+            }
+            #[cfg(not(target_os = "windows"))]
+            0
+        }
+        impl InputInject for Recorder {
+            fn mouse_move_rel(&self, dx: i32, _dy: i32) -> Result<()> {
+                self.log.lock().push((std::time::Instant::now(), dx));
+                self.cpu.lock().push(thread_cpu_100ns());
+                Ok(())
+            }
+            fn mouse_button(&self, _b: Button, _d: bool) -> Result<()> {
+                Ok(())
+            }
+            fn key(&self, _c: KeyCode, _d: bool) -> Result<()> {
+                Ok(())
+            }
+            fn scroll(&self, _x: f32, _y: f32) -> Result<()> {
+                Ok(())
+            }
+        }
+        fn pct(v: &mut [u128], p: usize) -> u128 {
+            v.sort_unstable();
+            v[(v.len() - 1) * p / 100]
+        }
+        // (name, burst size, burst period us): steady 2 kHz, 1 kHz and 500 Hz input,
+        // and 1 kHz arriving in Wi-Fi-style 8-sample clumps.
+        let scenarios = [
+            ("steady2k", 1usize, 500u64),
+            ("steady1k", 1, 1_000),
+            ("steady500", 1, 2_000),
+            ("burst8x8ms", 8, 8_000),
+        ];
+        for hz in [500u32, 1000] {
+            mineshare_input::set_mouse_rate_hz(hz);
+            for (name, burst, period_us) in scenarios {
+                for rep in 0..5 {
+                    let rec = Arc::new(Recorder {
+                        log: parking_lot::Mutex::new(Vec::new()),
+                        cpu: parking_lot::Mutex::new(Vec::new()),
+                    });
+                    let dispatcher =
+                        InjectDispatcher::start(rec.clone(), Arc::new(SessionStats::default()))
+                            .unwrap();
+                    let tx = dispatcher.sender();
+                    let total = 2_000usize * burst.max(1);
+                    let mut sent_at = Vec::with_capacity(total);
+                    let t0 = std::time::Instant::now();
+                    let mut next = t0;
+                    while sent_at.len() < total {
+                        while std::time::Instant::now() < next {
+                            std::hint::spin_loop();
+                        }
+                        for _ in 0..burst {
+                            sent_at.push(std::time::Instant::now());
+                            tx.send(InputEvent::MouseMove { dx: 1, dy: 0 }).unwrap();
+                        }
+                        next += Duration::from_micros(period_us);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    dispatcher.stop();
+                    let log = rec.log.lock();
+                    let cpu = rec.cpu.lock();
+                    let mut cum = 0usize;
+                    let mut oldest = Vec::new();
+                    let mut newest = Vec::new();
+                    for (at, dx) in log.iter() {
+                        let first = cum;
+                        cum += *dx as usize;
+                        oldest.push(at.duration_since(sent_at[first]).as_micros());
+                        newest.push(at.duration_since(sent_at[cum - 1]).as_micros());
+                    }
+                    assert_eq!(cum, total, "lost motion");
+                    let span = log.last().unwrap().0.duration_since(log[0].0).as_secs_f64();
+                    let cpu_mcyc = (cpu.last().unwrap() - cpu[0]) as f64 / 1e6;
+                    println!(
+                        "BENCH hz={hz} scen={name} rep={rep} injects={} rate_hz={:.0} \
+                         oldest_age_us p50={} p95={} p99={} max={} newest_age_us p50={} p95={} \
+                         worker_mcycles={cpu_mcyc:.1}",
+                        log.len(),
+                        (log.len() - 1) as f64 / span,
+                        pct(&mut oldest, 50),
+                        pct(&mut oldest, 95),
+                        pct(&mut oldest, 99),
+                        pct(&mut oldest, 100),
+                        pct(&mut newest, 50),
+                        pct(&mut newest, 95),
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn reconnect_backoff_stays_fast_for_blips_and_caps_for_an_offline_peer() {
         use super::{RECONNECT_MAX_DELAY, RECONNECT_MIN_DELAY, reconnect_backoff};
@@ -4008,19 +4138,72 @@ mod tests {
         );
         assert_eq!(next0, start + interval);
 
+        // One sample of burst tolerance: an early sample goes out at once…
         let half_tick = start + Duration::from_micros(500);
         let (wait1, next1) = motion_pacing_step(half_tick, Some(next0), interval);
-        assert_eq!(wait1, Duration::from_micros(500));
+        assert_eq!(wait1, Duration::ZERO);
         assert_eq!(
             next1,
             start + Duration::from_millis(2),
             "deadline must advance absolutely instead of drifting from wake time"
         );
 
+        // …but a second one in the same tick is paced to the configured rate.
+        let (wait2, next2) = motion_pacing_step(half_tick, Some(next1), interval);
+        assert_eq!(wait2, Duration::from_micros(500));
+        assert_eq!(next2, start + Duration::from_millis(3));
+
         let after_idle = start + Duration::from_millis(20);
-        let (idle_wait, idle_next) = motion_pacing_step(after_idle, Some(next1), interval);
+        let (idle_wait, idle_next) = motion_pacing_step(after_idle, Some(next2), interval);
         assert_eq!(idle_wait, Duration::ZERO);
         assert_eq!(idle_next, after_idle + interval);
+    }
+
+    #[test]
+    fn on_rate_jittered_motion_is_never_delayed_by_the_pacer() {
+        // A sender flushing at the same rate the receiver paces at must not
+        // phase-lock into waiting up to a full interval on every sample.
+        let interval = Duration::from_millis(2);
+        let start = std::time::Instant::now();
+        let mut deadline = None;
+        for i in 0..1_000u64 {
+            let jitter = Duration::from_micros((i * 7_919) % 900);
+            let now = start + interval * i as u32 + jitter;
+            let (wait, next) = motion_pacing_step(now, deadline, interval);
+            assert_eq!(wait, Duration::ZERO, "sample {i} delayed by {wait:?}");
+            deadline = Some(next);
+        }
+    }
+
+    #[test]
+    fn receiver_paces_at_the_slider_ceiling_not_its_own_mouse_rate() {
+        // A default-500 Hz receiver must not halve a sender set to 1,000 Hz.
+        assert_eq!(super::receive_pacing_interval(), Duration::from_millis(1));
+        assert!(
+            super::receive_pacing_interval().as_micros() as u64
+                <= mineshare_input::target_flush_us(),
+            "receive pacing must never be slower than any selectable send rate"
+        );
+    }
+
+    #[test]
+    fn sustained_over_rate_motion_is_still_capped_at_the_configured_rate() {
+        let interval = Duration::from_millis(2);
+        let start = std::time::Instant::now();
+        let mut now = start;
+        let mut deadline = None;
+        let samples = 1_000u32;
+        for _ in 0..samples {
+            let (wait, next) = motion_pacing_step(now, deadline, interval);
+            now += wait; // dispatched after the paced wait
+            deadline = Some(next);
+            now += Duration::from_micros(500); // a 2 kHz source
+        }
+        let span = now - start;
+        assert!(
+            span >= interval * (samples - 2),
+            "{samples} samples injected in {span:?}, faster than the cap"
+        );
     }
 
     #[test]
