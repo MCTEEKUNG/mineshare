@@ -147,11 +147,7 @@ export default function App() {
   // churn IPC + React renders every 700 ms for an invisible UI.
   const seenTerminalIds = useRef<Set<number>>(new Set());
   useEffect(() => {
-    let id: ReturnType<typeof setTimeout> | undefined;
-    let running = false;
-    // Poll fast only while something is in flight. Idle, every poll is an
-    // IPC round trip through three WebView processes for an unchanged list.
-    let delay = 2000;
+    let id: ReturnType<typeof setInterval> | undefined;
     const tick = async () => {
       try {
         const list = await invoke<Transfer[]>("get_transfers");
@@ -159,7 +155,6 @@ export default function App() {
           ["pending", "active", "verifying"].includes(tt.status),
         ).length;
         setActiveTransfers(inFlight);
-        delay = inFlight > 0 ? 700 : 2000;
 
         const terminal = list.filter(
           (tt) =>
@@ -186,17 +181,15 @@ export default function App() {
       } catch {
         /* daemon not ready yet */
       }
-      if (running) id = setTimeout(tick, delay);
     };
     const start = () => {
-      if (running) return;
-      running = true;
-      void tick();
+      if (id !== undefined) return;
+      tick();
+      id = setInterval(tick, 700);
     };
     const stop = () => {
-      running = false;
       if (id !== undefined) {
-        clearTimeout(id);
+        clearInterval(id);
         id = undefined;
       }
     };
