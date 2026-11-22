@@ -9,6 +9,7 @@ mod linux_setup;
 mod startup;
 mod state;
 mod tray;
+mod webview_power;
 
 #[tauri::command]
 async fn get_linux_setup_status() -> Result<linux_setup::Status, String> {
@@ -333,6 +334,7 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
+                webview_power::sync(&w);
             }
         }))
         .plugin(tauri_plugin_opener::init())
@@ -363,9 +365,18 @@ pub fn run() {
             // hide to tray instead. The user can re-open from the
             // tray menu, and "Quit" there is the only path that
             // tears the bridge down.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            use tauri::Manager;
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // Minimize and restore both arrive as a resize.
+                tauri::WindowEvent::Resized(_) => {}
+                _ => return,
+            }
+            if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+                webview_power::sync(&w);
             }
         })
         .invoke_handler(tauri::generate_handler![
