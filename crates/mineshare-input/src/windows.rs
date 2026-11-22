@@ -2063,6 +2063,10 @@ fn send_desktop_mouse_move(dx: i32, dy: i32) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn relative_mouse_injection_active() -> bool {
+    should_use_true_relative_injection(game_foreground(), super::game_drive())
+}
+
 fn should_use_true_relative_injection(game_foreground: bool, game_drive: super::GameDrive) -> bool {
     game_foreground || matches!(game_drive, super::GameDrive::Receiving)
 }

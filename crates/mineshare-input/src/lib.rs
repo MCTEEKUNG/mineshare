@@ -722,6 +722,21 @@ pub fn target_flush_us() -> u64 {
 /// would otherwise halve a 1,000 Hz sender and add ~2.5 ms of merge delay.
 pub const MAX_MOUSE_RATE_FLUSH_US: u64 = 1_000;
 
+/// True while injected mouse motion goes through Windows `SendInput` as true
+/// relative moves (a cursor-locked game in the foreground, or Game Drive).
+/// That path costs ~0.4-0.65 ms per call through the game's hook chain, so the
+/// receiver paces it at its own mouse-rate setting instead of the ceiling.
+pub fn relative_mouse_injection_active() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::relative_mouse_injection_active()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Burst tolerance of half a window: a hardware sample that lands slightly
 /// before its slot (USB polling jitter) goes out at once instead of waiting
 /// for the watchdog, while the long-run rate stays at the setting.

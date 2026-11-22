@@ -331,8 +331,25 @@ impl MotionPacer {
 /// The receiver spreads catch-up bursts at the slider ceiling, not its own
 /// mouse-rate setting: the sender's capture loop already enforces the rate
 /// chosen where the mouse is attached.
+///
+/// Exception (user choice, lower CPU over latency): while a game receives true
+/// relative `SendInput` moves, each call costs ~0.4-0.65 ms, so pacing at
+/// 1 kHz kept the inject thread 45-65% busy. Then follow this machine's own
+/// mouse-rate setting instead.
 fn receive_pacing_interval() -> Duration {
-    Duration::from_micros(mineshare_input::MAX_MOUSE_RATE_FLUSH_US)
+    receive_pacing_interval_for(
+        mineshare_input::relative_mouse_injection_active(),
+        mineshare_input::target_flush_us(),
+    )
+}
+
+fn receive_pacing_interval_for(relative_injection: bool, local_flush_us: u64) -> Duration {
+    let ceiling = mineshare_input::MAX_MOUSE_RATE_FLUSH_US;
+    Duration::from_micros(if relative_injection {
+        local_flush_us.max(ceiling)
+    } else {
+        ceiling
+    })
 }
 
 /// Absolute-deadline pacing with one interval of burst tolerance (GCRA): an
@@ -4181,11 +4198,27 @@ mod tests {
     #[test]
     fn receiver_paces_at_the_slider_ceiling_not_its_own_mouse_rate() {
         // A default-500 Hz receiver must not halve a sender set to 1,000 Hz.
-        assert_eq!(super::receive_pacing_interval(), Duration::from_millis(1));
-        assert!(
-            super::receive_pacing_interval().as_micros() as u64
-                <= mineshare_input::target_flush_us(),
-            "receive pacing must never be slower than any selectable send rate"
+        assert_eq!(
+            super::receive_pacing_interval_for(false, 2_000),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            super::receive_pacing_interval_for(false, 16_666),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn game_injection_paces_at_the_local_mouse_rate_to_save_cpu() {
+        // SendInput into a cursor-locked game is expensive: follow the
+        // receiver's own setting (default 500 Hz), never faster than 1 kHz.
+        assert_eq!(
+            super::receive_pacing_interval_for(true, 2_000),
+            Duration::from_millis(2)
+        );
+        assert_eq!(
+            super::receive_pacing_interval_for(true, 500),
+            Duration::from_millis(1)
         );
     }
 
