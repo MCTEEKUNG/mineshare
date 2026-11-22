@@ -579,7 +579,10 @@ fn raise_input_thread_priority() {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn raise_input_thread_priority() {}
+fn raise_input_thread_priority() {
+    // Realtime on Linux (via rtkit); a no-op elsewhere or when refused.
+    mineshare_input::promote_current_thread_realtime("input-inject");
+}
 
 fn dispatch_inject_event(
     inject: &dyn InputInject,

@@ -32,7 +32,30 @@ pub fn bootstrap_runtime() -> Result<()> {
             .name("mineshare-daemon".into())
             .spawn(move || realtime.block_on(run_embedded()))?;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        // Same isolation as Windows: the input transport must not queue behind
+        // WebView commands, and on a busy desktop it needs realtime scheduling
+        // (measured p99 wake latency 1.9 ms -> 50 us). Only the two transport
+        // workers are promoted, not tokio's blocking-pool threads, which start
+        // later and may run long CPU jobs.
+        static PROMOTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        const TRANSPORT_WORKERS: usize = 2;
+        let realtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(TRANSPORT_WORKERS)
+            .thread_name("mineshare-realtime")
+            .on_thread_start(|| {
+                if PROMOTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < TRANSPORT_WORKERS {
+                    mineshare_input::promote_current_thread_realtime("transport-worker");
+                }
+            })
+            .enable_all()
+            .build()?;
+        std::thread::Builder::new()
+            .name("mineshare-daemon".into())
+            .spawn(move || realtime.block_on(run_embedded()))?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     tauri::async_runtime::spawn(run_embedded());
     Ok(())
 }

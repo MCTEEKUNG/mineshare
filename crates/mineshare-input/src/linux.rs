@@ -594,6 +594,7 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
             let _ = FLUSH_WATCHDOG_THREAD.set(thread::current());
+            super::promote_current_thread_realtime("evdev-flush");
             loop {
                 while CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
                     && !super::is_game_driving()
@@ -840,6 +841,10 @@ fn pump_device(
     mut broker: Option<keyboard_broker::Broker>,
     sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
 ) {
+    if is_pointer {
+        // Pointer motion is the latency-critical stream; keyboards stay normal.
+        super::promote_current_thread_realtime("evdev-pointer");
+    }
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
     let mut grabbed = broker.is_some();

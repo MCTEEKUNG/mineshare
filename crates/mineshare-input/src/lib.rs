@@ -18,6 +18,9 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+mod realtime;
+pub use realtime::promote_current_thread_realtime;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Button {
     Left,
