@@ -44,8 +44,12 @@ mod imp {
 
     extern "C" fn demote_on_sigxcpu(_signal: libc::c_int) {
         // Async-signal-safe: one syscall, delivered to the offending thread.
+        // rtkit sets SCHED_RESET_ON_FORK, and an unprivileged thread may not
+        // clear that flag (EPERM), so the demotion must keep it.
         let param = libc::sched_param { sched_priority: 0 };
-        unsafe { libc::sched_setscheduler(0, libc::SCHED_OTHER, &param) };
+        unsafe {
+            libc::sched_setscheduler(0, libc::SCHED_OTHER | libc::SCHED_RESET_ON_FORK, &param)
+        };
     }
 
     fn install_runaway_guard() -> bool {
@@ -119,5 +123,47 @@ mod imp {
                 false
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::promote_current_thread_realtime;
+    use nix::libc;
+
+    fn policy() -> i32 {
+        // rtkit adds SCHED_RESET_ON_FORK; compare the policy bits only.
+        unsafe { libc::sched_getscheduler(0) & !libc::SCHED_RESET_ON_FORK }
+    }
+
+    /// Manual: needs an rtkit-capable session, so run it as a user service:
+    /// `systemd-run --user --pipe --wait <test binary> --ignored --nocapture
+    /// runaway_realtime_thread_is_demoted_not_killed`.
+    #[test]
+    #[ignore = "needs rtkit from a graphical-session user; prints, asserts demotion"]
+    fn runaway_realtime_thread_is_demoted_not_killed() {
+        std::thread::spawn(|| {
+            let granted = promote_current_thread_realtime("test-runaway");
+            println!("granted={granted} policy_before={}", policy());
+            if !granted {
+                return None;
+            }
+            assert_eq!(policy(), libc::SCHED_RR);
+            // Never block: the kernel signals SIGXCPU at 100 ms, which must
+            // demote this thread instead of terminating the process.
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_millis(600) {
+                std::hint::spin_loop();
+            }
+            Some(policy())
+        })
+        .join()
+        .map(|after| {
+            println!("survived, policy_after={after:?}");
+            if let Some(after) = after {
+                assert_eq!(after, libc::SCHED_OTHER, "runaway thread stayed realtime");
+            }
+        })
+        .unwrap();
     }
 }

@@ -270,14 +270,33 @@ mod tests {
                 .worker_threads(2)
                 .on_thread_start(move || {
                     if realtime {
+                        #[cfg(target_os = "windows")]
+                        let granted = mineshare_audio::register_realtime_thread();
+                        #[cfg(not(target_os = "windows"))]
                         let granted =
                             mineshare_input::promote_current_thread_realtime("bench-worker");
-                        eprintln!("rtkit granted={granted}");
+                        eprintln!("realtime granted={granted}");
                     }
                 })
                 .enable_all()
                 .build()
                 .unwrap();
+            // HUB_HOGS=n adds n normal-priority busy threads (a loaded desktop).
+            let hogs: usize = std::env::var("HUB_HOGS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let stop_hogs = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hog_threads: Vec<_> = (0..hogs)
+                .map(|_| {
+                    let stop = stop_hogs.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
             let hub = Arc::new(InputHub::default());
             let mut sub = hub.subscribe();
             let t0 = Instant::now();
@@ -319,11 +338,15 @@ mod tests {
                 .unwrap();
                 consumer.await.unwrap()
             });
+            stop_hogs.store(true, Ordering::Relaxed);
+            for hog in hog_threads {
+                hog.join().unwrap();
+            }
             let mut v = ages.clone();
             v.sort_unstable();
             let q = |p: usize| v[(v.len() - 1) * p / 100];
             println!(
-                "HUB rt={realtime} rep={rep} events={} p50={} p90={} p99={} p99.9={} max={}",
+                "HUB rt={realtime} hogs={hogs} rep={rep} events={} p50={} p90={} p99={} p99.9={} max={}",
                 v.len(),
                 q(50),
                 q(90),
