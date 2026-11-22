@@ -41,6 +41,8 @@ mod imp {
     /// rtkit refuses a hard limit above its own `RTTimeUSecMax` (200 ms).
     const RTTIME_SOFT_US: libc::rlim_t = 100_000;
     const RTTIME_HARD_US: libc::rlim_t = 200_000;
+    const RATE_LIMIT_RETRIES: usize = 6;
+    const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(300);
 
     extern "C" fn demote_on_sigxcpu(_signal: libc::c_int) {
         // Async-signal-safe: one syscall, delivered to the offending thread.
@@ -80,6 +82,21 @@ mod imp {
             .as_ref()
     }
 
+    fn request(bus: &zbus::blocking::Connection, tid: u64) -> zbus::Result<zbus::Message> {
+        zbus::blocking::Proxy::new(
+            bus,
+            "org.freedesktop.RealtimeKit1",
+            "/org/freedesktop/RealtimeKit1",
+            "org.freedesktop.RealtimeKit1",
+        )
+        .and_then(|proxy| {
+            proxy.call_method(
+                "MakeThreadRealtimeWithPID",
+                &(u64::from(std::process::id()), tid, RTKIT_PRIORITY),
+            )
+        })
+    }
+
     pub(super) fn promote(role: &'static str) -> bool {
         if std::env::var_os("MINESHARE_DISABLE_REALTIME").is_some() {
             return false;
@@ -96,18 +113,21 @@ mod imp {
             return false;
         };
         let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
-        let result = zbus::blocking::Proxy::new(
-            bus,
-            "org.freedesktop.RealtimeKit1",
-            "/org/freedesktop/RealtimeKit1",
-            "org.freedesktop.RealtimeKit1",
-        )
-        .and_then(|proxy| {
-            proxy.call_method(
-                "MakeThreadRealtimeWithPID",
-                &(u64::from(std::process::id()), tid, RTKIT_PRIORITY),
-            )
-        });
+        // rtkit rate-limits requests (a burst of about five per second per
+        // user). Startup asks for several threads at once, so wait out a
+        // limit instead of silently leaving a latency-critical thread normal.
+        let mut result = request(bus, tid);
+        for _ in 0..RATE_LIMIT_RETRIES {
+            match &result {
+                Err(zbus::Error::MethodError(name, ..))
+                    if name.as_str().ends_with("LimitsExceeded") =>
+                {
+                    std::thread::sleep(RATE_LIMIT_BACKOFF);
+                    result = request(bus, tid);
+                }
+                _ => break,
+            }
+        }
         match result {
             Ok(_) => {
                 info!(
@@ -165,5 +185,29 @@ mod tests {
             }
         })
         .unwrap();
+    }
+
+    /// Manual, same launch as above: eight threads ask at once; all must be
+    /// granted even though rtkit rate-limits bursts.
+    #[test]
+    #[ignore = "needs rtkit from a graphical-session user; prints, asserts all granted"]
+    fn a_burst_of_promotions_is_not_dropped_by_the_rtkit_rate_limit() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let granted = promote_current_thread_realtime("test-burst");
+                    // Stay alive but blocked so rtkit still counts the thread.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    granted
+                })
+            })
+            .collect();
+        let granted = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .filter(|g| *g)
+            .count();
+        println!("granted {granted}/8");
+        assert_eq!(granted, 8);
     }
 }
