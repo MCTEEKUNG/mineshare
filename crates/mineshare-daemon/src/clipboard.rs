@@ -40,7 +40,7 @@ use tracing::{debug, info, warn};
 
 // Windows can check a revision without opening (and locking) the clipboard.
 // Only read/decode its contents when that revision changes.
-const POLL_MS: u64 = if cfg!(target_os = "windows") { 50 } else { 400 };
+const POLL_MS: u64 = if cfg!(target_os = "windows") { 50 } else { 150 };
 /// Cap forwarded clipboard size — pasting a 50 MB log into the
 /// clipboard shouldn't accidentally flood the control channel.
 // Leave room for ControlMsg/bincode framing and Noise's 16-byte tag inside
@@ -368,13 +368,32 @@ fn x11_file_list() -> Result<Vec<PathBuf>> {
         }
         let (clipboard, uri_list) = state.as_ref().unwrap();
         let atoms = &clipboard.getter.atoms;
+        // x11-clipboard polls for the owner's reply and then parks for a fixed
+        // 50 ms (`POLL_DURATION`) whenever it is not there yet, so every
+        // request cost a constant ~50 ms even though the reply arrives within
+        // a millisecond (measured p50 50.3 ms vs 1.5 ms for arboard's text and
+        // image reads). Unpark the waiting thread every 500 us so it re-polls
+        // promptly; a spurious unpark is harmless to `park_timeout`.
+        let waiting = std::thread::current();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_micros(500));
+                    waiting.unpark();
+                }
+            })
+        };
         let list = clipboard.load(
             atoms.clipboard,
             *uri_list,
             atoms.property,
             Duration::from_millis(100),
-        )?;
-        parse_file_uris(&list)
+        );
+        done.store(true, Ordering::Release);
+        let _ = waker.join();
+        parse_file_uris(&list?)
     })
 }
 
@@ -1185,6 +1204,64 @@ pub const fn queue_capacity() -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// Manual: time one local-change poll (the work done every `POLL_MS`).
+    /// Reads the live clipboard but prints only timings, never content.
+    #[test]
+    #[ignore = "manual; needs a desktop session; prints timings only"]
+    fn clipboard_poll_cost_bench() {
+        let mut clipboard = arboard::Clipboard::new().expect("open clipboard");
+        let mut steps: [Vec<u128>; 6] = Default::default();
+        for _ in 0..100 {
+            #[cfg(target_os = "linux")]
+            {
+                use wl_clipboard_rs::paste::{self, ClipboardType, MimeType, Seat};
+                let t = Instant::now();
+                let _ = paste::get_contents(
+                    ClipboardType::Regular,
+                    Seat::Unspecified,
+                    MimeType::Specific("text/uri-list"),
+                );
+                steps[4].push(t.elapsed().as_micros());
+                let t = Instant::now();
+                let _ = x11_file_list();
+                steps[5].push(t.elapsed().as_micros());
+            }
+            let t = Instant::now();
+            let _ = clipboard_file_list(&mut clipboard);
+            steps[0].push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let _ = clipboard.get_image();
+            steps[1].push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let _ = clipboard.get_text();
+            steps[2].push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let _ = snapshot_fingerprint(&mut clipboard);
+            steps[3].push(t.elapsed().as_micros());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for (name, micros) in [
+            "file_list",
+            "get_image",
+            "get_text",
+            "whole_poll",
+            "wl_uri_list",
+            "x11_uri_list",
+        ]
+        .into_iter()
+        .zip(steps.iter_mut())
+        {
+            micros.sort_unstable();
+            println!(
+                "POLL {name} n={} p50={} p90={} max={} us (POLL_MS={POLL_MS})",
+                micros.len(),
+                micros[micros.len() / 2],
+                micros[micros.len() * 9 / 10],
+                micros[micros.len() - 1]
+            );
+        }
+    }
+
     use super::*;
 
     #[cfg(target_os = "linux")]
