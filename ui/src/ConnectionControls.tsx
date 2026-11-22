@@ -21,14 +21,18 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       const requestedAt = revision.current;
       try {
         const next = await invoke<Control>("get_connection_control");
-        if (active && requestedAt === revision.current) { setControl(next); setPollError(null); }
+        if (active && requestedAt === revision.current) {
+          // Keep the previous object when nothing changed so context consumers skip re-rendering.
+          setControl((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+          setPollError(null);
+        }
       } catch (e) { if (active) setPollError(String(e)); }
       finally { loading = false; }
     };
     const syncVisibility = () => {
       if (timer !== undefined) clearInterval(timer);
       timer = undefined;
-      if (!document.hidden) { void tick(); timer = setInterval(tick, 500); }
+      if (!document.hidden) { void tick(); timer = setInterval(tick, 1000); }
     };
     syncVisibility();
     document.addEventListener("visibilitychange", syncVisibility);
