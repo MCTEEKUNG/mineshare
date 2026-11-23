@@ -251,4 +251,126 @@ mod tests {
         assert_eq!(task.await.unwrap(), event);
         assert_eq!(b.recv().await.unwrap(), event);
     }
+
+    /// Manual benchmark: `cargo test -p mineshare-daemon --release --lib --
+    /// --ignored --nocapture --test-threads=1 hub_wake_latency_bench`.
+    /// A paced non-runtime producer publishes 1 kHz jittered motion while a
+    /// tokio task awaits `recv()`, as the UDP writer does. Prints raw
+    /// microsecond age at dequeue (publish -> task running); does not assert.
+    #[test]
+    #[ignore = "manual wake-latency benchmark; prints, does not assert"]
+    fn hub_wake_latency_bench() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const TOTAL: usize = 20_000;
+        for rep in 0..3 {
+            // Two workers, like the production transport runtime. HUB_RT=1
+            // promotes them through rtkit exactly as the app does.
+            let realtime = std::env::var_os("HUB_RT").is_some();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .on_thread_start(move || {
+                    if realtime {
+                        #[cfg(target_os = "windows")]
+                        let granted = mineshare_audio::register_realtime_thread();
+                        #[cfg(not(target_os = "windows"))]
+                        let granted =
+                            mineshare_input::promote_current_thread_realtime("bench-worker");
+                        eprintln!("realtime granted={granted}");
+                    }
+                })
+                .enable_all()
+                .build()
+                .unwrap();
+            // HUB_HOGS=n adds n normal-priority busy threads (a loaded desktop).
+            let hogs: usize = std::env::var("HUB_HOGS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let stop_hogs = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hog_threads: Vec<_> = (0..hogs)
+                .map(|_| {
+                    let stop = stop_hogs.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            let hub = Arc::new(InputHub::default());
+            let mut sub = hub.subscribe();
+            let t0 = Instant::now();
+            let sent: Arc<Vec<AtomicU64>> =
+                Arc::new((0..TOTAL).map(|_| AtomicU64::new(0)).collect());
+            let ages = rt.block_on(async {
+                // HUB_SATURATE=1: two compute-bound tasks keep both workers
+                // permanently busy (a worst-case burst of file/audio work), so
+                // a realtime worker never blocks and must be demoted by the
+                // RLIMIT_RTTIME guard instead of killing the process.
+                if std::env::var_os("HUB_SATURATE").is_some() {
+                    for _ in 0..2 {
+                        tokio::spawn(async {
+                            loop {
+                                let until = Instant::now() + Duration::from_micros(40);
+                                while Instant::now() < until {
+                                    std::hint::spin_loop();
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                        });
+                    }
+                }
+                let sent_c = sent.clone();
+                let consumer = tokio::spawn(async move {
+                    let mut cum = 0usize;
+                    let mut ages = Vec::with_capacity(TOTAL);
+                    while cum < TOTAL {
+                        match sub.recv().await {
+                            Ok(InputEvent::MouseMove { dx, .. }) => {
+                                let first = sent_c[cum].load(Ordering::Acquire);
+                                cum += dx as usize;
+                                let now = t0.elapsed().as_nanos() as u64;
+                                ages.push(now.saturating_sub(first) / 1_000);
+                            }
+                            _ => break,
+                        }
+                    }
+                    ages
+                });
+                let hub_p = hub.clone();
+                let sent_p = sent.clone();
+                std::thread::spawn(move || {
+                    let start = Instant::now();
+                    for i in 0..TOTAL {
+                        let at = start
+                            + Duration::from_micros(i as u64 * 1_000 + (i as u64 * 7_919) % 300);
+                        while Instant::now() < at {
+                            std::hint::spin_loop();
+                        }
+                        sent_p[i].store(t0.elapsed().as_nanos() as u64, Ordering::Release);
+                        hub_p.send(InputEvent::MouseMove { dx: 1, dy: 0 });
+                    }
+                })
+                .join()
+                .unwrap();
+                consumer.await.unwrap()
+            });
+            stop_hogs.store(true, Ordering::Relaxed);
+            for hog in hog_threads {
+                hog.join().unwrap();
+            }
+            let mut v = ages.clone();
+            v.sort_unstable();
+            let q = |p: usize| v[(v.len() - 1) * p / 100];
+            println!(
+                "HUB rt={realtime} hogs={hogs} rep={rep} events={} p50={} p90={} p99={} p99.9={} max={}",
+                v.len(),
+                q(50),
+                q(90),
+                q(99),
+                v[(v.len() - 1) * 999 / 1000],
+                v[v.len() - 1]
+            );
+        }
+    }
 }

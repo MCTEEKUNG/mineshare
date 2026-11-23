@@ -248,7 +248,11 @@ const RAW_INPUT_STALE_MS: u64 = 300;
 static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
-static LAST_FLUSH_US: AtomicU64 = AtomicU64::new(0);
+/// Theoretical time of the next forward slot (GCRA "TAT"), zero when idle.
+/// Advanced from the previous slot rather than the actual (late) flush time,
+/// so watchdog wake-up overshoot cannot drag the forwarded rate below the
+/// setting (measured 411 Hz at a 500 Hz setting, 729 Hz at 1,000 Hz).
+static FLUSH_SLOT_US: AtomicU64 = AtomicU64::new(0);
 /// Absolute monotonic deadline for the currently pending motion window.
 /// Zero means no motion is armed. Producers only wake the watchdog when
 /// they win the 0 → deadline transition, avoiding one scheduler unpark per
@@ -300,7 +304,12 @@ fn flush_pending_motion(now_us: u64) {
     if dx == 0 && dy == 0 {
         return;
     }
-    LAST_FLUSH_US.store(now_us, Ordering::Release);
+    let flush_us = super::target_flush_us();
+    let slot = FLUSH_SLOT_US.load(Ordering::Acquire);
+    FLUSH_SLOT_US.store(
+        super::next_flush_slot(slot, now_us, flush_us),
+        Ordering::Release,
+    );
     LAST_FLUSH_MS.store(super::now_ms(), Ordering::Release);
     #[cfg(test)]
     FLUSH_FWD_DISTANCE_X.fetch_add(dx as i64, Ordering::Relaxed);
@@ -323,12 +332,7 @@ fn arm_pending_motion(now_us: u64) -> bool {
         return false;
     }
     let flush_us = super::target_flush_us();
-    let last = LAST_FLUSH_US.load(Ordering::Acquire);
-    let deadline = if last == 0 || now_us.saturating_sub(last) >= flush_us {
-        now_us
-    } else {
-        last.saturating_add(flush_us)
-    };
+    let deadline = super::flush_deadline(FLUSH_SLOT_US.load(Ordering::Acquire), now_us, flush_us);
     NEXT_FLUSH_DEADLINE_US
         .compare_exchange(0, deadline, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -1432,6 +1436,15 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
         return;
     }
 
+    // Synthetic input (our own SendInput injection, which games receive as
+    // true-relative motion) reaches WM_INPUT with a NULL device handle. It is
+    // not this machine's hardware: counting it as local activity made the
+    // first injected move after a peer take-over look like the laptop's own
+    // mouse and released the peer's control within milliseconds.
+    if raw.header.hDevice.0.is_null() {
+        return;
+    }
+
     let dx = mouse.lLastX;
     let dy = mouse.lLastY;
     if dx == 0 && dy == 0 {
@@ -2048,6 +2061,10 @@ fn send_desktop_mouse_move(dx: i32, dy: i32) -> Result<()> {
     let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
     anyhow::ensure!(sent == 1, "SendInput desktop mouse move was rejected");
     Ok(())
+}
+
+pub(crate) fn relative_mouse_injection_active() -> bool {
+    should_use_true_relative_injection(game_foreground(), super::game_drive())
 }
 
 fn should_use_true_relative_injection(game_foreground: bool, game_drive: super::GameDrive) -> bool {
@@ -3200,6 +3217,80 @@ mod tests {
         );
     }
 
+    /// Manual benchmark: `cargo test -p mineshare-input --release --lib --
+    /// --ignored --nocapture --test-threads=1 forward_flush_bench`. Feeds a
+    /// jittered hardware mouse into the real forward coalescer + watchdog and
+    /// prints the forwarded rate and per-sample age at flush; does not assert.
+    #[test]
+    #[ignore = "manual forward-pacing benchmark; prints, does not assert"]
+    fn forward_flush_bench() {
+        let log: std::sync::Arc<Mutex<Vec<(std::time::Instant, i32)>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_log = log.clone();
+        *EVENT_SINK.get_or_init(|| Mutex::new(None)).lock() =
+            Some(std::sync::Arc::new(move |ev: InputEvent| {
+                if let InputEvent::MouseMove { dx, .. } = ev {
+                    sink_log.lock().push((std::time::Instant::now(), dx));
+                }
+            }));
+        super::super::set_game_drive(super::super::GameDrive::Off);
+        start_motion_flush_watchdog();
+        fn pct(v: &mut [u128], p: usize) -> u128 {
+            v.sort_unstable();
+            v[(v.len() - 1) * p / 100]
+        }
+        // (name, hardware period us, jitter span us)
+        for hz in [500u32, 1000] {
+            for (name, period, jitter) in [("mouse1k", 1_000u64, 300u64), ("mouse2k", 500, 150)] {
+                for rep in 0..5 {
+                    super::super::set_mouse_rate_hz(hz);
+                    CURSOR_MODE.store(MODE_REMOTE, Ordering::Release);
+                    wake_motion_flush_watchdog();
+                    thread::sleep(std::time::Duration::from_millis(20));
+                    log.lock().clear();
+                    let total = 2_000usize;
+                    let mut sent = Vec::with_capacity(total);
+                    let start = std::time::Instant::now();
+                    for i in 0..total as u64 {
+                        let jit = (i * 7_919) % jitter.max(1);
+                        let at = start + std::time::Duration::from_micros(i * period + jit);
+                        while std::time::Instant::now() < at {
+                            std::hint::spin_loop();
+                        }
+                        sent.push(std::time::Instant::now());
+                        queue_pending_motion(1, 0);
+                    }
+                    thread::sleep(std::time::Duration::from_millis(30));
+                    CURSOR_MODE.store(MODE_LOCAL, Ordering::Release);
+                    wake_motion_flush_watchdog();
+                    thread::sleep(std::time::Duration::from_millis(5));
+                    let log = log.lock().clone();
+                    let mut cum = 0usize;
+                    let (mut oldest, mut newest) = (Vec::new(), Vec::new());
+                    for (at, dx) in &log {
+                        let first = cum;
+                        cum += *dx as usize;
+                        oldest.push(at.saturating_duration_since(sent[first]).as_micros());
+                        newest.push(at.saturating_duration_since(sent[cum - 1]).as_micros());
+                    }
+                    let span = log.last().unwrap().0.duration_since(log[0].0).as_secs_f64();
+                    println!(
+                        "FWD hz={hz} scen={name} rep={rep} flushes={} rate_hz={:.0} moved={cum} \
+                         oldest_age_us p50={} p95={} p99={} newest_age_us p50={} p95={}",
+                        log.len(),
+                        (log.len() - 1) as f64 / span,
+                        pct(&mut oldest, 50),
+                        pct(&mut oldest, 95),
+                        pct(&mut oldest, 99),
+                        pct(&mut newest, 50),
+                        pct(&mut newest, 95),
+                    );
+                }
+            }
+        }
+        *EVENT_SINK.get_or_init(|| Mutex::new(None)).lock() = None;
+    }
+
     #[test]
     #[ignore = "manual active-latency regression gate; starts the process-lifetime watchdog"]
     fn active_motion_burst_does_not_unpark_per_hardware_event() {
@@ -3232,6 +3323,46 @@ mod tests {
             distance, 1_000,
             "scheduler lost {distance}/1,000 motion units"
         );
+    }
+
+    /// Manual: `cargo test -p mineshare-input --release --lib -- --ignored
+    /// --nocapture --test-threads=1 relative_sendinput_cadence_bench`.
+    /// The pointer-lock game path calls `SendInput` (which walks the
+    /// machine-wide low-level-hook chain) once per injected move. Alternating
+    /// +1/-1 px keeps the net movement zero. Prints call latency at 500 Hz and
+    /// 1,000 Hz so the cost of a faster receive rate can be judged.
+    #[test]
+    #[ignore = "manual live benchmark; briefly sends net-zero relative mouse moves"]
+    fn relative_sendinput_cadence_bench() {
+        for (hz, period_us) in [
+            (500u32, 2_000u64),
+            (1_000, 1_000),
+            (500, 2_000),
+            (1_000, 1_000),
+        ] {
+            let mut samples = Vec::with_capacity(3_000);
+            let start = std::time::Instant::now();
+            for i in 0u64..3_000 {
+                let at = start + std::time::Duration::from_micros(i * period_us);
+                while std::time::Instant::now() < at {
+                    std::hint::spin_loop();
+                }
+                let dx = if i % 2 == 0 { 1 } else { -1 };
+                let began = std::time::Instant::now();
+                send_relative_mouse_input(dx, 0).expect("SendInput relative move");
+                samples.push(began.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            let q = |p: usize| samples[(samples.len() - 1) * p / 100];
+            println!(
+                "SENDINPUT hz={hz} p50={} p90={} p99={} p99.9={} max={}",
+                q(50),
+                q(90),
+                q(99),
+                samples[(samples.len() - 1) * 999 / 1000],
+                samples[samples.len() - 1]
+            );
+        }
     }
 
     #[test]

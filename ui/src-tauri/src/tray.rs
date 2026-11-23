@@ -268,6 +268,7 @@ fn show_main_window(app: &AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        crate::webview_power::sync(&w);
     }
 }
 

@@ -594,6 +594,7 @@ fn start_flush_watchdog(sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 
         .name("evdev-flush-watchdog".to_string())
         .spawn(move || {
             let _ = FLUSH_WATCHDOG_THREAD.set(thread::current());
+            super::promote_current_thread_realtime("evdev-flush");
             loop {
                 while CURSOR_MODE.load(Ordering::Acquire) != MODE_REMOTE
                     && !super::is_game_driving()
@@ -840,6 +841,10 @@ fn pump_device(
     mut broker: Option<keyboard_broker::Broker>,
     sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static>,
 ) {
+    if is_pointer {
+        // Pointer motion is the latency-critical stream; keyboards stay normal.
+        super::promote_current_thread_realtime("evdev-pointer");
+    }
     let mut accum_dx: i32 = 0;
     let mut accum_dy: i32 = 0;
     let mut grabbed = broker.is_some();
@@ -1833,3 +1838,79 @@ impl InputInject for UinputInject {
 }
 
 pub(crate) mod lock_feedback;
+
+#[cfg(test)]
+mod forward_bench {
+    use super::*;
+
+    /// Manual benchmark: `cargo test -p mineshare-input --release --lib --
+    /// --ignored --nocapture --test-threads=1 linux_forward_flush_bench`.
+    /// Feeds a jittered hardware stream through the Game Drive forward path
+    /// (coalescer + watchdog) and prints the forwarded rate and per-sample
+    /// age at flush; does not assert.
+    #[test]
+    #[ignore = "manual forward-pacing benchmark; prints, does not assert"]
+    fn linux_forward_flush_bench() {
+        let log: std::sync::Arc<parking_lot::Mutex<Vec<(std::time::Instant, i32)>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_log = log.clone();
+        let sink: std::sync::Arc<dyn Fn(InputEvent) + Send + Sync + 'static> =
+            std::sync::Arc::new(move |ev: InputEvent| {
+                if let InputEvent::MouseMove { dx, .. } = ev {
+                    sink_log.lock().push((std::time::Instant::now(), dx));
+                }
+            });
+        super::super::set_mouse_sensitivity(1.0);
+        super::super::set_game_drive(super::super::GameDrive::Driving);
+        start_flush_watchdog(sink.clone());
+        fn pct(v: &mut [u128], p: usize) -> u128 {
+            v.sort_unstable();
+            v[(v.len() - 1) * p / 100]
+        }
+        for hz in [500u32, 1000] {
+            for (name, period, jitter) in [("mouse1k", 1_000u64, 300u64), ("mouse2k", 500, 150)] {
+                for rep in 0..5 {
+                    super::super::set_mouse_rate_hz(hz);
+                    wake_flush_watchdog();
+                    thread::sleep(Duration::from_millis(20));
+                    log.lock().clear();
+                    let total = 2_000usize;
+                    let mut sent = Vec::with_capacity(total);
+                    let start = std::time::Instant::now();
+                    for i in 0..total as u64 {
+                        let jit = (i * 7_919) % jitter.max(1);
+                        let at = start + Duration::from_micros(i * period + jit);
+                        while std::time::Instant::now() < at {
+                            std::hint::spin_loop();
+                        }
+                        sent.push(std::time::Instant::now());
+                        handle_motion_batch(1, 0, &*sink);
+                    }
+                    thread::sleep(Duration::from_millis(30));
+                    let log = log.lock().clone();
+                    let mut cum = 0usize;
+                    let (mut oldest, mut newest) = (Vec::new(), Vec::new());
+                    for (at, dx) in &log {
+                        let first = cum;
+                        cum += *dx as usize;
+                        oldest.push(at.saturating_duration_since(sent[first]).as_micros());
+                        newest.push(at.saturating_duration_since(sent[cum - 1]).as_micros());
+                    }
+                    let span = log.last().unwrap().0.duration_since(log[0].0).as_secs_f64();
+                    println!(
+                        "LFWD hz={hz} scen={name} rep={rep} flushes={} rate_hz={:.0} moved={cum} \
+                         oldest_age_us p50={} p95={} p99={} newest_age_us p50={} p95={}",
+                        log.len(),
+                        (log.len() - 1) as f64 / span,
+                        pct(&mut oldest, 50),
+                        pct(&mut oldest, 95),
+                        pct(&mut oldest, 99),
+                        pct(&mut newest, 50),
+                        pct(&mut newest, 95),
+                    );
+                }
+            }
+        }
+        super::super::set_game_drive(super::super::GameDrive::Off);
+    }
+}

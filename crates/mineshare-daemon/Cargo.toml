@@ -60,4 +60,4 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_System_StationsAndDesktops"] }
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_System_StationsAndDesktops", "Win32_System_WindowsProgramming"] }

@@ -18,6 +18,9 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+mod realtime;
+pub use realtime::promote_current_thread_realtime;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Button {
     Left,
@@ -704,11 +707,65 @@ pub fn set_mouse_rate_hz(hz: u32) {
     TARGET_FLUSH_US.store(hz_to_flush_us(hz), Ordering::Relaxed);
 }
 
-/// Current mouse-motion interval in microseconds. Platform capture loops and
-/// the daemon's receive-side injection pacer share this deadline so neither
-/// side can burst faster than the rate selected by the user.
+/// Current mouse-motion interval in microseconds. Platform capture loops use
+/// this deadline so the machine the mouse is attached to forwards at the
+/// rate selected by the user there. The receive-side injection pacer does
+/// not follow it: see [`MAX_MOUSE_RATE_FLUSH_US`].
 pub fn target_flush_us() -> u64 {
     TARGET_FLUSH_US.load(Ordering::Relaxed)
+}
+
+/// Flush interval at the top of the mouse-rate slider (1,000 Hz). The rate is
+/// a per-machine setting and only the sender's value reflects the user's
+/// choice for the mouse they are moving, so a receiver paces catch-up bursts
+/// at this ceiling instead of its own (often default 500 Hz) setting, which
+/// would otherwise halve a 1,000 Hz sender and add ~2.5 ms of merge delay.
+pub const MAX_MOUSE_RATE_FLUSH_US: u64 = 1_000;
+
+/// True while injected mouse motion goes through Windows `SendInput` as true
+/// relative moves (a cursor-locked game in the foreground, or Game Drive).
+/// That path costs ~0.4-0.65 ms per call through the game's hook chain, so the
+/// receiver paces it at its own mouse-rate setting instead of the ceiling.
+pub fn relative_mouse_injection_active() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::relative_mouse_injection_active()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Burst tolerance of half a window: a hardware sample that lands slightly
+/// before its slot (USB polling jitter) goes out at once instead of waiting
+/// for the watchdog, while the long-run rate stays at the setting.
+///
+/// Windows only: its watchdog wakes late on a 1 ms timer, so anchoring each
+/// window to the actual flush drifted below the setting. Linux timers are
+/// precise and its flush-anchored windows stay phase-aligned with hardware
+/// events; a slot grid there measured higher latency (`linux_forward_flush_bench`).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn flush_deadline(slot_us: u64, now_us: u64, flush_us: u64) -> u64 {
+    let tolerance = flush_us / 2;
+    if slot_us == 0 || now_us.saturating_add(tolerance) >= slot_us {
+        now_us
+    } else {
+        slot_us - tolerance
+    }
+}
+
+/// Next slot after a flush at `flush_at_us`. Lateness of up to one window is
+/// absorbed by advancing from the scheduled slot (no drift); a longer pause
+/// restarts the schedule from the flush so no burst debt accumulates.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn next_flush_slot(slot_us: u64, flush_at_us: u64, flush_us: u64) -> u64 {
+    let base = if slot_us != 0 && flush_at_us < slot_us.saturating_add(flush_us) {
+        slot_us
+    } else {
+        flush_at_us
+    };
+    base.saturating_add(flush_us)
 }
 
 static HIGH_RES_HOLDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1590,6 +1647,41 @@ pub fn make_inject() -> anyhow::Result<Box<dyn InputInject>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_slots_chain_without_drift_and_stay_rate_capped() {
+        let t = 2_000;
+        // Idle: the first sample goes out immediately.
+        assert_eq!(flush_deadline(0, 10_000, t), 10_000);
+        let slot = next_flush_slot(0, 10_000, t);
+        assert_eq!(slot, 12_000);
+        // A late flush (watchdog overshoot) must not push the schedule back.
+        let slot = next_flush_slot(slot, 12_800, t);
+        assert_eq!(slot, 14_000, "lateness must be absorbed, not accumulated");
+        // Jitter within half a window goes out at once…
+        assert_eq!(flush_deadline(slot, 13_100, t), 13_100);
+        // …but a sample a full window early waits (rate cap).
+        assert_eq!(flush_deadline(slot, 12_000, t), 13_000);
+        // A long pause restarts the schedule: no burst debt.
+        assert_eq!(next_flush_slot(slot, 50_000, t), 52_000);
+
+        // A 1 kHz hardware stream at a 500 Hz setting forwards at 500 Hz.
+        let (mut slot, mut flushes, mut armed) = (0u64, 0u32, None::<u64>);
+        for i in 0..10_000u64 {
+            let now = i * 1_000;
+            let deadline = *armed.get_or_insert_with(|| flush_deadline(slot, now, t));
+            if now >= deadline {
+                slot = next_flush_slot(slot, now, t);
+                flushes += 1;
+                armed = None;
+            }
+        }
+        assert!(
+            (4_990..=5_010).contains(&flushes),
+            "{flushes} flushes in 10 s"
+        );
+    }
+
     use std::sync::atomic::Ordering::Relaxed;
 
     /// All routing state lives in process-global statics, so the tests
