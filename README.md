@@ -39,7 +39,9 @@ In the measured Windows pair, continuous audio median/p95 changed from **190.29/
 
 **0.0.24 (input latency):** the receiving Windows machine paced mouse motion on the default ~15.6 ms timer tick: a 1 ms wait measured **p50 15.5 ms**. It now holds a 1 ms timer only while motion is flowing (released after 1 s idle), measured at **p50 1.5 ms**. It also opts out of Windows 11 timer throttling for the hidden tray app. Each side logs per-stage input timing every 5 s (`input stage timing`: queue age, send, OS inject, pacer overshoot), using only one machine's clock per stage. Reconnecting to an unreachable peer now backs off (0.25 s → 4 s cap, still within the 5 s recovery target) instead of redialling all night. A physical end-to-end latency comparison has not been measured yet.
 
-**0.0.31:**
+**0.0.32:** fixes touchpad crossing, which 0.0.31 broke (a Precision Touchpad's pointer motion was being discarded).
+
+**0.0.31 (also in 0.0.32):**
 - Mouse motion that arrives on time is no longer held by the receiver's pacer. On the live pair, inject queue age dropped from **p95 2000 µs to 100 µs**.
 - A Windows sender keeps its configured rate (**734 → 1000 Hz** at the 1 kHz setting, in a benchmark).
 - Linux input threads get realtime scheduling through rtkit. Under load, wake latency p99 dropped from **~1 ms to ~55 µs** in a benchmark. See [Linux realtime input](docs/linux-realtime-input.md).
@@ -57,8 +59,8 @@ Grab the newest installer for your OS from the **[latest release ›](https://gi
 
 | Version | What it is |
 |---|---|
-| **[v0.0.31](https://github.com/MCTEEKUNG/mineshare/releases/tag/v0.0.31)** | Latest published release (installers below). The badge at the top always shows the newest one. |
-| [v0.0.24](https://github.com/MCTEEKUNG/mineshare/releases/tag/v0.0.24) | Previous release. |
+| **[v0.0.32](https://github.com/MCTEEKUNG/mineshare/releases/tag/v0.0.32)** | Latest published release (installers below). The badge at the top always shows the newest one. |
+| [v0.0.31](https://github.com/MCTEEKUNG/mineshare/releases/tag/v0.0.31) | Previous release. Windows laptops cannot cross to the other computer with a Precision Touchpad on this version; use v0.0.32. |
 
 Both computers must run a compatible build, so install the same version on each.
 
