@@ -10,6 +10,8 @@
   <a href="docs/ubuntu-readiness.md">Ubuntu support</a> ·
   <a href="Design.md">Design guideline</a>
   <br /><br />
+  <a href="https://github.com/MCTEEKUNG/mineshare/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/MCTEEKUNG/mineshare?label=latest%20release" /></a>
+  <br /><br />
 
   <img alt="Platforms: Windows 11 and Ubuntu" src="https://img.shields.io/badge/Windows_11_+_Ubuntu-LAN_bridge-bd9653?style=flat-square" />
   <img alt="Status: pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-d1ad6c?style=flat-square" />
@@ -37,6 +39,14 @@ In the measured Windows pair, continuous audio median/p95 changed from **190.29/
 
 **0.0.24 (input latency):** the receiving Windows machine paced mouse motion on the default ~15.6 ms timer tick: a 1 ms wait measured **p50 15.5 ms**. It now holds a 1 ms timer only while motion is flowing (released after 1 s idle), measured at **p50 1.5 ms**. It also opts out of Windows 11 timer throttling for the hidden tray app. Each side logs per-stage input timing every 5 s (`input stage timing`: queue age, send, OS inject, pacer overshoot), using only one machine's clock per stage. Reconnecting to an unreachable peer now backs off (0.25 s → 4 s cap, still within the 5 s recovery target) instead of redialling all night. A physical end-to-end latency comparison has not been measured yet.
 
+**0.0.31 (on `main`, unreleased):**
+- Mouse motion that arrives on time is no longer held by the receiver's pacer. On the live pair, inject queue age dropped from **p95 2000 µs to 100 µs**.
+- A Windows sender keeps its configured rate (**734 → 1000 Hz** at the 1 kHz setting, in a benchmark).
+- Linux input threads get realtime scheduling through rtkit. Under load, wake latency p99 dropped from **~1 ms to ~55 µs** in a benchmark. See [Linux realtime input](docs/linux-realtime-input.md).
+- On Linux, clipboard polling is 12× cheaper.
+- On Windows, the UI is suspended while the window is minimized. Its CPU use dropped from **~5 % to under 0.6 %** of a core.
+- The mouse can now cross into a cursor-locked game such as Minecraft or Roblox.
+
 Ubuntu Typeless coexistence remains opt-in and awaits post-login physical acceptance. See [setup and limitations](docs/linux-typeless-keyboard-broker.md).
 
 ---
@@ -44,6 +54,13 @@ Ubuntu Typeless coexistence remains opt-in and awaits post-login physical accept
 ## ⬇️ Download
 
 Grab the newest installer for your OS from the **[latest release ›](https://github.com/MCTEEKUNG/mineshare/releases/latest)** — no toolchain required.
+
+| Version | What it is |
+|---|---|
+| **[v0.0.24](https://github.com/MCTEEKUNG/mineshare/releases/tag/v0.0.24)** | Latest published release (installers below). The badge at the top always shows the newest one. |
+| **0.0.31** | Current `main`, not yet published as a release. Build it from source (see [Building installers](#building-installers-from-source)). |
+
+Both computers must run a compatible build, so install the same version on each.
 
 | OS | File | Install |
 |---|---|---|
