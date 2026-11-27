@@ -1436,12 +1436,18 @@ unsafe fn handle_raw_input(h: HRAWINPUT) {
         return;
     }
 
-    // Synthetic input (our own SendInput injection, which games receive as
-    // true-relative motion) reaches WM_INPUT with a NULL device handle. It is
-    // not this machine's hardware: counting it as local activity made the
-    // first injected move after a peer take-over look like the laptop's own
-    // mouse and released the peer's control within milliseconds.
-    if raw.header.hDevice.0.is_null() {
+    // Our own SendInput injection reaches WM_INPUT with a NULL device handle.
+    // While the peer drives a cursor-locked game it is not this machine's
+    // hardware: counting it as local activity made the first injected move
+    // look like local motion and released the peer's control within
+    // milliseconds. Only skip it in that state: a Precision Touchpad's
+    // pointer motion also has a NULL handle (measured: 112 of 112 events),
+    // and it must still reach edge-crossing detection.
+    if should_ignore_synthetic_raw_mouse(
+        raw.header.hDevice.0.is_null(),
+        super::peer_in_remote(),
+        super::relative_mouse_injection_active(),
+    ) {
         return;
     }
 
@@ -2065,6 +2071,14 @@ fn send_desktop_mouse_move(dx: i32, dy: i32) -> Result<()> {
 
 pub(crate) fn relative_mouse_injection_active() -> bool {
     should_use_true_relative_injection(game_foreground(), super::game_drive())
+}
+
+fn should_ignore_synthetic_raw_mouse(
+    null_device: bool,
+    peer_in_remote: bool,
+    relative_injection_active: bool,
+) -> bool {
+    null_device && peer_in_remote && relative_injection_active
 }
 
 fn should_use_true_relative_injection(game_foreground: bool, game_drive: super::GameDrive) -> bool {
@@ -2965,6 +2979,16 @@ mod tests {
             assert!(should_inject_owned_edge(&held, shift, false));
             held.remove(&shift);
         }
+    }
+
+    #[test]
+    fn touchpad_motion_is_only_ignored_while_the_peer_drives_a_game() {
+        // Precision Touchpad motion has a NULL device handle too.
+        assert!(!should_ignore_synthetic_raw_mouse(true, false, false));
+        assert!(!should_ignore_synthetic_raw_mouse(true, false, true));
+        assert!(!should_ignore_synthetic_raw_mouse(true, true, false));
+        assert!(should_ignore_synthetic_raw_mouse(true, true, true));
+        assert!(!should_ignore_synthetic_raw_mouse(false, true, true));
     }
 
     #[test]
