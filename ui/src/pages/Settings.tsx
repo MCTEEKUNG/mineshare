@@ -6,7 +6,7 @@ import { useT } from "../i18n";
 import { ThemeSwitcher } from "../theme";
 import LockEffectSection from "./LockEffect";
 import StartupSection from "./Startup";
-import LayoutPage from "./Layout";
+import WorkspaceLayout from "../components/WorkspaceLayout";
 import Disclosure from "../components/Disclosure";
 import type { Status } from "../types";
 import { useConnectionControl } from "../connectionState";
@@ -15,7 +15,7 @@ export default function SettingsPage({ status }: { status: Status | null }) {
   const { t } = useT();
   const { control } = useConnectionControl();
   return <div className="settings-stack">
-    <section className="panel p-5"><h2 className="section-title">{t("settings_screens")}</h2><LayoutPage peerName={(status?.peer_connected && !control?.paused ? status.peer_name : control?.selected_peer?.display_name) ?? undefined} connected={status?.peer_connected && !control?.paused} status={status} /></section>
+    <section className="panel p-5"><h2 className="section-title">{t("settings_screens")}</h2><WorkspaceLayout peerName={(status?.peer_connected && !control?.paused ? status.peer_name : control?.selected_peer?.display_name) ?? undefined} connected={status?.peer_connected && !control?.paused} status={status} /></section>
     <section className="panel p-5 flex flex-wrap justify-between items-center gap-4">
       <h2 className="text-sm font-semibold">{t("section_appearance")}</h2><ThemeSwitcher />
     </section>

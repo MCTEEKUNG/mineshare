@@ -1,0 +1,10 @@
+[package]
+name = "mineshare-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mineshare-core.workspace = true
+mineshare-input.workspace = true
+serde.workspace = true
+anyhow.workspace = true

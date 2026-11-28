@@ -25,9 +25,11 @@
 
 > **About the animation:** an original workflow illustration, not a screen recording, benchmark, or proof of compatibility. The app interface is simplified for storytelling. Desktop autostart requires setup; trusted peers must already be paired on the same LAN.
 
-MineShare is a Rust + Tauri desktop bridge for **Windows and Ubuntu**: shared input, clipboard, files and bidirectional audio over an encrypted local connection. No video streaming or cloud relay is required for the bridge.
+MineShare connects **Windows, Ubuntu and Android** over encrypted local connections. Computers share input, clipboard, files and audio. The Android companion receives mouse and keyboard input and shares supported app audio in both directions. See the [Android build and setup guide](android/README.md).
 
-**Development snapshot:** request-based pairing, file paste on demand (`control-v4`), microphone continuity fixes, and bounded audio/input queues. See [connection controls](docs/connection-controls.md). Both computers need a compatible build. Development changes are not necessarily published as installers.
+The development build supports multiple directly paired devices at the same time. Choose the keyboard/mouse destination on Home or cross a configured screen edge. Configure system-audio send and receive separately for each connected device on Home or Audio. Pair the laptop and phone directly to keep their connection working when another computer turns off. All devices need the new `control-v5` build.
+
+**Development snapshot:** Android support, simultaneous device connections, independent system-audio routes, request-based pairing and file paste on demand (`control-v5`). See [connection controls](docs/connection-controls.md). All devices need a compatible build. Development changes are not necessarily published as installers.
 
 ### Performance work: current status
 
@@ -92,10 +94,10 @@ Both computers must run a compatible build, so install the same version on each.
 
 **Non-goals:** macOS, internet/NAT traversal, video mirroring.
 
-MineShare connects one peer at a time. On **Home**, use **Choose a computer** to
+MineShare connects multiple paired devices at a time. On **Home**, use **Add a device** to
 see devices on the LAN, select one, and confirm **Send request**. The other
-computer must accept before a first-time PIN exchange begins. Discovery never
-pairs new computers automatically. Your selected paired computer reconnects
+device must accept before a first-time PIN exchange begins. Discovery never
+pairs new devices automatically. Enabled paired devices reconnect
 after an outage; **Disconnect & pause** blocks reconnection until you resume.
 Both computers need compatible builds with staged clipboard file paste support.
 

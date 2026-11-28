@@ -13,18 +13,26 @@ $ErrorActionPreference = 'Stop'
 $Root = Resolve-Path "$PSScriptRoot\.."
 Set-Location "$Root\ui"
 
-# Frozen lockfile so `bun install` doesn't silently bump deps
-# on a release build. Falls back to plain install for first-
-# time checkouts.
-if (Test-Path 'bun.lock') {
+# Use the lockfile for the package manager that maintains this checkout.
+# The frontend build command uses npm, and package-lock.json is authoritative
+# when both lockfile formats are present.
+$useNpm = Test-Path 'package-lock.json'
+if ($useNpm) {
+    npm ci
+} elseif (Test-Path 'bun.lock') {
     bun install --frozen-lockfile
 } else {
     bun install
 }
+if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed' }
 
 Write-Host ''
 Write-Host '==> tauri build' -ForegroundColor Cyan
-bun run tauri build
+if ($useNpm) {
+    npm run tauri -- build -- --locked
+} else {
+    bun run tauri build -- --locked
+}
 if ($LASTEXITCODE -ne 0) { throw 'Tauri build failed' }
 node "$Root\installer\windows\build-bootstrapper.mjs"
 if ($LASTEXITCODE -ne 0) { throw 'Windows bootstrapper build failed' }

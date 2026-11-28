@@ -45,7 +45,7 @@ it("identifies the selected offline installation and does not replace it with a 
   expect(document.querySelector("header [role='status']")?.textContent).toBe("Disconnected");
   expect(await screen.findByRole("button", { name: "Arrange screen: Tee" })).toBeTruthy();
   expect(screen.queryByText("Stale connection")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Choose a computer" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add a device" }));
   const picker = await screen.findByRole("dialog");
   await within(picker).findByText("windows · 192.168.1.111");
   expect(within(picker).getByText("Selected computer: Tee · fda74f50")).toBeTruthy();

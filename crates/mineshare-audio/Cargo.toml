@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+mineshare-protocol.workspace = true
 mineshare-core = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }

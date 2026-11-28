@@ -18,6 +18,7 @@
         "minWidth": 880,
         "minHeight": 560,
         "resizable": true,
+        "decorations": false,
         "fullscreen": false,
         "dragDropEnabled": true,
         "additionalBrowserArgs": "--disable-gpu --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"

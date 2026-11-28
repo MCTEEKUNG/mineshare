@@ -200,7 +200,7 @@ function Switch({ on }: { on: boolean }) {
     <span
       className={
         "relative inline-block h-5 w-9 rounded-full transition-colors shrink-0 " +
-        (on ? "bg-[#4b6de8]" : "bg-[#777471]")
+        (on ? "bg-ds-accent" : "bg-ds-control-border")
       }
     >
       <span

@@ -1272,6 +1272,35 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
         let screen_h = SCREEN_H.load(Ordering::Relaxed);
         let prev_x = CURSOR_X.load(Ordering::Relaxed);
         let prev_y = CURSOR_Y.load(Ordering::Relaxed);
+        let candidate_side = if prev_x.saturating_add(dx) < 0 {
+            Some(super::PeerSide::Left)
+        } else if prev_x.saturating_add(dx) >= screen_w {
+            Some(super::PeerSide::Right)
+        } else if prev_y.saturating_add(dy) < 0 {
+            Some(super::PeerSide::Top)
+        } else if prev_y.saturating_add(dy) >= screen_h {
+            Some(super::PeerSide::Bottom)
+        } else {
+            None
+        };
+        if let Some(side) = candidate_side {
+            let actual = pointer::sample();
+            let pos = match actual {
+                pointer::Sample::Desktop { x, y, .. } | pointer::Sample::Position(x, y) => {
+                    Some((x, y))
+                }
+                _ => None,
+            };
+            let confirmed = pos.is_some_and(|(x, y)| match side {
+                super::PeerSide::Left => x <= 0 && dx < 0,
+                super::PeerSide::Right => x >= screen_w - 1 && dx > 0,
+                super::PeerSide::Top => y <= 0 && dy < 0,
+                super::PeerSide::Bottom => y >= screen_h - 1 && dy > 0,
+            });
+            if confirmed {
+                super::select_peer_edge(side);
+            }
+        }
         let mut motion = local_motion(
             (prev_x, prev_y),
             (dx, dy),
@@ -1365,7 +1394,7 @@ fn handle_motion_batch<F: Fn(InputEvent) + ?Sized>(dx: i32, dy: i32, sink: &F) {
             super::clamp_remote_depth(raw, peer_w, EXIT_BUFFER_PX, super::remote_input_locked());
         VIRT_X.store(new_virt_x, Ordering::Relaxed);
 
-        if new_virt_x <= -EXIT_BUFFER_PX {
+        if new_virt_x <= -EXIT_BUFFER_PX && !super::peer_controls_exit() {
             // Hand any buffered motion to the peer before flipping
             // back to LOCAL — otherwise the last few px the user
             // dragged before crossing back would never reach them.
@@ -1913,4 +1942,57 @@ mod forward_bench {
         }
         super::super::set_game_drive(super::super::GameDrive::Off);
     }
+}
+
+pub(super) fn remote_text_for_key(code: KeyCode) -> Option<String> {
+    use parking_lot::Mutex;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::{xkb::ConnectionExt as _, xproto::ConnectionExt as _};
+    if matches!(code.0, 1 | 14 | 15 | 28 | 29 | 42 | 54 | 56 | 58..=83 | 96..=126) {
+        return None;
+    }
+    let held = super::forwarded_input_state();
+    if held.key_is_down(56)
+        || held.key_is_down(100)
+        || held.key_is_down(29)
+        || held.key_is_down(97)
+        || held.key_is_down(125)
+        || held.key_is_down(126)
+    {
+        return None;
+    }
+    static XKB: std::sync::OnceLock<Option<Mutex<x11rb::rust_connection::RustConnection>>> =
+        std::sync::OnceLock::new();
+    let connection = XKB
+        .get_or_init(|| x11rb::connect(None).ok().map(|(c, _)| Mutex::new(c)))
+        .as_ref()?;
+    let conn = connection.lock();
+    let _ = conn.xkb_use_extension(1, 0).ok()?.reply().ok()?;
+    let xkb = conn.xkb_get_state(0x100u16).ok()?.reply().ok()?;
+    let mapping = conn
+        .get_keyboard_mapping(u8::try_from(code.0 + 8).ok()?, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let shift = held.key_is_down(42) || held.key_is_down(54);
+    let group = u8::from(xkb.group) as usize;
+    let index = group * 2 + usize::from(shift);
+    let keysym = *mapping
+        .keysyms
+        .get(index)
+        .or_else(|| mapping.keysyms.first())?;
+    let cp = match keysym {
+        0x20..=0xff => keysym,
+        0x0da1..=0x0df9 => keysym - 0x0da1 + 0x0e01,
+        0x01000000..=0x0110ffff => keysym & 0xffffff,
+        _ => return None,
+    };
+    let ch = char::from_u32(cp)?;
+    let text = if !shift && u16::from(xkb.locked_mods) & 2 != 0 && ch.is_ascii_alphabetic() {
+        ch.to_uppercase().collect()
+    } else {
+        ch.to_string()
+    };
+    let _ = conn.flush();
+    Some(text)
 }

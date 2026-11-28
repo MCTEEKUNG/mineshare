@@ -1,0 +1,29 @@
+[package]
+name = "mineshare-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "mineshare_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mineshare-core.workspace = true
+mineshare-input.workspace = true
+mineshare-net.workspace = true
+mineshare-protocol.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+rand.workspace = true
+opus.workspace = true
+socket2.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+

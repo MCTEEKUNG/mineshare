@@ -322,7 +322,7 @@ mod tests {
             display_name: "test".into(),
             os: "test".into(),
             control_port: port,
-            pairing_protocol: 1,
+            pairing_protocol: 5,
             addresses: addrs.iter().map(|a| a.parse().unwrap()).collect(),
         }
     }
@@ -343,7 +343,7 @@ mod tests {
             peer_from_info(&service_info(&new).unwrap())
                 .unwrap()
                 .pairing_protocol,
-            1
+            5
         );
         let old = new.clone();
         new.pairing_protocol = 0;

@@ -2692,6 +2692,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "mineshare-core",
+ "mineshare-protocol",
  "opus",
  "parking_lot",
  "ringbuf",
@@ -2729,6 +2730,7 @@ dependencies = [
  "mineshare-input",
  "mineshare-ipc",
  "mineshare-net",
+ "mineshare-protocol",
  "parking_lot",
  "percent-encoding",
  "rand",
@@ -2799,6 +2801,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "mineshare-protocol"
+version = "0.0.32"
+dependencies = [
+ "anyhow",
+ "mineshare-core",
+ "mineshare-input",
+ "serde",
 ]
 
 [[package]]

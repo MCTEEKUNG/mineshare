@@ -14,14 +14,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Display-only peer state; never changes input ownership or lock routing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct LockVisual {
-    pub locked: bool,
-    pub effect: mineshare_input::LockEffect,
-}
+pub use mineshare_protocol::LockVisual;
 static PEER_LOCK_VISUAL: Mutex<Option<LockVisual>> = Mutex::new(None);
 pub(crate) fn set_peer_lock_visual(value: Option<LockVisual>) {
     *PEER_LOCK_VISUAL.lock() = value.map(|v| LockVisual {

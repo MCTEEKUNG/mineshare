@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use rand::Rng;
 use serde::Serialize;
+#[cfg(test)]
+pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -195,6 +197,7 @@ mod tests {
 
     #[test]
     fn cancelled_attempt_clears_ui_and_queued_pin_and_rejects_stale_submissions() {
+        let _serial = TEST_LOCK.blocking_lock();
         let _serial = TEST_GUARD.blocking_lock();
         let first = Attempt::begin();
         set_phase(PairingPhase::AwaitingPin {

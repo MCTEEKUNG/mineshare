@@ -427,6 +427,7 @@ fn advance_remote_virtual_cursor(dx: i32, dy: i32) -> i32 {
 fn track_raw_remote_motion(dx: i32, dy: i32) -> bool {
     CURSOR_MODE.load(Ordering::Acquire) == MODE_REMOTE
         && advance_remote_virtual_cursor(dx, dy) <= -EXIT_BUFFER_PX
+        && !super::peer_controls_exit()
 }
 
 /// Spawn the event-driven flush thread once. It parks with zero polling while
@@ -705,7 +706,15 @@ fn process_local_mouse_motion(x: i32, y: i32, track_activity: bool) {
     LAST_X.store(x, Ordering::Relaxed);
     LAST_Y.store(y, Ordering::Relaxed);
 
-    if crossed_peer_edge(super::peer_side(), bounds(), (last_x, last_y), (x, y))
+    let crossed = [
+        super::PeerSide::Left,
+        super::PeerSide::Right,
+        super::PeerSide::Top,
+        super::PeerSide::Bottom,
+    ]
+    .into_iter()
+    .find(|side| crossed_peer_edge(*side, bounds(), (last_x, last_y), (x, y)));
+    if crossed.is_some_and(super::select_peer_edge)
         && !super::is_input_locked()
         && super::game_drive() == super::GameDrive::Off
     {
@@ -1603,7 +1612,7 @@ unsafe extern "system" fn low_mouse_hook(code: i32, wparam: WPARAM, lparam: LPAR
                     let fdy = scaled_dy.clamp(-MAX_DELTA_PX, MAX_DELTA_PX);
                     if fdx != 0 || fdy != 0 {
                         let new_virt_x = advance_remote_virtual_cursor(fdx, fdy);
-                        if new_virt_x <= -EXIT_BUFFER_PX {
+                        if new_virt_x <= -EXIT_BUFFER_PX && !super::peer_controls_exit() {
                             exit_remote(VIRT_Y.load(Ordering::Relaxed));
                             exited = true;
                         } else {
@@ -2027,6 +2036,48 @@ fn move_desktop_cursor_rel(dx: i32, dy: i32) -> Result<()> {
     Ok(())
 }
 
+/// Ask a helper thread to emit one real mouse-move packet at the current
+/// cursor position, without blocking the caller. Latest-wins: requests that
+/// arrive while a packet is in flight collapse into a single follow-up.
+fn request_desktop_motion_packet() {
+    static WORKER: OnceLock<(std::sync::Arc<AtomicBool>, thread::Thread)> = OnceLock::new();
+    let (pending, thread) = WORKER.get_or_init(|| {
+        let pending = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = pending.clone();
+        let handle = thread::Builder::new()
+            .name("mineshare-drag-packet".into())
+            .spawn(move || {
+                let (mut n, mut sum, mut max, mut window) = (0u64, 0u64, 0u64, Instant::now());
+                loop {
+                    thread::park();
+                    while flag.swap(false, Ordering::AcqRel) {
+                        let started = Instant::now();
+                        // A relative zero move emits a real packet at the current
+                        // position and cannot drag the cursor back to a stale
+                        // absolute position (the async race looked like stutter).
+                        let _ = send_relative_mouse_input(0, 0);
+                        let us = started.elapsed().as_micros() as u64;
+                        // Each packet walks the machine-wide hook chain (avg 3-5 ms
+                        // here); at the ~300 Hz mouse rate that saturated the chain
+                        // and delayed every other input. ~60 Hz is plenty for apps.
+                        thread::sleep(std::time::Duration::from_millis(16));
+                        n += 1;
+                        sum += us;
+                        max = max.max(us);
+                        if window.elapsed() >= std::time::Duration::from_secs(2) {
+                            info!(packets = n, avg_us = sum / n, max_us = max, "drag packet SendInput timing");
+                            (n, sum, max, window) = (0, 0, 0, Instant::now());
+                        }
+                    }
+                }
+            })
+            .expect("spawn drag packet thread");
+        (pending, handle.thread().clone())
+    });
+    pending.store(true, Ordering::Release);
+    thread.unpark();
+}
+
 fn send_desktop_mouse_move(dx: i32, dy: i32) -> Result<()> {
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.context("get desktop cursor position")?;
@@ -2159,6 +2210,27 @@ fn notify_hidden_terminal_of_peer_motion() {
 }
 
 impl InputInject for EnigoInject {
+    fn pointer_position(&self) -> Option<super::PointerPosition> {
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point) }.ok()?;
+        let (left, top, right, bottom) = bounds();
+        Some(super::PointerPosition {
+            x: point.x,
+            y: point.y,
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+
+    fn warp_pointer(&self, x: i32, y: i32) -> Result<()> {
+        unsafe { SetCursorPos(x, y) }.context("restore relay cursor")?;
+        LAST_X.store(x, Ordering::Relaxed);
+        LAST_Y.store(y, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> Result<()> {
         let game_foreground = game_foreground();
         let game_drive = super::game_drive();
@@ -2185,7 +2257,16 @@ impl InputInject for EnigoInject {
             // alone changes position without restoring their hidden pointer.
             // Send the requested movement once, without clicks, extra motion,
             // foreground changes, or an unbalanced ShowCursor call.
-            send_desktop_mouse_move(dx, dy)?;
+            if mouse_button_held {
+                // SendInput measured 4-12 ms per call while dragging on the
+                // affected laptop (machine-wide hook chain), which capped the
+                // drag at a sluggish rate. Move the cursor directly (<0.1 ms)
+                // and let a helper thread deliver the real packet.
+                move_desktop_cursor_rel(dx, dy)?;
+                request_desktop_motion_packet();
+            } else {
+                send_desktop_mouse_move(dx, dy)?;
+            }
             notify_hidden_terminal_of_peer_motion();
         } else {
             // An already-visible desktop deliberately avoids SendInput. Every SendInput
@@ -2539,6 +2620,91 @@ fn scancode_to_vk(scan: u16) -> u16 {
 }
 
 const _: usize = mem::size_of::<MSLLHOOKSTRUCT>();
+
+pub(super) fn remote_text_for_key(code: KeyCode) -> Option<String> {
+    text_for_key(code, None)
+}
+
+pub(super) fn remote_text_for_received_key(
+    code: KeyCode,
+    held: &super::ForwardedInputState,
+) -> Option<String> {
+    text_for_key(code, Some(held))
+}
+
+fn text_for_key(code: KeyCode, received: Option<&super::ForwardedInputState>) -> Option<String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, GetKeyState, GetKeyboardLayout, ToUnicodeEx,
+    };
+    // Navigation/control keys retain physical semantics. Printable keys use
+    // the foreground application's layout, including Thai and dead keys.
+    if matches!(code.0, 1 | 14 | 15 | 28 | 29 | 42 | 54 | 56 | 58..=83 | 96..=126) {
+        return None;
+    }
+    unsafe {
+        let mut state = [0u8; 256];
+        for (vk, value) in state.iter_mut().enumerate() {
+            if received.is_none() && GetAsyncKeyState(vk as i32) < 0 {
+                *value = 0x80;
+            }
+        }
+        if let Some(held) = received {
+            for scan in 0..1024u16 {
+                if held.key_is_down(scan) {
+                    let vk = scancode_to_vk(scan) as usize;
+                    if vk < state.len() {
+                        state[vk] = 0x80;
+                    }
+                }
+            }
+            state[0x10] = if held.key_is_down(42) || held.key_is_down(54) {
+                0x80
+            } else {
+                0
+            };
+            state[0x11] = if held.key_is_down(29) || held.key_is_down(97) {
+                0x80
+            } else {
+                0
+            };
+            state[0x12] = if held.key_is_down(56) || held.key_is_down(100) {
+                0x80
+            } else {
+                0
+            };
+        }
+        if state[0x12] & 0x80 != 0
+            || state[0x11] & 0x80 != 0
+            || state[0x5b] & 0x80 != 0
+            || state[0x5c] & 0x80 != 0
+        {
+            return None;
+        }
+        state[0x14] |= (GetKeyState(0x14) & 1) as u8;
+        let foreground = GetForegroundWindow();
+        let thread = GetWindowThreadProcessId(foreground, None);
+        let layout = GetKeyboardLayout(thread);
+        let vk = scancode_to_vk(code.0);
+        let mut buffer = [0u16; 8];
+        let count = ToUnicodeEx(
+            vk as u32,
+            code.0 as u32,
+            &state,
+            &mut buffer,
+            0,
+            Some(layout),
+        );
+        if count > 0 {
+            Some(String::from_utf16_lossy(
+                &buffer[..(count as usize).min(buffer.len())],
+            ))
+        } else if count < 0 {
+            Some(String::new())
+        } else {
+            None
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

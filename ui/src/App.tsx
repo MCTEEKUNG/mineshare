@@ -8,6 +8,7 @@ import SettingsPage from "./pages/Settings";
 import PairingModal from "./PairingModal";
 import LinuxSetup from "./LinuxSetup";
 import { useConnectionControl } from "./connectionState";
+import { comparePeerBuild } from "./buildCompatibility";
 import WorkspaceIcon from "./components/WorkspaceIcon";
 import { LanguageToggle, useT } from "./i18n";
 import appIcon from "./assets/mineshare-app-icon.svg";
@@ -17,6 +18,7 @@ import {
   IconX, IconAlertTriangle,
 } from "./icons";
 import type { Status, Latency, Transfer, ToastEntry } from "./types";
+import TitleBar from "./components/TitleBar";
 
 type Tab = "home" | "audio_devices" | "files" | "settings";
 
@@ -29,8 +31,9 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const [activeTransfers, setActiveTransfers] = useState(0);
   const { t } = useT();
-  const { control } = useConnectionControl();
+  const { control, peers } = useConnectionControl();
   const paused = control?.paused ?? false;
+  const workspaceConnected = peers.length > 0 || Boolean(status?.peer_connected);
 
   // Status poll — paused when the window is hidden to tray so
   // we don't churn IPC + React renders for an invisible UI. The
@@ -213,6 +216,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <TitleBar />
       <PairingModal />
       <LinuxSetup />
       <DropOverlay visible={dropOverlay} />
@@ -248,7 +252,7 @@ export default function App() {
 
         {/* Footer */}
         <div className="sidebar-session mb-5">
-          <span className="flex items-center gap-2 text-xs"><span className="status-dot" style={paused || !status?.peer_connected ? { background: "var(--ds-text-muted)" } : undefined} />{t(paused ? "sidebar_paused" : status?.peer_connected ? "sidebar_connected" : "sidebar_waiting")}</span>
+          <span className="flex items-center gap-2 text-xs"><span className="status-dot" style={paused || !workspaceConnected ? { background: "var(--ds-text-muted)" } : undefined} />{t(paused ? "sidebar_paused" : workspaceConnected ? "sidebar_connected" : "sidebar_waiting")}</span>
           <p className="text-xs text-ds-text-muted leading-relaxed mt-2">{t(paused ? "connections_paused_hint" : "sidebar_hint")}</p>
         </div>
         <div className="px-2 pt-4 border-t border-ds-border">
@@ -261,7 +265,7 @@ export default function App() {
       <main className="app-main" key={tab}>
         <div className="page-content">
           <header className="mb-7">
-            <div className="flex items-center justify-between gap-4"><h1 className="page-heading">{tab === "home" ? t("home_headline") : tabTitle}</h1><ConnectionPill status={status} error={error} paused={paused} /></div>
+            <div className="flex items-center justify-between gap-4"><h1 className="page-heading">{tab === "home" ? t("home_headline") : tabTitle}</h1><ConnectionPill connected={workspaceConnected} error={error} paused={paused} /></div>
             <p className="page-subtitle">{t(tab === "home" ? "home_subtitle" : tab === "audio_devices" ? "audio_subtitle" : `${tab}_subtitle`)}</p>
           </header>
 
@@ -279,18 +283,20 @@ export default function App() {
 
 function VersionFooter({ status }: { status: Status | null }) {
   const { t } = useT();
+  const { peers } = useConnectionControl();
   const local = status?.local_version ?? "";
   const peer = status?.peer_version ?? null;
   const connected = status?.peer_connected ?? false;
-  const same = connected && peer != null && peer === local;
+  const peerOs = peers.find(device => device.input_active)?.os;
+  const compatibility = peer ? comparePeerBuild(local, peer, peerOs) : "different_build";
   return (
     <div className="mt-3 text-[10px] leading-relaxed text-ds-text-muted select-text break-words">
-      {connected && peer && !same ? <p className="text-ds-warning mb-2">⚠ {t("ver_diff_build")}</p> : null}
+      {connected && peer && compatibility === "different_build" ? <p className="text-ds-warning mb-2">⚠ {t("ver_diff_build")}</p> : null}
       <details><summary className="cursor-pointer hover:text-ds-text">{t("build_details")}</summary>
       <p className="mt-2 break-all">MineShare {local || "…"}</p>
       {connected && peer ? (
-        same ? (
-          <div className="text-ds-success">✓ {t("ver_same_build")}</div>
+        compatibility !== "different_build" ? (
+          <div className="text-ds-success">✓ {t(compatibility === "same_build" ? "ver_same_build" : "ver_compatible_android")}</div>
         ) : (
           <div className="mt-1 break-all" title={peer}>
             {t("ver_peer")}: {peer}
@@ -421,16 +427,16 @@ function Toast({
 }
 
 function ConnectionPill({
-  status,
+  connected: hasConnection,
   error,
   paused,
 }: {
-  status: Status | null;
+  connected: boolean;
   error: string | null;
   paused: boolean;
 }) {
   const { t } = useT();
-  const connected = Boolean(status?.peer_connected && !paused && !error);
+  const connected = hasConnection && !paused && !error;
   return (
     <span className="quiet-badge shrink-0 whitespace-nowrap" role="status">
       <span className="status-dot" aria-hidden="true" style={!connected ? { background: "var(--ds-text-muted)" } : undefined} />
@@ -457,13 +463,13 @@ function NavItem({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className={
-        "relative w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-150 text-sm group " +
+        "relative w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-colors duration-150 text-[15px] group " +
         (active
-          ? "bg-ds-accent-soft text-ds-accent font-medium"
+          ? "bg-ds-elevated text-ds-text font-semibold"
           : "text-ds-text-muted hover:bg-ds-hover hover:text-ds-text")
       }
     >
-      <span className={active ? "text-ds-accent" : "group-hover:text-ds-text transition-colors"}>
+      <span className={active ? "text-ds-text" : "group-hover:text-ds-text transition-colors"}>
         {icon}
       </span>
       <span className="flex-1">{children}</span>

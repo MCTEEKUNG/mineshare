@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/mineshare-core",
+    "crates/mineshare-protocol",
+    "crates/mineshare-android",
     "crates/mineshare-net",
     "crates/mineshare-input",
     "crates/mineshare-audio",
@@ -24,6 +26,8 @@ mineshare-net = { path = "crates/mineshare-net" }
 mineshare-input = { path = "crates/mineshare-input" }
 mineshare-audio = { path = "crates/mineshare-audio" }
 mineshare-ipc = { path = "crates/mineshare-ipc" }
+
+mineshare-protocol = { path = "crates/mineshare-protocol" }
 
 # async runtime
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs"] }

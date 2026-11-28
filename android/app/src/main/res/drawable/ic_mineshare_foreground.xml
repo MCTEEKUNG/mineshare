@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Existing M mark, centered wholly inside the adaptive icon's 66dp safe zone. -->
+    <group android:scaleX="1.6" android:scaleY="1.6" android:translateX="15.6" android:translateY="15.6">
+        <path android:fillColor="@color/mineshare_blue" android:pathData="M8,36V12h7l9,13 9,-13h7v24h-7V23l-9,12 -9,-12v13z" />
+    </group>
+</vector>

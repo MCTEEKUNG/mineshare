@@ -6,7 +6,7 @@ import WorkspaceIcon from "./components/WorkspaceIcon";
 
 type NearbyPeer = { device_id: string; display_name: string; os: string; addresses: string[]; trusted: boolean; connected: boolean; request_supported: boolean };
 
-export default function DevicePicker({ connected, onClose }: { connected: boolean; onClose: () => void }) {
+export default function DevicePicker({ onClose }: { connected: boolean; onClose: () => void }) {
   const { t } = useT();
   const { busy, error, control, change } = useConnectionControl();
   const [peers, setPeers] = useState<NearbyPeer[] | null>(null);
@@ -46,9 +46,8 @@ export default function DevicePicker({ connected, onClose }: { connected: boolea
         <button ref={close} disabled={busy} onClick={onClose} className="text-link p-1" aria-label={t("nearby_close")}>✕</button>
       </div>
       {selected ? <>
-        <div className="my-6 rounded-2xl bg-ds-hover p-5 flex items-center gap-4"><WorkspaceIcon kind="monitor" className="size-8 shrink-0 text-ds-text-muted" /><div className="min-w-0"><p className="font-semibold break-words">{selected.display_name}</p><p className="text-xs text-ds-text-muted mt-1 break-all">{selected.os} · {selected.addresses.join(", ")}</p><p className="text-[11px] text-ds-text-muted mt-1">{selected.device_id.slice(0, 8)}</p></div></div>
+        <div className="my-6 rounded-2xl bg-ds-hover p-5 flex items-center gap-4"><WorkspaceIcon kind={selected.os.toLowerCase().includes("android") ? "phone" : "monitor"} className="size-8 shrink-0 text-ds-text-muted" /><div className="min-w-0"><p className="font-semibold break-words">{selected.display_name}</p><p className="text-xs text-ds-text-muted mt-1 break-all">{selected.os} · {selected.addresses.join(", ")}</p><p className="text-[11px] text-ds-text-muted mt-1">{selected.device_id.slice(0, 8)}</p></div></div>
         <p className="muted">{t("nearby_confirm_hint")}</p>
-        {connected && <p className="muted mt-3">{t("nearby_switch_hint")}</p>}
         {!current && <p role="status" className="muted mt-3">{t("nearby_gone")}</p>}
         <div className="flex gap-3 justify-end mt-6">
           <button disabled={busy} className="button-secondary" onClick={() => setSelected(null)}>{t("nearby_back")}</button>
@@ -64,7 +63,7 @@ export default function DevicePicker({ connected, onClose }: { connected: boolea
         </div>}
         <div className="space-y-2">
           {peers?.map(peer => <button key={peer.device_id} disabled={busy || peer.connected || !peer.request_supported || control?.paused} onClick={() => setSelected(peer)} className="w-full flex items-center gap-4 rounded-2xl border border-ds-border p-4 text-left hover:bg-ds-hover disabled:opacity-50">
-            <WorkspaceIcon kind="monitor" className="size-7 shrink-0 text-ds-text-muted" />
+            <WorkspaceIcon kind={peer.os.toLowerCase().includes("android") ? "phone" : "monitor"} className="size-7 shrink-0 text-ds-text-muted" />
             <span className="min-w-0 flex-1"><span className="block font-medium truncate">{peer.display_name}</span><span className="block text-xs text-ds-text-muted mt-1 break-all">{peer.os} · {peer.addresses.join(", ")}</span><span className="block text-[11px] text-ds-text-muted mt-1">{peer.device_id.slice(0, 8)}{peer.trusted ? ` · ${t("nearby_paired")}` : ""}</span></span>
             <span className="text-xs text-ds-text-muted shrink-0 max-w-24">{t(peer.connected ? "workspace_connected" : !peer.request_supported ? "nearby_update" : peer.device_id === control?.selected_peer?.device_id ? "nearby_selected" : "nearby_select")}</span>
           </button>)}

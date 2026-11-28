@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useT } from "./i18n";
 
-import { ConnectionContext, useConnectionControl, type Control } from "./connectionState";
+import { ConnectionContext, useConnectionControl, type Control, type PeerSession } from "./connectionState";
 import DevicePicker from "./DevicePicker";
 
 export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [control, setControl] = useState<Control | null>(null);
+  const [peers, setPeers] = useState<PeerSession[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -20,8 +21,13 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       loading = true;
       const requestedAt = revision.current;
       try {
-        const next = await invoke<Control>("get_connection_control");
-        if (active && requestedAt === revision.current) { setControl(next); setPollError(null); }
+        const [next, sessions] = await Promise.all([
+          invoke<Control>("get_connection_control"),
+          invoke<PeerSession[]>("list_connected_peers"),
+        ]);
+        if (active && requestedAt === revision.current) {
+          setControl(next); setPeers(Array.isArray(sessions) ? sessions : []); setPollError(null);
+        }
       } catch (e) { if (active) setPollError(String(e)); }
       finally { loading = false; }
     };
@@ -41,13 +47,18 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setError(null);
     try {
       await invoke(command, args);
-      setControl(await invoke<Control>("get_connection_control"));
+      const [next, sessions] = await Promise.all([
+        invoke<Control>("get_connection_control"),
+        invoke<PeerSession[]>("list_connected_peers"),
+      ]);
+      setControl(next);
+      setPeers(Array.isArray(sessions) ? sessions : []);
       return true;
     } catch (e) { setError(String(e)); return false; }
     finally { setBusy(false); }
   }
 
-  return <ConnectionContext.Provider value={{ control, busy, error: error ?? pollError, change }}>{children}</ConnectionContext.Provider>;
+  return <ConnectionContext.Provider value={{ control, peers, busy, error: error ?? pollError, change }}>{children}</ConnectionContext.Provider>;
 }
 
 export default function ConnectionControls({ connected = false }: { connected?: boolean }) {
