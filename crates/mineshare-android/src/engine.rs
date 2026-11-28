@@ -442,7 +442,11 @@ mod audio_mix_tests {
         let address = frame.as_ptr();
         audio.insert("phone".into(), VecDeque::from([frame]));
         let output = mix_audio(&mut audio).unwrap();
-        assert_eq!(output.as_ptr(), address, "single-source mixing must reuse PCM storage");
+        assert_eq!(
+            output.as_ptr(),
+            address,
+            "single-source mixing must reuse PCM storage"
+        );
         assert!(output.iter().all(|value| *value == 0.25));
         assert!(mix_audio(&mut audio).is_none());
     }
@@ -450,7 +454,10 @@ mod audio_mix_tests {
     #[test]
     fn multiple_sources_mix_clip_and_preserve_the_next_frame() {
         let mut audio = HashMap::from([
-            ("first".into(), VecDeque::from([vec![0.75, -0.75, 0.2], vec![0.1; 3]])),
+            (
+                "first".into(),
+                VecDeque::from([vec![0.75, -0.75, 0.2], vec![0.1; 3]]),
+            ),
             ("second".into(), VecDeque::from([vec![0.75, -0.75, -0.2]])),
         ]);
         assert_eq!(mix_audio(&mut audio).unwrap(), vec![1.0, -1.0, 0.0]);

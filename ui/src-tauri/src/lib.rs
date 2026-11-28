@@ -203,13 +203,20 @@ fn select_input_peer(device_id: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_peer_audio_route(device_id: String, send_system: bool, receive_system: bool) -> Result<(), String> {
+fn set_peer_audio_route(
+    device_id: String,
+    send_system: bool,
+    receive_system: bool,
+) -> Result<(), String> {
     mineshare_daemon::runtime::set_peer_audio_route(&device_id, send_system, receive_system)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn set_peer_layout(device_id: String, side: mineshare_daemon::layout::PeerSide) -> Result<(), String> {
+fn set_peer_layout(
+    device_id: String,
+    side: mineshare_daemon::layout::PeerSide,
+) -> Result<(), String> {
     mineshare_daemon::layout::set_for_peer(&device_id, side).map_err(|e| e.to_string())
 }
 

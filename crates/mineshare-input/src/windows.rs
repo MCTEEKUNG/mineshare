@@ -2065,7 +2065,12 @@ fn request_desktop_motion_packet() {
                         sum += us;
                         max = max.max(us);
                         if window.elapsed() >= std::time::Duration::from_secs(2) {
-                            info!(packets = n, avg_us = sum / n, max_us = max, "drag packet SendInput timing");
+                            info!(
+                                packets = n,
+                                avg_us = sum / n,
+                                max_us = max,
+                                "drag packet SendInput timing"
+                            );
                             (n, sum, max, window) = (0, 0, 0, Instant::now());
                         }
                     }
