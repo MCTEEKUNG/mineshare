@@ -45,6 +45,7 @@ data class PhoneState(
     val mediaVolume: Int = 0,
     val mediaVolumeMax: Int = 15,
     val remoteVolume: Boolean = false,
+    val paused: Boolean = false,
 )
 
 object BridgeState {
@@ -75,6 +76,7 @@ class BridgeService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "stop") {
+            ConnectionPrefs.setPaused(this, true)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -89,7 +91,9 @@ class BridgeService : Service() {
                 val bounds = getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
                 val id = NativeBridge.start(filesDir.absolutePath, android.os.Build.MODEL, bounds.width(), bounds.height())
                 started = true
-                BridgeState.state.update { it.copy(running = true, deviceId = id, error = null) }
+                val wasPaused = ConnectionPrefs.paused(this)
+                BridgeState.state.update { it.copy(running = true, deviceId = id, error = null, paused = wasPaused) }
+                if (wasPaused) send(JSONObject().put("type", "pause").put("paused", true))
                 audio = AudioBridge(this) { active ->
                     updateForeground(active)
                     BridgeState.state.update { it.copy(sharingAudio = active) }
@@ -169,7 +173,7 @@ class BridgeService : Service() {
                         p.optBoolean("send_audio"), p.optBoolean("receive_audio"), p.optBoolean("compatible", true),
                         p.optBoolean("online", p.optBoolean("connected")), p.optBoolean("paired"))
                 }
-                BridgeState.state.update { it.copy(peers = peers) }
+                BridgeState.state.update { it.copy(peers = peers, paused = event.optBoolean("paused", it.paused)) }
             }
             "pairing" -> BridgeState.state.update {
                 it.copy(pairing = if (event.optString("kind") == "complete" || event.optString("kind") == "closed") null else event)
@@ -219,4 +223,11 @@ class BridgeService : Service() {
         BridgeState.state.update { PhoneState(accessibility = it.accessibility, error = it.error) }
         super.onDestroy()
     }
+}
+
+/** Remembers that the user paused MineShare, so reopening the app does not reconnect on its own. */
+object ConnectionPrefs {
+    private fun prefs(context: android.content.Context) = context.getSharedPreferences("connection", android.content.Context.MODE_PRIVATE)
+    fun paused(context: android.content.Context) = prefs(context).getBoolean("paused", false)
+    fun setPaused(context: android.content.Context, value: Boolean) { prefs(context).edit().putBoolean("paused", value).apply() }
 }

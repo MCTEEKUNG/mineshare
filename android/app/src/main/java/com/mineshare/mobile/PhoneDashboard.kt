@@ -29,7 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 
 @Composable
 fun PhoneDashboard(state: PhoneState, connect: () -> Unit, share: (PhonePeer) -> Unit,
-    pause: () -> Unit, stopAudio: () -> Unit, accessibility: () -> Unit, rotate: (Boolean?, Boolean) -> Unit,
+    pause: () -> Unit, resume: () -> Unit = {}, stopAudio: () -> Unit, accessibility: () -> Unit, rotate: (Boolean?, Boolean) -> Unit,
     pendingAudioPeerId: String? = null, pendingAudioMessage: String = "รออนุญาตจาก Android…") {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var forget by remember { mutableStateOf<PhonePeer?>(null) }
@@ -58,10 +58,6 @@ fun PhoneDashboard(state: PhoneState, connect: () -> Unit, share: (PhonePeer) ->
                             if (state.sharingAudio) TextButton(onClick = stopAudio,
                                 modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "หยุดแชร์เสียงมือถือ" }) {
                                 Text("หยุดเสียง", maxLines = 1)
-                            }
-                            if (state.running || connected > 0) TextButton(onClick = pause,
-                                modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "พักการเชื่อมต่อทั้งหมด" }) {
-                                Text("พักทั้งหมด", maxLines = 1)
                             }
                         }
                     }
@@ -92,13 +88,18 @@ fun PhoneDashboard(state: PhoneState, connect: () -> Unit, share: (PhonePeer) ->
                     Text("MineShare", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text(Build.MODEL, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(connectionLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text(if (state.paused) "หยุดชั่วคราว" else connectionLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    if (state.paused) Button(onClick = resume) { Text("เชื่อมต่อต่อ") }
+                    else if (state.running || connected > 0) OutlinedButton(onClick = pause) { Text("หยุดชั่วคราว") }
                 } else {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("MineShare", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
                     Text(Build.MODEL, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(connectionLabel,
+                    Text(if (state.paused) "หยุดเชื่อมต่อชั่วคราว" else connectionLabel,
                         style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    if (state.paused) Button(onClick = resume, modifier = Modifier.padding(top = 8.dp)) { Text("เชื่อมต่อต่อ") }
+                    else if (state.running || connected > 0) OutlinedButton(onClick = pause, modifier = Modifier.padding(top = 8.dp)
+                        .semantics { contentDescription = "หยุดสัญญาณชั่วคราว ตัดการเชื่อมต่อทุกเครื่อง" }) { Text("หยุดสัญญาณชั่วคราว") }
                 }
                 }
             }
@@ -138,7 +139,7 @@ fun PhoneDashboard(state: PhoneState, connect: () -> Unit, share: (PhonePeer) ->
                             state.running -> "เปิด MineShare บนคอมพิวเตอร์ใน Wi-Fi เดียวกัน แล้วเลือกเพิ่มอุปกรณ์"
                             else -> "เชื่อมต่อ Wi-Fi เดียวกับคอมพิวเตอร์ แล้วเริ่มเชื่อมต่อจากที่นี่"
                         }, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!state.running) Button(onClick = connect, modifier = Modifier.fillMaxWidth()) { Text("เริ่มเชื่อมต่อผ่าน Wi-Fi") }
+                        if (!state.running && !state.paused) Button(onClick = connect, modifier = Modifier.fillMaxWidth()) { Text("เริ่มเชื่อมต่อผ่าน Wi-Fi") }
                     }
                 }
                 if (!state.accessibility && connected == 0) item { ControlPermissionPanel(blocking = false, accessibility) }

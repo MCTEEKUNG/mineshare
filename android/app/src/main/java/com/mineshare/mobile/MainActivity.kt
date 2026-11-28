@@ -112,6 +112,15 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                // Connect on its own when the app opens, unless the user paused it.
+                LaunchedEffect(Unit) { if (!state.running && !ConnectionPrefs.paused(this@MainActivity)) requestStart() }
+                // Mouse crossing needs the accessibility service: take the user straight to its switch once.
+                LaunchedEffect(state.accessibility, state.peers.count { it.connected }) {
+                    if (!state.accessibility && state.peers.any { it.connected } && !accessibilityPrompted) {
+                        accessibilityPrompted = true
+                        openAccessibilitySettings()
+                    }
+                }
                 GlassBackground {
                     PhoneHome(state, ::requestStart, ::shareAudio)
                 }
@@ -179,6 +188,25 @@ class MainActivity : ComponentActivity() {
 
     private fun startBridge() { startForegroundService(Intent(this, BridgeService::class.java)) }
 
+    private var accessibilityPrompted = false
+
+    /** Jump straight to the MineShare toggle (Android 14+), else to the general list. */
+    private fun openAccessibilitySettings() {
+        val component = android.content.ComponentName(this, MineShareAccessibility::class.java).flattenToString()
+        val detail = Intent("android.settings.ACCESSIBILITY_DETAIL_SETTINGS")
+            .putExtra("android.intent.extra.COMPONENT_NAME", component)
+        runCatching { startActivity(detail) }.onFailure { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+    }
+
+    /** Pause keeps the app open but drops every connection and stops reconnecting until resumed. */
+    private fun setPaused(paused: Boolean) {
+        ConnectionPrefs.setPaused(this, paused)
+        if (BridgeState.state.value.running) {
+            BridgeState.state.value = BridgeState.state.value.copy(paused = paused)
+            BridgeState.command("pause") { put("paused", paused) }
+        } else if (!paused) requestStart()
+    }
+
     private fun shareAudio(peer: PhonePeer) {
         if (pendingAudioPeerId != null) return
         if (peer.sendAudio && BridgeState.state.value.sharingAudio) {
@@ -218,9 +246,10 @@ class MainActivity : ComponentActivity() {
 
     @Composable private fun PhoneHome(state: PhoneState, connect: () -> Unit, share: (PhonePeer) -> Unit) {
         PhoneDashboard(state, connect, share,
-            pause = { startService(Intent(this, BridgeService::class.java).setAction("stop")) },
+            pause = { setPaused(true) },
+            resume = { setPaused(false) },
             stopAudio = { startService(Intent(this, BridgeService::class.java).setAction("stop_capture")) },
-            accessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+            accessibility = { openAccessibilitySettings() },
             rotate = { portrait, auto -> PhoneRotation.apply(this, portrait, auto) },
             pendingAudioPeerId = pendingAudioPeerId,
             pendingAudioMessage = if (pendingAudioStage == "starting") "กำลังเริ่มแชร์เสียง…" else "รออนุญาตจาก Android…")
