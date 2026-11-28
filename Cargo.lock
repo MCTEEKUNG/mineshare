@@ -1508,12 +1508,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mineshare-android"
+version = "0.0.33"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "jni",
+ "mineshare-core",
+ "mineshare-input",
+ "mineshare-net",
+ "mineshare-protocol",
+ "opus",
+ "parking_lot",
+ "rand",
+ "serde",
+ "serde_json",
+ "socket2 0.5.10",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mineshare-audio"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "anyhow",
  "cpal",
  "mineshare-core",
+ "mineshare-protocol",
  "opus",
  "parking_lot",
  "ringbuf",
@@ -1526,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-core"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1537,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-daemon"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1546,11 +1568,13 @@ dependencies = [
  "clipboard-win",
  "dirs",
  "hostname",
+ "mineshare-android",
  "mineshare-audio",
  "mineshare-core",
  "mineshare-input",
  "mineshare-ipc",
  "mineshare-net",
+ "mineshare-protocol",
  "parking_lot",
  "percent-encoding",
  "rand",
@@ -1572,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-input"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "anyhow",
  "enigo",
@@ -1591,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-ipc"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "anyhow",
  "mineshare-core",
@@ -1603,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-net"
-version = "0.0.32"
+version = "0.0.33"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1621,6 +1645,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "mineshare-protocol"
+version = "0.0.33"
+dependencies = [
+ "anyhow",
+ "mineshare-core",
+ "mineshare-input",
+ "serde",
 ]
 
 [[package]]

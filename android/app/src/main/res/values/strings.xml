@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MineShare</string>
+    <string name="accessibility_label">ควบคุมด้วย MineShare</string>
+    <string name="accessibility_description">ให้คอมพิวเตอร์ที่คุณจับคู่เลื่อนเมาส์ คลิก เลื่อนหน้า และพิมพ์บนมือถือเครื่องนี้ ขณะแชร์เสียงมือถือ ปุ่มเสียงข้างเครื่องจะปรับเสียงที่ส่งไปคอมพิวเตอร์ ปุ่มอื่นยังใช้งานตามปกติ หยุดควบคุมได้ด้วยการตัดการเชื่อมต่อหรือปิดบริการนี้ MineShare ไม่อ่านเนื้อหาบนหน้าจอ</string>
+</resources>

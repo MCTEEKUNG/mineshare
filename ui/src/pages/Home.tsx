@@ -7,13 +7,14 @@ import { selectedPeerLabel, useConnectionControl } from "../connectionState";
 import WorkspaceIcon from "../components/WorkspaceIcon";
 import { IconArrowUpRight, IconFile, IconVolume } from "../icons";
 import { ShortcutRows } from "./Hotkeys";
-import LayoutPage from "./Layout";
+import WorkspaceLayout from "../components/WorkspaceLayout";
+import ConnectedDevices from "../components/ConnectedDevices";
 
 export default function HomePage({ status, latency, onNavigate }: {
   status: Status; latency: Latency | null; onNavigate: (tab: "audio_devices" | "files" | "settings") => void;
 }) {
   const { t } = useT();
-  const { control, busy } = useConnectionControl();
+  const { control, peers, busy } = useConnectionControl();
   const [restoring, setRestoring] = useState(false);
   const [error, setError] = useState("");
   async function restoreSmart() {
@@ -23,8 +24,9 @@ export default function HomePage({ status, latency, onNavigate }: {
     finally { setRestoring(false); }
   }
   const paused = control?.paused ?? false;
-  const connected = status.peer_connected && !paused;
-  const peer = (connected ? status.peer_name : control?.selected_peer?.display_name) ?? t("workspace_peer");
+  const connected = (peers.length > 0 || status.peer_connected) && !paused;
+  const activePeer = peers.find(device => device.input_active);
+  const peer = (connected ? activePeer?.display_name ?? status.peer_name : control?.selected_peer?.display_name) ?? t("workspace_peer");
   const keyboardOverride = status.keyboard_target === "force_peer" || status.keyboard_target === "force_local";
   const ms = latency?.p50_ms ?? latency?.last_ms;
   const hasLatency = connected && ms != null && Number.isFinite(ms) && ms >= 0;
@@ -38,12 +40,14 @@ export default function HomePage({ status, latency, onNavigate }: {
       </div> : null}
       <section className="panel p-5" aria-labelledby="workspace-title">
         <h2 id="workspace-title" className="section-title">{t("workspace_title")}</h2>
-        <LayoutPage peerName={peer} connected={connected} status={status} />
+        <WorkspaceLayout peerName={peer} connected={connected} status={status} />
         {!connected && control?.selected_peer && <div className="mt-4 text-xs leading-relaxed">
           <p role="status" className="break-words">{t(paused || control.pairing_enabled ? "workspace_selected_computer" : "workspace_waiting_for")} {selectedPeerLabel(control.selected_peer)}</p>
           <p className="mt-1 text-ds-text-muted">{t("workspace_selected_hint")}</p>
         </div>}
       </section>
+
+      {peers.length > 0 && <ConnectedDevices />}
 
       <section className="panel px-5 pt-5 pb-1" aria-labelledby="workspace-controls-title">
         <h2 id="workspace-controls-title" className="text-sm font-semibold">{t("workspace_controls")}</h2>
@@ -87,13 +91,13 @@ export default function HomePage({ status, latency, onNavigate }: {
       <section className="panel p-5" aria-labelledby="connection-title">
         <h2 id="connection-title" className="text-sm font-semibold mb-5">{t("workspace_latency")}</h2>
         <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <span className="text-5xl font-semibold tracking-tight tabular-nums text-ds-accent">{hasLatency ? ms.toFixed(1) : "—"}</span>
+          <span className="text-6xl font-bold tracking-tight tabular-nums text-ds-accent">{hasLatency ? ms.toFixed(1) : "—"}</span>
           {hasLatency && <span className="text-lg text-ds-text-muted">ms</span>}
         </p>
         {!hasLatency && <p className="muted mt-3" role="status">{t(paused ? "connections_paused" : connected ? "workspace_measuring" : "workspace_reconnecting")}</p>}
         <ConnectionControls connected={connected} />
       </section>
-      <section className="rounded-[22px] bg-ds-hover p-5">
+      <section className="panel p-5">
         <WorkspaceIcon kind="shield" className="size-5 mb-3 text-ds-accent" />
         <h2 className="text-sm font-semibold">{t("workspace_private")}</h2>
         <p className="mt-2 text-xs text-ds-text-muted leading-relaxed">{t("workspace_private_hint")}</p>

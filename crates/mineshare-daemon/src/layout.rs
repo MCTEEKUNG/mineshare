@@ -17,34 +17,11 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PeerSide {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
+pub use mineshare_protocol::PeerSide;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
     pub peer_side: PeerSide,
-}
-
-impl PeerSide {
-    /// The side the *peer* ends up on if I'm at `self` from their
-    /// perspective — left/right and top/bottom are mirror pairs.
-    /// When the user flips our side, we propagate this opposite to
-    /// the peer so both ends agree on the desk layout without
-    /// anyone touching the GUI on the other machine.
-    pub fn opposite(self) -> Self {
-        match self {
-            PeerSide::Left => PeerSide::Right,
-            PeerSide::Right => PeerSide::Left,
-            PeerSide::Top => PeerSide::Bottom,
-            PeerSide::Bottom => PeerSide::Top,
-        }
-    }
 }
 
 impl Default for LayoutConfig {
@@ -87,6 +64,13 @@ pub fn clear_propagate_sender() {
 /// Returns the in-memory current layout, lazily loading from disk
 /// on first call. Subsequent calls hit the cached value.
 pub fn current() -> LayoutConfig {
+    let active = ACTIVE_PEER.lock().clone();
+    if let Some(side) = active.and_then(|id| PEER_LAYOUT.lock().get(&id).copied()) {
+        return LayoutConfig { peer_side: side };
+    }
+    legacy_current()
+}
+fn legacy_current() -> LayoutConfig {
     let mut guard = CURRENT.lock();
     if let Some(cfg) = guard.as_ref() {
         return cfg.clone();
@@ -104,6 +88,10 @@ pub fn current() -> LayoutConfig {
 /// the active control channel so both machines agree on the desk
 /// arrangement after one click.
 pub fn set(cfg: LayoutConfig) -> Result<()> {
+    let active = ACTIVE_PEER.lock().clone();
+    if let Some(id) = active {
+        return set_for_peer(&id, cfg.peer_side);
+    }
     apply_locally(&cfg, true)
 }
 
@@ -125,7 +113,7 @@ fn apply_locally(cfg: &LayoutConfig, propagate: bool) -> Result<()> {
     Ok(())
 }
 
-fn map_side(side: PeerSide) -> mineshare_input::PeerSide {
+pub(crate) fn map_side(side: PeerSide) -> mineshare_input::PeerSide {
     match side {
         PeerSide::Left => mineshare_input::PeerSide::Left,
         PeerSide::Right => mineshare_input::PeerSide::Right,
@@ -159,4 +147,83 @@ fn save(cfg: &LayoutConfig) -> Result<()> {
     crate::settings::atomic_write_file(&path, &json)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+static ACTIVE_PEER: Mutex<Option<String>> = Mutex::new(None);
+static PEER_LAYOUT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, PeerSide>>> =
+    std::sync::LazyLock::new(|| {
+        let map = config_path()
+            .ok()
+            .and_then(|p| fs::read(p.with_file_name("peer-layout.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Mutex::new(map)
+    });
+pub fn side_for_peer(device_id: &str) -> PeerSide {
+    PEER_LAYOUT
+        .lock()
+        .get(device_id)
+        .copied()
+        .unwrap_or_else(|| legacy_current().peer_side)
+}
+pub(crate) fn activate_peer(device_id: &str) {
+    let side = side_for_peer(device_id);
+    *ACTIVE_PEER.lock() = Some(device_id.into());
+    mineshare_input::set_peer_side(map_side(side));
+}
+pub fn set_for_peer(device_id: &str, side: PeerSide) -> Result<()> {
+    anyhow::ensure!(
+        uuid::Uuid::parse_str(device_id).is_ok(),
+        "invalid device ID"
+    );
+    let mut map = PEER_LAYOUT.lock();
+    let mut next = map.clone();
+    next.insert(device_id.into(), side);
+    crate::settings::atomic_write_file(
+        &config_path()?.with_file_name("peer-layout.json"),
+        &serde_json::to_vec_pretty(&next)?,
+    )?;
+    *map = next;
+    drop(map);
+    if ACTIVE_PEER.lock().as_deref() == Some(device_id) {
+        mineshare_input::set_peer_side(map_side(side));
+    }
+    crate::runtime::push_peer_side(device_id, side.opposite());
+    Ok(())
+}
+pub(crate) fn apply_for_peer(device_id: &str, side: PeerSide) -> Result<()> {
+    let mut map = PEER_LAYOUT.lock();
+    let mut next = map.clone();
+    next.insert(device_id.into(), side);
+    crate::settings::atomic_write_file(
+        &config_path()?.with_file_name("peer-layout.json"),
+        &serde_json::to_vec_pretty(&next)?,
+    )?;
+    *map = next;
+    if ACTIVE_PEER.lock().as_deref() == Some(device_id) {
+        mineshare_input::set_peer_side(map_side(side));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn existing_layout_api_follows_active_device_and_unsaved_devices_use_legacy_side() {
+        let _serial = crate::pairing::TEST_LOCK.blocking_lock();
+        let previous_active = ACTIVE_PEER.lock().take();
+        let previous_map = std::mem::take(&mut *PEER_LAYOUT.lock());
+        PEER_LAYOUT
+            .lock()
+            .insert("test-phone".into(), PeerSide::Bottom);
+        *ACTIVE_PEER.lock() = Some("test-phone".into());
+        assert_eq!(current().peer_side, PeerSide::Bottom);
+        *ACTIVE_PEER.lock() = Some("test-unsaved".into());
+        let legacy = legacy_current().peer_side;
+        assert_eq!(current().peer_side, legacy);
+        assert_eq!(side_for_peer("test-unsaved"), legacy);
+        *PEER_LAYOUT.lock() = previous_map;
+        *ACTIVE_PEER.lock() = previous_active;
+    }
 }

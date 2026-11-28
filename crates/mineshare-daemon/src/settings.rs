@@ -20,8 +20,16 @@ use std::path::{Path, PathBuf};
 
 static SETTINGS_IO: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerAudioRoute {
+    pub send: bool,
+    pub receive: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub peer_audio_routes: std::collections::HashMap<String, PeerAudioRoute>,
     #[serde(default)]
     pub lock_effect: mineshare_input::LockEffect,
     /// Multiplier applied to forwarded mouse deltas (Stage 10).
@@ -101,6 +109,7 @@ fn default_touchpad_scroll_speed() -> f32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            peer_audio_routes: Default::default(),
             lock_effect: Default::default(),
             mouse_sensitivity: 1.0,
             invert_scroll_y: false,
@@ -363,9 +372,64 @@ pub fn set_audio_toggle(stream: &str, direction: &str, enabled: bool) -> Result<
     persist_then_apply(&s, save, push_to_audio_layer)
 }
 
+/// Commit a device route and the required audio masters in one atomic settings write.
+pub fn set_peer_audio_route(device_id: &str, send: bool, receive: bool) -> Result<()> {
+    let _io = SETTINGS_IO.lock();
+    let settings = with_peer_audio_route(load(), device_id, send, receive);
+    persist_then_apply(&settings, save, push_to_audio_layer)
+}
+fn with_peer_audio_route(
+    mut settings: Settings,
+    device_id: &str,
+    send: bool,
+    receive: bool,
+) -> Settings {
+    settings
+        .peer_audio_routes
+        .insert(device_id.into(), PeerAudioRoute { send, receive });
+    settings.audio_send_sysout |= send;
+    settings.audio_play_sysout |= receive;
+    settings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn peer_audio_route_and_master_flags_persist_together_and_keep_other_routes() {
+        let initial = with_peer_audio_route(Settings::default(), "phone", true, false);
+        let settings = with_peer_audio_route(initial, "laptop", false, true);
+        let settings = merge_patch(
+            settings,
+            SettingsPatch {
+                mouse_rate_hz: Some(1000),
+                ..SettingsPatch::default()
+            },
+        );
+        let restored: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert!(restored.audio_send_sysout && restored.audio_play_sysout);
+        assert_eq!(
+            restored.peer_audio_routes["phone"],
+            PeerAudioRoute {
+                send: true,
+                receive: false
+            }
+        );
+        assert_eq!(
+            restored.peer_audio_routes["laptop"],
+            PeerAudioRoute {
+                send: false,
+                receive: true
+            }
+        );
+        let mut disabled = restored;
+        disabled.audio_send_sysout = false;
+        let disabled: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&disabled).unwrap()).unwrap();
+        assert!(!disabled.audio_send_sysout);
+        assert!(disabled.peer_audio_routes["phone"].send);
+    }
 
     #[test]
     fn non_finite_mouse_sensitivity_never_reaches_input_scaling() {

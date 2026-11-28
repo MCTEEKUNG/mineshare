@@ -269,6 +269,13 @@ pub trait InputCapture: Send {
 pub const MAX_INJECT_DELTA_PX: i32 = 200;
 
 pub trait InputInject: Send + Sync {
+    /// Actual desktop cursor and inclusive display bounds, when available.
+    fn pointer_position(&self) -> Option<PointerPosition> {
+        None
+    }
+    fn warp_pointer(&self, _x: i32, _y: i32) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn mouse_move_rel(&self, dx: i32, dy: i32) -> anyhow::Result<()>;
     fn mouse_button(&self, btn: Button, down: bool) -> anyhow::Result<()>;
     fn key(&self, code: KeyCode, down: bool) -> anyhow::Result<()>;
@@ -309,6 +316,16 @@ pub trait InputInject: Send + Sync {
     fn release_all_held(&self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PointerPosition {
+    pub x: i32,
+    pub y: i32,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 static FILE_PASTE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
@@ -360,6 +377,12 @@ pub const TOUCHPAD_CAP_FRAME_INJECT: u32 = 1 << 2;
 pub const TOUCHPAD_CAP_ACTION_INJECT: u32 = 1 << 3;
 
 static PEER_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
+// Negotiated in the existing announce bitset; older peers keep source-side
+// virtual edge detection. A receiver with this bit owns its real cursor edges.
+pub const RECEIVER_EDGE_CAPABILITY: u32 = 1 << 30;
+pub fn peer_controls_exit() -> bool {
+    peer_touchpad_capabilities() & RECEIVER_EDGE_CAPABILITY != 0
+}
 
 pub fn local_touchpad_capabilities() -> u32 {
     #[cfg(target_os = "windows")]
@@ -1641,6 +1664,56 @@ pub fn make_inject() -> anyhow::Result<Box<dyn InputInject>> {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         anyhow::bail!("input injection is not implemented on this platform")
+    }
+}
+
+/// Select a connected device before entering the corresponding screen edge.
+type PeerEdgeSelector = fn(PeerSide) -> bool;
+static PEER_EDGE_SELECTOR: Mutex<Option<PeerEdgeSelector>> = Mutex::new(None);
+pub fn set_peer_edge_selector(selector: fn(PeerSide) -> bool) {
+    *PEER_EDGE_SELECTOR.lock() = Some(selector);
+}
+pub(crate) fn select_peer_edge(side: PeerSide) -> bool {
+    let selector = *PEER_EDGE_SELECTOR.lock();
+    match selector {
+        Some(selector) => selector(side),
+        None => side == peer_side(),
+    }
+}
+pub fn remote_text_for_key(event: InputEvent) -> Option<String> {
+    let InputEvent::Key { code, down: true } = event else {
+        return None;
+    };
+    #[cfg(target_os = "windows")]
+    {
+        windows::remote_text_for_key(code)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::remote_text_for_key(code)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = code;
+        None
+    }
+}
+
+pub fn remote_text_for_received_key(
+    event: InputEvent,
+    state: &ForwardedInputState,
+) -> Option<String> {
+    let InputEvent::Key { code, down: true } = event else {
+        return None;
+    };
+    #[cfg(target_os = "windows")]
+    {
+        windows::remote_text_for_received_key(code, state)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (code, state);
+        remote_text_for_key(event)
     }
 }
 

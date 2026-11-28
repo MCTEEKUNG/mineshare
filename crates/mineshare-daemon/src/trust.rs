@@ -41,6 +41,8 @@ struct TrustList {
     trusted: Vec<TrustedPeer>,
     #[serde(default)]
     selected_device_id: Option<String>,
+    #[serde(default)]
+    auto_connect_device_ids: Option<Vec<String>>,
 }
 
 static CACHED: Mutex<Option<TrustList>> = Mutex::new(None);
@@ -120,7 +122,14 @@ pub fn select_peer(device_id: &str) -> Result<()> {
         next.trusted.iter().any(|peer| peer.device_id == device_id),
         "computer is not paired"
     );
-    if next.selected_device_id.as_deref() != Some(device_id) {
+    if next.selected_device_id.as_deref() != Some(device_id)
+        || !auto_connect(&next).iter().any(|id| id == device_id)
+    {
+        let mut automatic = auto_connect(&next);
+        if !automatic.iter().any(|id| id == device_id) {
+            automatic.push(device_id.into());
+        }
+        next.auto_connect_device_ids = Some(automatic);
         next.selected_device_id = Some(device_id.into());
         persist_then_cache(&mut g, next, save)?;
     }
@@ -146,6 +155,11 @@ pub fn add_trusted(device_id: &str, display_name: &str, noise_static: &[u8]) -> 
         noise_static_hex: hex,
         paired_at: now_unix(),
     });
+    let mut automatic = auto_connect(&list);
+    if !automatic.iter().any(|id| id == device_id) {
+        automatic.push(device_id.into());
+    }
+    list.auto_connect_device_ids = Some(automatic);
     list.selected_device_id = Some(device_id.into());
     persist_then_cache(&mut g, list, save)?;
     tracing::info!(device_id, display_name, "trusted peer recorded");
@@ -163,12 +177,17 @@ pub fn revoke(device_id: &str) -> Result<()> {
     ensure_loaded(&mut g);
     let mut list = g.as_ref().unwrap().clone();
     let before = list.trusted.len();
+    if let Some(ids) = &mut list.auto_connect_device_ids {
+        ids.retain(|id| id != device_id);
+    }
     list.trusted.retain(|p| p.device_id != device_id);
     if list.selected_device_id.as_deref() == Some(device_id) {
         list.selected_device_id = None;
     }
     if list.trusted.len() != before {
         persist_then_cache(&mut g, list, save)?;
+        drop(g);
+        crate::runtime::revoke_peer_session(device_id);
         tracing::info!(device_id, "trusted peer revoked");
     }
     Ok(())
@@ -190,6 +209,42 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+fn auto_connect(list: &TrustList) -> Vec<String> {
+    list.auto_connect_device_ids
+        .clone()
+        .unwrap_or_else(|| selected(list).into_iter().collect())
+        .into_iter()
+        .filter(|id| list.trusted.iter().any(|peer| &peer.device_id == id))
+        .collect()
+}
+pub fn should_reconnect(device_id: &str) -> bool {
+    let mut g = CACHED.lock();
+    ensure_loaded(&mut g);
+    auto_connect(g.as_ref().unwrap())
+        .iter()
+        .any(|id| id == device_id)
+}
+
+#[cfg(test)]
+pub(crate) struct TestTrust(Option<TrustList>);
+#[cfg(test)]
+impl Drop for TestTrust {
+    fn drop(&mut self) {
+        *CACHED.lock() = self.0.take();
+    }
+}
+#[cfg(test)]
+pub(crate) fn temporary_trust(peer: TrustedPeer) -> TestTrust {
+    let mut cache = CACHED.lock();
+    let previous = cache.take();
+    *cache = Some(TrustList {
+        selected_device_id: Some(peer.device_id.clone()),
+        trusted: vec![peer],
+        auto_connect_device_ids: None,
+    });
+    TestTrust(previous)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +263,12 @@ mod tests {
         assert_eq!(selected(&multiple), None);
         multiple.selected_device_id = Some("b".into());
         assert_eq!(selected(&multiple).as_deref(), Some("b"));
+        assert_eq!(auto_connect(&multiple), vec!["b"]);
+        multiple.auto_connect_device_ids = Some(vec!["a".into(), "b".into(), "revoked".into()]);
+        assert_eq!(auto_connect(&multiple), vec!["a", "b"]);
+        let roundtrip: TrustList =
+            serde_json::from_slice(&serde_json::to_vec(&multiple).unwrap()).unwrap();
+        assert_eq!(auto_connect(&roundtrip), vec!["a", "b"]);
     }
 
     #[test]
@@ -215,6 +276,7 @@ mod tests {
         let mut cached = Some(TrustList::default());
         let next = TrustList {
             selected_device_id: Some("peer".into()),
+            auto_connect_device_ids: None,
             trusted: vec![TrustedPeer {
                 device_id: "peer".into(),
                 display_name: "peer".into(),

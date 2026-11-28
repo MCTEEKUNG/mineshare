@@ -193,6 +193,34 @@ fn get_connection_control() -> mineshare_daemon::runtime::ConnectionControl {
 }
 
 #[tauri::command]
+fn list_connected_peers() -> Vec<mineshare_daemon::runtime::PeerSessionStatus> {
+    mineshare_daemon::runtime::connected_peers()
+}
+
+#[tauri::command]
+fn select_input_peer(device_id: Option<String>) -> Result<(), String> {
+    mineshare_daemon::runtime::select_input_peer(device_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_peer_audio_route(
+    device_id: String,
+    send_system: bool,
+    receive_system: bool,
+) -> Result<(), String> {
+    mineshare_daemon::runtime::set_peer_audio_route(&device_id, send_system, receive_system)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_peer_layout(
+    device_id: String,
+    side: mineshare_daemon::layout::PeerSide,
+) -> Result<(), String> {
+    mineshare_daemon::layout::set_for_peer(&device_id, side).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_connections_paused(paused: bool) {
     mineshare_daemon::runtime::set_connections_paused(paused);
 }
@@ -409,6 +437,10 @@ pub fn run() {
             preview_lock_effect,
             get_pairing_phase,
             get_connection_control,
+            list_connected_peers,
+            select_input_peer,
+            set_peer_audio_route,
+            set_peer_layout,
             set_connections_paused,
             set_pairing_enabled,
             list_nearby_peers,

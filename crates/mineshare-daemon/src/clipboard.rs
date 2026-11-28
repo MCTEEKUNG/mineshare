@@ -173,6 +173,12 @@ fn paste_window() -> Option<u64> {
     mineshare_input::paste_window()
 }
 
+pub(crate) fn detach_peer() {
+    *REPLACE_TX_GUARD.lock() = None;
+    *INCOMING_IMAGE.lock() = None;
+    clear_file_session();
+}
+
 pub fn clear_file_session() {
     *FILE_SESSION.lock() = FileSession::default();
 }
@@ -1204,6 +1210,15 @@ pub const fn queue_capacity() -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detaching_peer_stops_clipboard_forwarding_to_previous_desktop() {
+        let _serial = crate::pairing::TEST_LOCK.blocking_lock();
+        let (old, _rx) = tokio::sync::mpsc::channel(8);
+        let previous = REPLACE_TX_GUARD.lock().replace(old);
+        detach_peer();
+        assert!(REPLACE_TX_GUARD.lock().is_none());
+        *REPLACE_TX_GUARD.lock() = previous;
+    }
     /// Manual: time one local-change poll (the work done every `POLL_MS`).
     /// Reads the live clipboard but prints only timings, never content.
     #[test]
@@ -1370,6 +1385,7 @@ mod tests {
         let (events, mut clipboard_events) = tokio::sync::mpsc::channel(queue_capacity());
         let (wire, mut messages) = tokio::sync::mpsc::channel(crate::files::file_queue_capacity());
         let recorder = Arc::new(Recorder::default());
+        crate::files::set_session_tx(wire.clone());
         ensure_watcher(events, wire, recorder.clone(), true);
 
         runtime.block_on(async {

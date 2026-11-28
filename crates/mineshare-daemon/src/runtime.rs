@@ -34,6 +34,11 @@ use crate::audio_pipeline::{AudioHub, MAX_AUDIO_AGE, SendBudget};
 use crate::identity::Identity;
 use crate::input_pipeline::{InputHub, merge_motion};
 use crate::logs;
+#[path = "peer_routes.rs"]
+mod peer_routes;
+pub use peer_routes::{
+    PeerSessionStatus, connected_peers, push_peer_side, select_input_peer, set_peer_audio_route,
+};
 
 const DEFAULT_CONTROL_PORT: u16 = 0; // 0 = OS-assigned
 const STANDBY_RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -55,7 +60,7 @@ pub struct NearbyPeer {
     request_supported: bool,
 }
 pub fn nearby_peers() -> Vec<NearbyPeer> {
-    let connected = SESSIONS.control().connected_peer_id;
+    let connected = SESSIONS.control().connected_peer_ids;
     let trusted = crate::trust::list_trusted();
     let mut peers: Vec<_> = NEARBY
         .lock()
@@ -68,9 +73,8 @@ pub fn nearby_peers() -> Vec<NearbyPeer> {
             trusted: trusted
                 .iter()
                 .any(|known| known.device_id == peer.device_id.to_string()),
-            connected: crate::status::peer_connected()
-                && connected.as_deref() == Some(&peer.device_id.to_string()),
-            request_supported: peer.pairing_protocol == 1,
+            connected: connected.contains(&peer.device_id.to_string()),
+            request_supported: peer.pairing_protocol == 5,
         })
         .collect();
     peers.sort_by(|a, b| {
@@ -88,7 +92,7 @@ pub fn request_pairing(device_id: &str) -> Result<()> {
         .cloned()
         .context("computer is no longer nearby")?;
     anyhow::ensure!(
-        peer.pairing_protocol == 1,
+        peer.pairing_protocol == 5,
         "update MineShare on the other computer before pairing"
     );
     anyhow::ensure!(
@@ -96,7 +100,11 @@ pub fn request_pairing(device_id: &str) -> Result<()> {
         "computer has no reachable address"
     );
     anyhow::ensure!(
-        SESSIONS.control().connected_peer_id.as_deref() != Some(device_id),
+        !SESSIONS
+            .control()
+            .connected_peer_ids
+            .iter()
+            .any(|id| id == device_id),
         "computer is already connected"
     );
     SESSIONS.request(device_id)?;
@@ -105,6 +113,8 @@ pub fn request_pairing(device_id: &str) -> Result<()> {
 
 pub fn connection_control() -> ConnectionControl {
     let mut control = SESSIONS.control();
+    control.active_input_peer_id = peer_routes::active_id();
+    control.connected_peer_id = control.active_input_peer_id.clone();
     control.selected_peer = selected_peer_info(
         crate::trust::selected_peer().as_deref(),
         &crate::trust::list_trusted(),
@@ -134,6 +144,9 @@ fn selected_peer_info(
         os,
     })
 }
+pub(crate) fn revoke_peer_session(device_id: &str) {
+    SESSIONS.cancel_peer(device_id);
+}
 pub fn set_connections_paused(paused: bool) {
     SESSIONS.set_paused(paused);
     if paused {
@@ -147,6 +160,7 @@ pub fn set_pairing_enabled(enabled: bool) -> Result<()> {
     }
     Ok(())
 }
+static PEER_PLAYBACK_ENABLED: AtomicBool = AtomicBool::new(false);
 static LOCAL_TOUCHPAD_CAPABILITIES: AtomicU32 = AtomicU32::new(0);
 
 /// Wakes reconnect loops that are backing off: a peer re-announcing itself,
@@ -483,7 +497,15 @@ impl InjectSender {
 }
 
 impl InjectDispatcher {
+    #[cfg(test)]
     fn start(inject: Arc<dyn InputInject>, stats: Arc<SessionStats>) -> Result<Self> {
+        Self::start_for_peer(inject, stats, None)
+    }
+    fn start_for_peer(
+        inject: Arc<dyn InputInject>,
+        stats: Arc<SessionStats>,
+        peer_id: Option<String>,
+    ) -> Result<Self> {
         let queue = Arc::new(InjectQueue {
             pending: Mutex::new(VecDeque::new()),
             wake: Condvar::new(),
@@ -540,12 +562,19 @@ impl InjectDispatcher {
                         }
                         crate::input_timing::INJECT_QUEUE_AGE.record(entry.queued_at.elapsed());
                         let inject_started = std::time::Instant::now();
-                        let injected = dispatch_inject_event(
-                            &*inject,
-                            &stats,
-                            entry.event,
-                            entry.merged_motion,
-                        );
+                        let dispatch = || {
+                            dispatch_inject_event(
+                                &*inject,
+                                &stats,
+                                entry.event,
+                                entry.merged_motion,
+                            )
+                        };
+                        let injected = if let Some(id) = peer_id.as_deref() {
+                            peer_routes::inject_if_active(id, entry.event, dispatch)
+                        } else {
+                            dispatch()
+                        };
                         crate::input_timing::INJECT_CALL.record(inject_started.elapsed());
                         if !injected {
                             worker_queue.stopped.store(true, Ordering::Release);
@@ -631,199 +660,10 @@ fn dispatch_inject_event(
     }
 }
 
-/// One-shot message exchanged on the encrypted TCP control channel after
-/// the Noise handshake. Carries the peer-side UDP port (so we know where
-/// to send the input/audio streams) plus the peer's primary screen
-/// geometry in physical pixels — used by both sides to clamp `virt_x`
-/// against the real peer width instead of hardcoded constants.
-///
-/// Wire format is positional (bincode), so adding fields is a breaking
-/// protocol change. Both daemons must run the same version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PortAnnounce {
-    udp_port: u16,
-    daemon_version: String,
-    screen_w: u32,
-    screen_h: u32,
-    touchpad_capabilities: u32,
-}
-
-const CONNECTION_MAGIC: [u8; 8] = *b"MSPAIR04";
-// The legacy announce field is a bitset. Use a non-touchpad bit so older
-// peers can still connect without seeing the new clipboard-only message.
-const STAGED_PASTE_CAPABILITY: u32 = 1 << 31;
-#[derive(Debug, Serialize, Deserialize)]
-struct ConnectionHello {
-    magic: [u8; 8],
-    device_id: DeviceId,
-    display_name: String,
-    trusts_peer: bool,
-    requested: bool,
-}
-impl ConnectionHello {
-    fn validate_for(&self, expected: Option<DeviceId>) -> Result<()> {
-        anyhow::ensure!(
-            self.magic == CONNECTION_MAGIC,
-            "incompatible pairing protocol: update MineShare on both computers"
-        );
-        anyhow::ensure!(
-            !self.display_name.is_empty()
-                && self.display_name.len() <= 256
-                && !self.display_name.chars().any(char::is_control),
-            "invalid computer name"
-        );
-        if let Some(expected) = expected {
-            anyhow::ensure!(
-                self.device_id == expected,
-                "the responding computer is not the selected device"
-            );
-        }
-        Ok(())
-    }
-}
-
-/// Streamed messages on the encrypted TCP control channel after the
-/// initial PortAnnounce exchange. Used to coordinate which peer holds
-/// Remote mode at any given moment so the local capture can refuse to
-/// also enter Remote (which would have both ends fighting for the
-/// cursor).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ControlMsg {
-    TakeControl {
-        epoch: u64,
-    },
-    ReleaseControl,
-    /// Peer is requesting that *we* leave Remote (their hotkey was
-    /// pressed while we held Remote). We should call
-    /// `force_local_exit_remote()` and then send `ReleaseControl`
-    /// from the resulting `Exited` event.
-    ForceRelease,
-    /// Peer's clipboard changed — apply the text on this side. Bound
-    /// to 64 KB at the watcher to keep oversized pastes from
-    /// flooding the control channel; receivers should also sanity-
-    /// check length before applying.
-    ClipboardText(String),
-    ClipboardImageStart {
-        id: u64,
-        width: u32,
-        height: u32,
-        total_bytes: u64,
-    },
-    ClipboardImageChunk {
-        id: u64,
-        offset: u64,
-        data: Vec<u8>,
-    },
-    ClipboardImageEnd {
-        id: u64,
-    },
-    /// Peer changed their layout — they want OUR `peer_side` to
-    /// be the value they sent. The sender flips left↔right /
-    /// top↔bottom on their side before sending, so receivers can
-    /// apply the value verbatim.
-    SetPeerSide(crate::layout::PeerSide),
-    /// Stage 7 PIN-pairing: dialer sends the user-entered PIN
-    /// plus its own identity so the acceptor can both verify
-    /// and persist the trust entry. Used exactly once at the
-    /// start of a session against an untrusted peer.
-    PinAttempt {
-        pin: String,
-        device_id: String,
-        display_name: String,
-    },
-    /// Acceptor's verdict on the PinAttempt + its own identity.
-    /// On `ok=true` the dialer adds the acceptor to its trust
-    /// list and proceeds with the session; on `ok=false` both
-    /// sides tear the connection down.
-    PinAck {
-        ok: bool,
-        device_id: String,
-        display_name: String,
-    },
-    /// Stage 8.5 RTT heartbeat. The sender stamps its own current
-    /// monotonic-ish ms in `ts_ms`, the peer echoes it verbatim
-    /// as a [`ControlMsg::Pong`], the original sender measures
-    /// `now - ts_ms` to learn round-trip time. Carrying our own
-    /// timestamp on both legs avoids any need for clock sync
-    /// between peers.
-    Ping {
-        ts_us: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lock_visual: Option<crate::status::LockVisual>,
-    },
-    Pong {
-        ts_us: u64,
-    },
-    /// Activity beacon driving the Smart keyboard target. Each side
-    /// periodically advertises `last_input_ago_ms` — ms since its
-    /// most recent activity (a deliberate mouse drag OR a click),
-    /// capped at 60 s, or `None` if it has been idle all session.
-    ///
-    /// The receiver back-dates its single `PEER_ACTIVITY_AT` by the
-    /// reported age, so the most-recent-activity race compares both
-    /// sides on the receiver's own clock with no clock sync.
-    ///
-    /// Wire format is positional (bincode), so changing these fields
-    /// is a breaking protocol change. Both daemons must upgrade in
-    /// lockstep.
-    ActivityBeacon {
-        last_input_ago_ms: Option<u32>,
-    },
-    /// Stage 12 file transfer — declares an incoming file. The
-    /// receiver allocates a `.partial` temp file under
-    /// `<download>/MineShare/` and prepares to write chunks.
-    /// Auto-accept: peer is already trusted, so we don't prompt.
-    FileOffer {
-        id: u64,
-        name: String,
-        size_bytes: u64,
-    },
-    /// One slice of bytes belonging to transfer `id`. `offset` is
-    /// included so future out-of-order / parallel-chunk variants
-    /// don't break the wire format. Current sender streams
-    /// strictly sequentially.
-    FileChunk {
-        id: u64,
-        offset: u64,
-        data: Vec<u8>,
-    },
-    /// Sender finished — receiver verifies sha256 against the
-    /// running hash, atomically renames the `.partial` to the
-    /// final destination on match, deletes + fails on mismatch.
-    FileEnd {
-        id: u64,
-        sha256: [u8; 32],
-    },
-    /// Either side aborted the transfer.
-    FileCancel {
-        id: u64,
-    },
-    /// Toggle the peer into / out of Game Drive "Receiving" — it should
-    /// inject our pure-relative input and suppress its own cursor-crossing.
-    GameDrive {
-        active: bool,
-        epoch: u64,
-    },
-    /// IDs of verified FileEnd transfers to publish as a native file clipboard.
-    ClipboardFiles {
-        offer: u64,
-        ids: Vec<u64>,
-    },
-    InputLockRequest(mineshare_input::LockRequest),
-    InputLockReply(mineshare_input::LockReply),
-    PairingDecision {
-        accepted: bool,
-        reason: String,
-    },
-    ClipboardFileOffer(u64),
-    ClipboardFilePaste(u64),
-    ClipboardFileTransfer {
-        offer: u64,
-        id: u64,
-        name: String,
-        size_bytes: u64,
-    },
-}
+pub use mineshare_protocol::{
+    CONNECTION_MAGIC, ConnectionHello, ControlMsg, DeviceCapabilities, PortAnnounce,
+    STAGED_PASTE_CAPABILITY, WireFrame,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlCollisionAction {
@@ -850,25 +690,6 @@ fn control_collision_action(
     } else {
         ControlCollisionAction::YieldToPeer
     }
-}
-
-/// Tagged UDP payload — input events and audio frames share the same
-/// encrypted UDP socket, so the receiver needs to know which kind of
-/// payload arrived. bincode prefixes the variant index automatically.
-///
-/// Wire format is positional; both daemons must run the same version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum WireFrame {
-    Input {
-        seq: u64,
-        event: InputEvent,
-    },
-    InputState {
-        seq: u64,
-        after_input_seq: u64,
-        state: ForwardedInputState,
-    },
-    Audio(AudioFrame),
 }
 
 #[derive(Default)]
@@ -1012,6 +833,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let mic_playback_enabled =
         audio_component_enabled(opts.audio, "MINESHARE_DISABLE_MIC_PLAYBACK");
 
+    PEER_PLAYBACK_ENABLED.store(opts.inject && audio_playback_enabled, Ordering::Release);
     let identity = Identity::load_or_create().context("identity bootstrap failed")?;
 
     // Push the persisted layout to the input modules before any
@@ -1051,6 +873,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     // Input merges adjacent legal pointer updates before capacity pressure.
     // A discrete overflow fails the session closed; teardown releases held keys.
     // Audio has independent per-stream mailboxes with a capture-ingress deadline.
+    mineshare_input::set_peer_edge_selector(peer_routes::select_edge);
     let input_bcast = InputHub::default();
     let wire_bcast = AudioHub::default();
 
@@ -1367,7 +1190,7 @@ pub async fn run(opts: RunOpts) -> Result<()> {
         // mDNS follows all active interfaces, including ones that return after
         // startup. A one-time default-route lookup freezes stale DHCP addresses.
         addresses: Vec::new(),
-        pairing_protocol: 1,
+        pairing_protocol: 5,
     };
     discovery.announce(&advert)?;
 
@@ -1492,9 +1315,8 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                             // other side is a failover for one-sided mDNS and
                             // must stay idle while either session is healthy.
                             let peer_id_string = peer_id.to_string();
-                            let selected_trusted =
-                                crate::trust::selected_peer().as_deref() == Some(&peer_id_string);
-                            if peer_now.pairing_protocol != 1
+                            let selected_trusted = crate::trust::should_reconnect(&peer_id_string);
+                            if peer_now.pairing_protocol != 5
                                 || !SESSIONS.can_dial(&peer_id_string, selected_trusted)
                             {
                                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1768,7 +1590,7 @@ async fn run_peer_session(
     let consent = hello.requested || remote.requested;
     if !consent {
         anyhow::ensure!(
-            trusted && crate::trust::selected_peer().as_deref() == Some(&peer_id),
+            trusted && crate::trust::should_reconnect(&peer_id),
             "select this computer and send a pairing request first"
         );
     }
@@ -1806,7 +1628,7 @@ async fn run_peer_session(
     let _lifetime = tokio::select! {
         biased;
         _ = claim.cancelled() => anyhow::bail!("duplicate session superseded"),
-        guard = SESSIONS.lifetime.lock() => guard,
+        guard = SESSIONS.lifetime(&peer_id).lock_owned() => guard,
     };
     let peer_addr = stream.peer_addr()?;
     // Stage 6.2: enable TCP keepalive on the control socket. Without
@@ -1898,15 +1720,6 @@ async fn run_peer_session(
                 return Err(e);
             }
         }
-    } else {
-        // Trusted peer: clear any leftover pairing phase from a
-        // previous failed attempt with a different peer so the
-        // GUI doesn't keep showing "Pairing failed" once a real
-        // session is healthy.
-        let cur = crate::pairing::current_phase();
-        if !matches!(cur, crate::pairing::PairingPhase::None) {
-            crate::pairing::set_phase(crate::pairing::PairingPhase::None);
-        }
     }
 
     let udp = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
@@ -1920,7 +1733,22 @@ async fn run_peer_session(
         screen_w: local_w,
         screen_h: local_h,
         touchpad_capabilities: LOCAL_TOUCHPAD_CAPABILITIES.load(Ordering::Acquire)
-            | STAGED_PASTE_CAPABILITY,
+            | STAGED_PASTE_CAPABILITY
+            | if cfg!(target_os = "windows") {
+                mineshare_input::RECEIVER_EDGE_CAPABILITY
+            } else {
+                0
+            },
+        capabilities: DeviceCapabilities {
+            os: identity.os.clone(),
+            pointer: true,
+            keyboard: true,
+            text_input: false,
+            system_audio_send: true,
+            system_audio_receive: true,
+            clipboard: true,
+            files: true,
+        },
     };
     let exchange = async {
         write_encrypted(&mut stream, &aead, &announce).await?;
@@ -1943,14 +1771,18 @@ async fn run_peer_session(
     );
     // Complete all fallible setup before publishing shared session state or
     // spawning workers. Otherwise a `?` skips teardown and strands the bridge.
-    let inject_dispatcher = InjectDispatcher::start(inject.clone(), stats.clone())?;
-    crate::status::set_peer_connected(peer_addr.to_string(), Some(remote.display_name.clone()));
+    let playback = if PEER_PLAYBACK_ENABLED.load(Ordering::Acquire) {
+        mineshare_audio::make_playback()
+            .map(Arc::from)
+            .unwrap_or(playback)
+    } else {
+        playback
+    };
+    let inject_dispatcher =
+        InjectDispatcher::start_for_peer(inject.clone(), stats.clone(), Some(peer_id.clone()))?;
     let peer_udp = SocketAddr::new(peer_addr.ip(), peer_announce.udp_port);
-    mineshare_input::set_peer_screen(peer_announce.screen_w, peer_announce.screen_h);
     let staged_paste = peer_announce.touchpad_capabilities & STAGED_PASTE_CAPABILITY != 0;
     let peer_touchpad_capabilities = peer_announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
-    mineshare_input::set_peer_touchpad_capabilities(peer_touchpad_capabilities);
-    crate::status::set_peer_version(Some(peer_announce.daemon_version.clone()));
     let local_touchpad_capabilities = announce.touchpad_capabilities & !STAGED_PASTE_CAPABILITY;
     let touchpad_mode = if mineshare_input::native_touchpad_pair_available(
         local_touchpad_capabilities,
@@ -1976,7 +1808,9 @@ async fn run_peer_session(
     // A failed cleanup from the previous connection intentionally retains
     // MineShare ownership for retry. Do that retry before any task for this
     // trusted session can receive or inject a new edge.
-    if let Err(e) = retry_stale_owned_input(inject.as_ref()) {
+    if peer_routes::active_id().is_none()
+        && let Err(e) = retry_stale_owned_input(inject.as_ref())
+    {
         warn!(error = %e, "failed to retry stale input cleanup on reconnect");
     }
 
@@ -1995,7 +1829,7 @@ async fn run_peer_session(
         crate::clipboard::queue_capacity(),
     );
     let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel::<crate::layout::PeerSide>();
-    crate::layout::set_propagate_sender(side_tx);
+
     // Stage 8.5 RTT plumbing: a generic ControlMsg pipe used by
     // both the periodic Ping sender and the reader's Pong echo.
     // Anything pushed here jumps the queue ahead of whatever the
@@ -2005,14 +1839,30 @@ async fn run_peer_session(
     let (file_tx, mut file_rx) =
         tokio::sync::mpsc::channel::<ControlMsg>(crate::files::file_queue_capacity());
     let aead_writer = aead.clone_handle();
+    let writer_peer_id = peer_id.clone();
+    let initial_phone_side = peer_announce
+        .capabilities
+        .os
+        .eq_ignore_ascii_case("android")
+        .then(|| crate::layout::side_for_peer(&peer_id).opposite());
     let mut writer_handle = tokio::spawn(async move {
+        if let Some(side) = initial_phone_side
+            && write_encrypted(&mut tcp_write, &aead_writer, &ControlMsg::SetPeerSide(side))
+                .await
+                .is_err()
+        {
+            return;
+        }
         loop {
             let msg = tokio::select! {
                 biased;
                 ev = rev_rx.recv() => match ev {
                     Some(mineshare_input::RemoteEvent::Entered { epoch }) => ControlMsg::TakeControl { epoch },
                     Some(mineshare_input::RemoteEvent::Exited) => ControlMsg::ReleaseControl,
-                    Some(mineshare_input::RemoteEvent::RequestPeerExit) => ControlMsg::ForceRelease,
+                    Some(mineshare_input::RemoteEvent::RequestPeerExit) => {
+                        peer_routes::cancel_source_relay(&writer_peer_id);
+                        ControlMsg::ForceRelease
+                    },
                     Some(mineshare_input::RemoteEvent::GameDriveStart { epoch }) => {
                         ControlMsg::GameDrive { active: true, epoch }
                     }
@@ -2062,6 +1912,17 @@ async fn run_peer_session(
                     None => break,
                 },
             };
+            if matches!(
+                msg,
+                ControlMsg::ClipboardText(_)
+                    | ControlMsg::ClipboardImageStart { .. }
+                    | ControlMsg::ClipboardImageChunk { .. }
+                    | ControlMsg::ClipboardImageEnd { .. }
+                    | ControlMsg::ClipboardFileOffer(_)
+            ) && !peer_routes::is_active(&writer_peer_id)
+            {
+                continue;
+            }
             if let Err(e) = write_encrypted(&mut tcp_write, &aead_writer, &msg).await {
                 warn!(error = %e, "control writer failed — peer probably disconnected");
                 break;
@@ -2080,8 +1941,36 @@ async fn run_peer_session(
     // sender to the Tauri `send_file` command via a global slot.
     // Cleared in the session-end teardown below so a stale peer
     // sender can't outlive the connection.
-    crate::clipboard::ensure_watcher(clip_tx, file_tx.clone(), inject.clone(), staged_paste);
-    crate::files::set_session_tx(file_tx);
+    let reader_file_tx = file_tx.clone();
+    let route_id = peer_id.clone();
+    let (relay_tx, mut relay_rx) = mpsc::channel(256);
+    let (send_audio, receive_audio) = peer_routes::initial_audio_route(&peer_id);
+    peer_routes::register(peer_routes::PeerRoute {
+        status: PeerSessionStatus {
+            device_id: peer_id.clone(),
+            display_name: remote.display_name.clone(),
+            os: peer_announce.capabilities.os.clone(),
+            input_active: false,
+            send_audio,
+            receive_audio,
+            display_width: peer_announce.screen_w,
+            display_height: peer_announce.screen_h,
+            peer_side: crate::layout::side_for_peer(&peer_id),
+        },
+        rev_tx,
+        control_tx: rtt_tx.clone(),
+        side_tx,
+        clip_tx,
+        file_tx,
+        inject: inject.clone(),
+        staged_paste,
+        capabilities: peer_announce.capabilities.clone(),
+        touchpad_capabilities: peer_touchpad_capabilities,
+        address: peer_addr.to_string(),
+        version: peer_announce.daemon_version.clone(),
+        remote_receives_audio: true,
+        relay_tx,
+    });
 
     // Periodic Ping sender — fires every 500 ms. Owns its own
     // sender clone so dropping the rtt channel kills the task at
@@ -2165,6 +2054,7 @@ async fn run_peer_session(
     let aead_reader = aead.clone_handle();
     let inject_for_reader = inject.clone();
     let pong_tx = rtt_tx.clone();
+    let reader_peer_id = peer_id.clone();
     let mut reader_handle = tokio::spawn(async move {
         loop {
             let received = tokio::time::timeout(
@@ -2173,8 +2063,42 @@ async fn run_peer_session(
             )
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("control heartbeat timed out")));
+            let active = peer_routes::is_active(&reader_peer_id);
+            if matches!(received, Ok(ControlMsg::ForceRelease))
+                && peer_routes::return_relay(&reader_peer_id)
+            {
+                continue;
+            }
+            if let Ok(ref msg) = received
+                && !active
+                && !matches!(
+                    msg,
+                    ControlMsg::TakeControl { .. }
+                        | ControlMsg::Ping { .. }
+                        | ControlMsg::Pong { .. }
+                        | ControlMsg::SetPeerSide(_)
+                        | ControlMsg::DisplayGeometry { .. }
+                        | ControlMsg::AudioRoute { .. }
+                        | ControlMsg::FileCancel { .. }
+                )
+            {
+                continue;
+            }
             match received {
                 Ok(ControlMsg::TakeControl { epoch }) => {
+                    if !peer_routes::is_active(&reader_peer_id) {
+                        // Another peer already drives this PC: keep it. If this PC is
+                        // merely controlling a different peer (laptop touchpad → phone),
+                        // the physical mouse of the newly entering peer wins, and
+                        // select_input_peer() hands the local cursor back first.
+                        if mineshare_input::peer_in_remote() {
+                            let _ = pong_tx.send(ControlMsg::ForceRelease);
+                            continue;
+                        }
+                        if select_input_peer(Some(&reader_peer_id)).is_err() {
+                            continue;
+                        }
+                    }
                     let action = control_collision_action(
                         mineshare_input::local_in_remote(),
                         local_wins_control_collision,
@@ -2208,6 +2132,7 @@ async fn run_peer_session(
                     }
                 }
                 Ok(ControlMsg::ReleaseControl) => {
+                    peer_routes::cancel_source_relay(&reader_peer_id);
                     info!("peer released Remote control");
                     mineshare_input::set_peer_in_remote(false);
                     if let Err(e) = inject_for_reader.release_all_held() {
@@ -2215,6 +2140,7 @@ async fn run_peer_session(
                     }
                 }
                 Ok(ControlMsg::ForceRelease) => {
+                    peer_routes::cancel_source_relay(&reader_peer_id);
                     info!("peer asked us to release Remote");
                     mineshare_input::force_local_exit_remote();
                     if let Err(e) = inject_for_reader.release_all_held() {
@@ -2298,9 +2224,7 @@ async fn run_peer_session(
                 }
                 Ok(ControlMsg::SetPeerSide(side)) => {
                     info!(?side, "peer pushed a layout side — applying locally");
-                    if let Err(e) = crate::layout::apply_from_peer(crate::layout::LayoutConfig {
-                        peer_side: side,
-                    }) {
+                    if let Err(e) = crate::layout::apply_for_peer(&reader_peer_id, side) {
                         warn!(error = %e, "failed to apply peer layout");
                     }
                 }
@@ -2316,7 +2240,9 @@ async fn run_peer_session(
                     warn!("received pairing message mid-session — ignored");
                 }
                 Ok(ControlMsg::Ping { ts_us, lock_visual }) => {
-                    crate::status::set_peer_lock_visual(lock_visual);
+                    if active {
+                        crate::status::set_peer_lock_visual(lock_visual);
+                    }
                     // Echo it straight back; the peer's writer will
                     // measure round-trip from its own clock. Failure
                     // to send means the writer task is gone — fine,
@@ -2325,7 +2251,9 @@ async fn run_peer_session(
                 }
                 Ok(ControlMsg::Pong { ts_us }) => {
                     let rtt = crate::latency::elapsed_ms(ts_us, crate::latency::now_us());
-                    crate::latency::record_rtt_ms(rtt);
+                    if active {
+                        crate::latency::record_rtt_ms(rtt);
+                    }
                 }
                 Ok(ControlMsg::FileOffer {
                     id,
@@ -2334,7 +2262,8 @@ async fn run_peer_session(
                 }) => {
                     if let Err(e) = crate::files::begin_incoming(id, &name, size_bytes).await {
                         warn!(id, error = %e, "failed to start incoming file");
-                        crate::files::fail_incoming(id, format!("{e:#}"));
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    } else if !crate::files::bind_active_session(id, &reader_file_tx) {
                         let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
@@ -2352,9 +2281,14 @@ async fn run_peer_session(
                     {
                         debug!(id, %error, "clipboard file rejected");
                         let _ = pong_tx.send(ControlMsg::FileCancel { id });
+                    } else if !crate::files::bind_active_session(id, &reader_file_tx) {
+                        let _ = pong_tx.send(ControlMsg::FileCancel { id });
                     }
                 }
                 Ok(ControlMsg::FileChunk { id, offset, data }) => {
+                    if !crate::files::belongs_to_session(id, &reader_file_tx) {
+                        continue;
+                    }
                     if let Err(e) = crate::files::write_chunk(id, offset, &data).await {
                         warn!(id, offset, error = %e, "file chunk write failed");
                         crate::files::fail_incoming(id, format!("{e:#}"));
@@ -2362,6 +2296,9 @@ async fn run_peer_session(
                     }
                 }
                 Ok(ControlMsg::FileEnd { id, sha256 }) => {
+                    if !crate::files::belongs_to_session(id, &reader_file_tx) {
+                        continue;
+                    }
                     if let Err(e) = crate::files::finalize_incoming(id, sha256).await {
                         warn!(id, error = %e, "file finalize failed");
                         crate::files::fail_incoming(id, format!("{e:#}"));
@@ -2370,7 +2307,9 @@ async fn run_peer_session(
                 }
                 Ok(ControlMsg::FileCancel { id }) => {
                     info!(id, "peer cancelled file transfer");
-                    crate::files::mark_cancelled(id);
+                    if crate::files::belongs_to_session(id, &reader_file_tx) {
+                        crate::files::mark_cancelled(id);
+                    }
                 }
                 Ok(ControlMsg::ActivityBeacon { last_input_ago_ms }) => {
                     // Back-date the peer's most-recent-activity stamp
@@ -2382,6 +2321,13 @@ async fn run_peer_session(
                         mineshare_input::note_peer_activity(age);
                     }
                 }
+                Ok(ControlMsg::DisplayGeometry { width, height }) => {
+                    peer_routes::geometry(&reader_peer_id, width, height)
+                }
+                Ok(ControlMsg::AudioRoute { receive_system }) => {
+                    peer_routes::remote_receives(&reader_peer_id, receive_system)
+                }
+                Ok(ControlMsg::TextInput(_)) => {}
                 Err(e) => {
                     debug!(error = %e, "control reader ended");
                     break;
@@ -2400,6 +2346,7 @@ async fn run_peer_session(
     let mic_playback_recv = mic_playback.clone();
     let stats_recv = stats.clone();
     let inject_for_gesture_timeout = inject.clone();
+    let recv_peer_id = peer_id.clone();
     let mut recv_handle = tokio::spawn(async move {
         // Buffer must fit the largest WireFrame: input events are
         // tiny but Opus frames + AEAD tag + bincode framing top out
@@ -2409,9 +2356,18 @@ async fn run_peer_session(
         let mut input_ordering = InputReceiveOrdering::default();
         let mut snapshot_press_deduper = SnapshotPressDeduper::default();
         let mut playback_route = PlaybackRoute::new(playback_recv);
-        let mut mic_playback_route = PlaybackRoute::new(mic_playback_recv);
-        playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
-        mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
+        let mut mic_playback_route = PlaybackRoute {
+            backend: mic_playback_recv,
+            session: None,
+        };
+        playback_route.sync(
+            peer_routes::receives_audio(&recv_peer_id)
+                && crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire),
+        );
+        mic_playback_route.sync(
+            peer_routes::is_active(&recv_peer_id)
+                && crate::audio_status::PLAY_MIC.load(Ordering::Acquire),
+        );
         let mut route_tick = tokio::time::interval(Duration::from_millis(20));
         route_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -2425,8 +2381,8 @@ async fn run_peer_session(
                         warn!(%error, "failed to release timed-out touchpad gesture");
                         break;
                     }
-                    playback_route.sync(crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
-                    mic_playback_route.sync(crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
+                    playback_route.sync(peer_routes::receives_audio(&recv_peer_id) && crate::audio_status::PLAY_SYSOUT.load(Ordering::Acquire));
+                    mic_playback_route.sync(peer_routes::is_active(&recv_peer_id) && crate::audio_status::PLAY_MIC.load(Ordering::Acquire));
                     continue;
                 }
                 received = udp_recv.recv_from(&mut buf) => received,
@@ -2440,6 +2396,9 @@ async fn run_peer_session(
                             match bincode::serde::decode_from_slice::<WireFrame, _>(&pt, standard())
                             {
                                 Ok((WireFrame::Input { seq, event: ev }, _)) => {
+                                    if !peer_routes::is_active(&recv_peer_id) {
+                                        continue;
+                                    }
                                     if let Some(last) = input_ordering.last_event_seq {
                                         if seq > last.saturating_add(1) {
                                             debug!(
@@ -2500,7 +2459,9 @@ async fn run_peer_session(
                                     },
                                     _,
                                 )) => {
-                                    if !input_ordering.accept_snapshot(seq, after_input_seq) {
+                                    if !peer_routes::is_active(&recv_peer_id)
+                                        || !input_ordering.accept_snapshot(seq, after_input_seq)
+                                    {
                                         continue;
                                     }
                                     let corrections = injected_state.reconciliation_events(&state);
@@ -2540,10 +2501,14 @@ async fn run_peer_session(
                                     // frame before enqueuing.
                                     let play = match frame.stream {
                                         mineshare_audio::StreamKind::SysOut => {
-                                            crate::audio_status::PLAY_SYSOUT.load(Ordering::Relaxed)
+                                            peer_routes::receives_audio(&recv_peer_id)
+                                                && crate::audio_status::PLAY_SYSOUT
+                                                    .load(Ordering::Relaxed)
                                         }
                                         mineshare_audio::StreamKind::Mic => {
-                                            crate::audio_status::PLAY_MIC.load(Ordering::Relaxed)
+                                            peer_routes::is_active(&recv_peer_id)
+                                                && crate::audio_status::PLAY_MIC
+                                                    .load(Ordering::Relaxed)
                                         }
                                     };
                                     match frame.stream {
@@ -2612,6 +2577,7 @@ async fn run_peer_session(
     // --- 1-Hz stats logger ----------------------------------------------
     let stats_tick = stats.clone();
     let peer_label = peer_addr.to_string();
+    let stats_peer_id = peer_id.clone();
     let stats_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2622,14 +2588,16 @@ async fn run_peer_session(
                 .saturating_duration_since(scheduled)
                 .as_millis();
             let curr = stats_tick.snapshot();
-            crate::status::publish_counters(
-                curr.sent_pkts,
-                curr.recv_pkts,
-                curr.injected,
-                curr.audio_recv,
-                curr.inject_errs,
-                curr.decrypt_errs,
-            );
+            if peer_routes::is_active(&stats_peer_id) {
+                crate::status::publish_counters(
+                    curr.sent_pkts,
+                    curr.recv_pkts,
+                    curr.injected,
+                    curr.audio_recv,
+                    curr.inject_errs,
+                    curr.decrypt_errs,
+                );
+            }
             let delta = curr.delta(&prev);
             if delta.sent_pkts != 0 || delta.recv_pkts != 0 {
                 info!(
@@ -2662,9 +2630,12 @@ async fn run_peer_session(
     let mut sub = bcast.subscribe();
     // Only allow capture to consume hardware after both data/control paths
     // exist; otherwise the first input after connection can have no subscriber.
-    mineshare_input::set_remote_event_sender(rev_tx);
+
     let mut send_budget = SendBudget::new(std::time::Instant::now());
     let mut queue_report = std::time::Instant::now();
+    let mut translated_keys = HashSet::<u16>::new();
+    let mut relay_sent_state = ForwardedInputState::default();
+    let mut relay_sent_epoch = 0;
     let mut next_input_seq = 0u64;
     let mut next_state_seq = 0u64;
     let mut input_state_tick = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -2696,8 +2667,37 @@ async fn run_peer_session(
             }};
         }
         macro_rules! send_input {
-            ($event:expr) => {{
+            ($event:expr) => {
+                send_input!($event, false)
+            };
+            ($event:expr, $relay:expr) => {{
                 let event = $event;
+                if !$relay && !peer_routes::is_active(&peer_id) {
+                    continue;
+                }
+                if peer_announce.capabilities.text_input {
+                    if let InputEvent::Key { code, down } = event {
+                        if down {
+                            let text = if $relay {
+                                mineshare_input::remote_text_for_received_key(
+                                    event,
+                                    &relay_sent_state,
+                                )
+                            } else {
+                                mineshare_input::remote_text_for_key(event)
+                            };
+                            if let Some(text) = text {
+                                translated_keys.insert(code.0);
+                                if !text.is_empty() {
+                                    let _ = rtt_tx.send(ControlMsg::TextInput(text));
+                                }
+                                continue;
+                            }
+                        } else if translated_keys.remove(&code.0) {
+                            continue;
+                        }
+                    }
+                }
                 let seq = next_input_seq;
                 next_input_seq = next_input_seq.wrapping_add(1);
                 let send_started = std::time::Instant::now();
@@ -2725,7 +2725,9 @@ async fn run_peer_session(
         if send_budget.audio_due(std::time::Instant::now()) {
             send_budget.audio_serviced(std::time::Instant::now());
             if let Ok(frame) = sub.try_recv() {
-                send_wire!(WireFrame::Audio(frame.frame.clone()), "audio-budget");
+                if peer_routes::sends_audio(&peer_id, frame.frame.stream) {
+                    send_wire!(WireFrame::Audio(frame.frame.clone()), "audio-budget");
+                }
                 continue;
             }
         }
@@ -2737,6 +2739,17 @@ async fn run_peer_session(
             }
             _ = &mut writer_handle => break "TCP control writer ended",
             _ = &mut recv_handle => break "UDP receiver ended",
+            Some((epoch, event)) = relay_rx.recv() => {
+                if peer_routes::relay_matches(&peer_id, epoch) {
+                    if relay_sent_epoch != epoch {
+                        relay_sent_state = ForwardedInputState::default();
+                        translated_keys.clear();
+                        relay_sent_epoch = epoch;
+                    }
+                    relay_sent_state.apply_event(event);
+                    send_input!(event, true);
+                }
+            },
             // HIGH-PRIORITY: input events skip the audio queue.
             recv = input_sub.recv() => match recv {
                 // Coalesce a backlog of MouseMove deltas into a single
@@ -2833,7 +2846,12 @@ async fn run_peer_session(
             _ = input_state_tick.tick(), if input_sub.is_empty() => {
                 state_heartbeat_ticks = state_heartbeat_ticks.saturating_add(1);
                 let heartbeat_due = state_heartbeat_ticks >= INPUT_STATE_HEARTBEAT_TICKS;
-                let state = mineshare_input::forwarded_input_state();
+                let mut state = peer_routes::relay_state(&peer_id).unwrap_or_else(|| {
+                    if peer_routes::is_active(&peer_id) { mineshare_input::forwarded_input_state() } else { ForwardedInputState::default() }
+                });
+                if peer_announce.capabilities.text_input {
+                    for code in &translated_keys { state.apply_event(InputEvent::Key { code: mineshare_input::KeyCode(*code), down: false }); }
+                }
                 let changed = state != last_state_sent;
                 if changed {
                     state_repeats_remaining = 4;
@@ -2860,7 +2878,7 @@ async fn run_peer_session(
             }
             // LOWER-PRIORITY: audio + future bulk traffic.
             recv = sub.recv() => match recv {
-                Ok(frame) => { send_wire!(WireFrame::Audio(frame.frame.clone()), "audio"); send_budget.audio_serviced(std::time::Instant::now()); }
+                Ok(frame) => { if peer_routes::sends_audio(&peer_id, frame.frame.stream) { send_wire!(WireFrame::Audio(frame.frame.clone()), "audio"); } send_budget.audio_serviced(std::time::Instant::now()); }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "broadcast subscriber lagged — events dropped");
                 }
@@ -2870,7 +2888,6 @@ async fn run_peer_session(
     };
 
     info!(reason = exit_reason, %peer_addr, "peer session ending");
-    mineshare_input::clear_remote_event_sender();
     reader_handle.abort();
     writer_handle.abort();
     ping_handle.abort();
@@ -2893,26 +2910,11 @@ async fn run_peer_session(
         }
     }
     inject_dispatcher.stop();
-    // Wipe RTT samples so the next session's stats start clean.
-    crate::latency::reset();
-    // Drop the file-transfer session sender + fail any in-flight
-    // transfers so the GUI doesn't show a stuck progress bar.
-    crate::files::clear_session_tx();
-    crate::clipboard::clear_file_session();
-    // Reset cross-session coordination state so the next handshake
-    // doesn't inherit a stale belief that the peer holds Remote.
-    mineshare_input::force_local_exit_remote();
-    mineshare_input::set_peer_in_remote(false);
-    mineshare_input::set_peer_touchpad_capabilities(0);
-    mineshare_input::set_game_drive(mineshare_input::GameDrive::Off);
-    crate::layout::clear_propagate_sender();
-    crate::status::clear_peer_connected();
-    // Stage 6.1: emit synthetic key-up for any keys / buttons the
-    // peer left injected-but-not-released (gameplay WASD held when
-    // the network drops, etc). Without this the local OS stays
-    // convinced those keys are held.
-    if let Err(e) = inject.release_all_held() {
-        warn!(error = %e, "release_all_held failed");
+    let was_active = peer_routes::unregister(&route_id);
+    if was_active && peer_routes::active_id().is_none() {
+        crate::latency::reset();
+        mineshare_input::set_peer_touchpad_capabilities(0);
+        crate::layout::clear_propagate_sender();
     }
     Ok(())
 }
@@ -3322,7 +3324,7 @@ mod tests {
                 os: "windows".into(),
                 control_port: 1234,
                 addresses: vec![],
-                pairing_protocol: 1,
+                pairing_protocol: 5,
             },
         )]);
         let selected = selected_id.to_string();
@@ -3343,7 +3345,7 @@ mod tests {
                 os: "linux".into(),
                 control_port: 1234,
                 addresses: vec![],
-                pairing_protocol: 1,
+                pairing_protocol: 5,
             },
         );
         let online = super::selected_peer_info(Some(&selected), &trusted, &nearby).unwrap();
@@ -3373,6 +3375,7 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_pairing_request_waits_for_human_approval_and_honors_decline() {
+        let _serial = crate::pairing::TEST_LOCK.lock().await;
         use crate::pairing::{self, PairingPhase};
         let _serial = pairing::TEST_GUARD.lock().await;
         for answer in [Some(true), Some(false), None] {
@@ -3458,7 +3461,7 @@ mod tests {
         let peer = mineshare_net::PeerAdvert {
             device_id: id,
             display_name: "paired PC".into(),
-            pairing_protocol: 1,
+            pairing_protocol: 5,
             os: "test".into(),
             control_port: 5000,
             addresses: vec!["192.168.1.2".parse().unwrap()],
@@ -4364,7 +4367,7 @@ mod lock_visual_tests {
         let bytes = serde_json::to_vec(&old).unwrap();
         let old_shape: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
-            !String::from_utf8(bytes.clone())
+            String::from_utf8(bytes.clone())
                 .unwrap()
                 .contains("lock_visual")
         );
@@ -4396,5 +4399,167 @@ mod lock_visual_tests {
         assert!(
             matches!(serde_json::from_value::<ControlMsg>(value).unwrap(), ControlMsg::Ping { ts_us:17, lock_visual:Some(v) } if v.locked)
         );
+    }
+}
+
+#[cfg(test)]
+mod android_interop_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn desktop_controls_android_and_keeps_audio_after_input_returns_local() {
+        let _serial = crate::pairing::TEST_LOCK.blocking_lock();
+        crate::pairing::set_phase(crate::pairing::PairingPhase::IncomingRequest {
+            peer_name: "Another phone".into(),
+            peer_addr: "127.0.0.1".into(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let desktop_key = mineshare_net::pairing::generate_static_key().unwrap();
+        let phone_key = mineshare_net::pairing::generate_static_key().unwrap();
+        let desktop_id = DeviceId::new();
+        let phone_id = DeviceId::new();
+        std::fs::write(directory.path().join("identity.json"),serde_json::to_vec(&json!({"device_id":phone_id,"private_key":phone_key.private,"public_key":phone_key.public})).unwrap()).unwrap();
+        let mut known = serde_json::Map::new();
+        known.insert(
+            desktop_id.to_string(),
+            json!({"name":"Desktop","key":desktop_key.public,"send":true,"receive":true}),
+        );
+        std::fs::write(
+            directory.path().join("peers.json"),
+            serde_json::to_vec(&json!({"trusted":known})).unwrap(),
+        )
+        .unwrap();
+        let _trust = crate::trust::temporary_trust(crate::trust::TrustedPeer {
+            device_id: phone_id.to_string(),
+            display_name: "Android".into(),
+            noise_static_hex: phone_key
+                .public
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            paired_at: 0,
+        });
+        let engine =
+            mineshare_android::Engine::start(directory.path(), "Android", 1440, 3120).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, engine.port()))
+                .await
+                .unwrap();
+            let mut initiator = Initiator::new(&desktop_key.private).unwrap();
+            let encrypted = initiator.handshake(&mut stream).await.unwrap();
+            let identity = Arc::new(Identity {
+                device_id: desktop_id,
+                display_name: "Desktop".into(),
+                os: "windows".into(),
+                noise_static_priv: desktop_key.private,
+                noise_static_pub: desktop_key.public,
+            });
+            let input = InputHub::default();
+            let audio = AudioHub::default();
+            let task_input = input.clone();
+            let task_audio = audio.clone();
+            let session = tokio::spawn(run_peer_session(
+                stream,
+                encrypted,
+                identity,
+                true,
+                Some((phone_id, None)),
+                Arc::new(NullInject),
+                Arc::new(NullPlayback),
+                Arc::new(NullPlayback),
+                task_input,
+                task_audio,
+            ));
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while connected_peers().is_empty() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "handshake did not finish"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                matches!(
+                    crate::pairing::current_phase(),
+                    crate::pairing::PairingPhase::IncomingRequest { .. }
+                ),
+                "trusted reconnection cleared another pairing request"
+            );
+            let id = phone_id.to_string();
+            peer_routes::send_test_control(&id, ControlMsg::TakeControl { epoch: 1 });
+            let mut owned = false;
+            while !owned {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Android did not accept ownership"
+                );
+                while let Some(event) = engine.poll() {
+                    let v: serde_json::Value = serde_json::from_str(&event).unwrap();
+                    owned |= v["kind"] == "take_control";
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let text_value = "\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35} MineShare";
+            peer_routes::send_test_control(&id, ControlMsg::TextInput(text_value.into()));
+            input.send(InputEvent::MouseMove { dx: 12, dy: 24 });
+            input.send(InputEvent::Key {
+                code: mineshare_input::KeyCode(14),
+                down: true,
+            });
+            let (mut text, mut motion, mut key) = (false, false, false);
+            while !(text && motion && key) {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "missing text={text},motion={motion},key={key}"
+                );
+                while let Some(event) = engine.poll() {
+                    let v: serde_json::Value = serde_json::from_str(&event).unwrap();
+                    text |= v["kind"] == "text" && v["text"] == text_value;
+                    motion |= v["kind"] == "move";
+                    key |= v["kind"] == "key" && v["code"] == 14;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            select_input_peer(None).unwrap();
+            assert!(!connected_peers()[0].input_active);
+            let mut encoder = mineshare_audio::codec::OpusEncoder::new(
+                96000,
+                mineshare_audio::StreamKind::SysOut,
+            )
+            .unwrap();
+            let pcm: Vec<f32> = (0..1920).map(|i| ((i as f32) * 0.1).sin() * 0.2).collect();
+            let mut heard = false;
+            for seq in 0..15 {
+                audio.send(CapturedAudio {
+                    frame: AudioFrame {
+                        stream: mineshare_audio::StreamKind::SysOut,
+                        seq,
+                        opus: encoder.encode(&pcm).unwrap(),
+                    },
+                    captured_at: std::time::Instant::now(),
+                });
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if let Some(pcm) = engine.poll_audio() {
+                    heard |= pcm.iter().any(|s| s.abs() > 0.01);
+                }
+            }
+            assert!(heard, "audio stopped when input returned local");
+            engine
+                .command(&json!({"type":"pause","paused":true}).to_string())
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), session)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(connected_peers().is_empty());
+        });
+        drop(rt);
+        drop(engine);
+        crate::pairing::set_phase(crate::pairing::PairingPhase::None);
     }
 }

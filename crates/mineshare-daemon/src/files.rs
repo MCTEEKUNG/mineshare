@@ -103,6 +103,7 @@ pub struct TransferSnapshot {
 /// sender task owns its own.
 struct Transfer {
     id: u64,
+    session: Option<ControlSender>,
     clipboard: bool,
     direction: Direction,
     status: Status,
@@ -258,6 +259,7 @@ fn register_outgoing_file(id: u64, source_path: &Path, size_bytes: u64, clipboar
         .to_string();
     let t = Transfer {
         id,
+        session: None,
         clipboard,
         direction: Direction::Sending,
         status: Status::Pending,
@@ -366,8 +368,13 @@ pub fn is_cancelled(id: u64) -> bool {
 /// because chunk loops on the sender check `is_cancelled()` per
 /// iteration.
 pub fn user_cancel(id: u64) {
+    let owner = with_state(|transfers| {
+        transfers
+            .get(&id)
+            .and_then(|transfer| transfer.session.clone())
+    });
     mark_cancelled(id);
-    if let Some(tx) = session_tx() {
+    if let Some(tx) = owner.or_else(session_tx) {
         let _ = tx.try_send(crate::runtime::ControlMsg::FileCancel { id });
     }
 }
@@ -455,6 +462,7 @@ pub(crate) async fn begin_incoming_file(
             id,
             Transfer {
                 id,
+                session: None,
                 clipboard,
                 direction: Direction::Receiving,
                 status: Status::Active,
@@ -605,22 +613,63 @@ pub fn set_session_tx(tx: ControlSender) {
     *SESSION_TX.lock() = Some(tx);
 }
 
-pub fn clear_session_tx() {
-    *SESSION_TX.lock() = None;
-    // Also fail any in-flight transfers so the GUI doesn't keep
-    // showing a stuck progress bar after the peer drops.
-    let pending: Vec<u64> = with_state(|m| {
-        m.values()
-            .filter(|t| {
+/// Bind a just-created transfer only while its original destination is selected.
+/// The selection lock closes the race with cancellation during a focus switch.
+pub(crate) fn bind_active_session(id: u64, tx: &ControlSender) -> bool {
+    let selected = SESSION_TX.lock();
+    if selected
+        .as_ref()
+        .is_some_and(|current| current.same_channel(tx))
+    {
+        with_state(|transfers| {
+            if let Some(transfer) = transfers.get_mut(&id) {
+                transfer.session = Some(tx.clone());
+            }
+        });
+        true
+    } else {
+        mark_cancelled(id);
+        false
+    }
+}
+pub(crate) fn belongs_to_session(id: u64, tx: &ControlSender) -> bool {
+    with_state(|transfers| {
+        transfers
+            .get(&id)
+            .and_then(|transfer| transfer.session.as_ref())
+            .is_some_and(|owner| owner.same_channel(tx))
+    })
+}
+fn take_session_transfers() -> Vec<u64> {
+    let mut selected = SESSION_TX.lock();
+    let Some(tx) = selected.take() else {
+        return Vec::new();
+    };
+    with_state(|transfers| {
+        transfers
+            .values()
+            .filter(|transfer| {
                 matches!(
-                    t.status,
+                    transfer.status,
                     Status::Pending | Status::Active | Status::Verifying
-                )
+                ) && transfer
+                    .session
+                    .as_ref()
+                    .is_some_and(|owner| owner.same_channel(&tx))
             })
-            .map(|t| t.id)
+            .map(|transfer| transfer.id)
             .collect()
-    });
-    for id in pending {
+    })
+}
+pub(crate) fn cancel_active_session() -> Vec<u64> {
+    let pending = take_session_transfers();
+    for id in &pending {
+        mark_cancelled(*id);
+    }
+    pending
+}
+pub fn clear_session_tx() {
+    for id in take_session_transfers() {
         mark_failed(id, "session ended mid-transfer");
     }
 }
@@ -654,6 +703,10 @@ pub fn start_send(source_path: PathBuf) -> Result<u64> {
     )?;
     let id = next_id();
     register_outgoing(id, &source_path, size_bytes);
+    anyhow::ensure!(
+        bind_active_session(id, &tx),
+        "file destination changed before transfer started"
+    );
 
     tokio::spawn(async move {
         if let Err(e) = drive_send(id, source_path, size_bytes, tx.clone(), None).await {
@@ -698,6 +751,10 @@ pub async fn send_clipboard(paths: Vec<PathBuf>, offer: u64, tx: ControlSender) 
     for (path, size) in sources {
         let id = next_id();
         register_outgoing_file(id, &path, size, true);
+        anyhow::ensure!(
+            bind_active_session(id, &tx),
+            "clipboard destination changed before transfer started"
+        );
         let result = drive_send(id, path, size, tx.clone(), Some(offer)).await;
         if let Err(e) = &result {
             mark_failed(id, format!("{e:#}"));
@@ -859,6 +916,59 @@ fn validate_chunk(received: u64, declared: u64, offset: u64, len: usize) -> Resu
 #[cfg(test)]
 mod transfer_validation_tests {
     use super::*;
+    #[tokio::test]
+    async fn switching_session_cancels_only_owned_transfers_and_cleans_late_partial_files() {
+        let _serial = crate::pairing::TEST_LOCK.lock().await;
+        let previous = SESSION_TX.lock().take();
+        let directory = tempfile::tempdir().unwrap();
+        let (old, _old_rx) = tokio::sync::mpsc::channel(8);
+        let (other, mut other_rx) = tokio::sync::mpsc::channel(8);
+        let outgoing = next_id();
+        let incoming = next_id();
+        let unrelated = next_id();
+        let late = next_id();
+        set_session_tx(old.clone());
+        register_outgoing(outgoing, Path::new("outgoing-test.txt"), 10);
+        assert!(bind_active_session(outgoing, &old));
+        begin_incoming_at(incoming, "partial.txt", 10, directory.path())
+            .await
+            .unwrap();
+        assert!(bind_active_session(incoming, &old));
+        write_chunk(incoming, 0, b"data").await.unwrap();
+        let partial = with_state(|transfers| transfers[&incoming].temp_path.clone().unwrap());
+        set_session_tx(other.clone());
+        register_outgoing(unrelated, Path::new("other-test.txt"), 10);
+        assert!(bind_active_session(unrelated, &other));
+        set_session_tx(old.clone());
+        let cancelled = cancel_active_session();
+        assert_eq!(cancelled.len(), 2);
+        assert!(cancelled.contains(&outgoing) && cancelled.contains(&incoming));
+        assert!(is_cancelled(outgoing) && is_cancelled(incoming));
+        assert!(!partial.exists());
+        assert!(!is_cancelled(unrelated));
+        // An async receive opened before a target switch must not attach to its replacement.
+        begin_incoming_at(late, "late.txt", 10, directory.path())
+            .await
+            .unwrap();
+        let late_partial = with_state(|transfers| transfers[&late].temp_path.clone().unwrap());
+        set_session_tx(other.clone());
+        assert!(!bind_active_session(late, &old));
+        assert!(!late_partial.exists());
+        assert!(belongs_to_session(unrelated, &other));
+        assert!(!belongs_to_session(unrelated, &old));
+        // User cancellation retains the transfer's original destination after focus changes.
+        *SESSION_TX.lock() = None;
+        user_cancel(unrelated);
+        assert!(
+            matches!(other_rx.recv().await, Some(crate::runtime::ControlMsg::FileCancel { id }) if id == unrelated)
+        );
+        with_state(|transfers| {
+            for id in [outgoing, incoming, unrelated, late] {
+                transfers.remove(&id);
+            }
+        });
+        *SESSION_TX.lock() = previous;
+    }
 
     #[test]
     fn accepts_sequential_chunks_within_declared_size() {

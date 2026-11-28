@@ -29,10 +29,10 @@ const en: Strings = {
   ...workspaceEn,
   connections_title: "Connections",
   connections_paused: "Connections paused",
-  connections_description: "Reconnects to your selected computer automatically. One computer at a time.",
+  connections_description: "Paired computers and Android phones reconnect directly on your local network.",
   connections_pause: "Disconnect & pause",
   connections_resume: "Resume connections",
-  pair_start: "Choose a computer",
+  pair_start: "Add a device",
   pair_stop: "Cancel pairing request",
   pair_cancel: "Cancel / stop pairing",
   pair_window: "Only the selected computer receives this request. It must accept before pairing starts.",
@@ -150,6 +150,7 @@ const en: Strings = {
   // Version footer
   ver_peer: "Peer",
   ver_same_build: "same build",
+  ver_compatible_android: "compatible Android version",
   ver_diff_build: "different build",
 };
 
@@ -157,10 +158,10 @@ const th: Strings = {
   ...workspaceTh,
   connections_title: "การเชื่อมต่อ",
   connections_paused: "พักการเชื่อมต่ออยู่",
-  connections_description: "เชื่อมต่อกลับไปยังเครื่องที่เลือกให้อัตโนมัติ ใช้งานได้ครั้งละหนึ่งเครื่อง",
+  connections_description: "คอมพิวเตอร์และโทรศัพท์ Android ที่จับคู่ไว้จะเชื่อมต่อกันโดยตรงในเครือข่ายเดียวกัน",
   connections_pause: "ตัดการเชื่อมต่อ / พัก",
   connections_resume: "เชื่อมต่ออีกครั้ง",
-  pair_start: "เลือกเครื่องในเครือข่าย",
+  pair_start: "เพิ่มอุปกรณ์",
   pair_stop: "ยกเลิกคำขอจับคู่",
   pair_cancel: "ยกเลิก / หยุดจับคู่",
   pair_window: "ส่งคำขอถึงเครื่องที่เลือกเท่านั้น อีกฝั่งต้องยอมรับก่อนเริ่มจับคู่",
@@ -265,6 +266,7 @@ const th: Strings = {
 
   ver_peer: "อีกเครื่อง",
   ver_same_build: "build ตรงกัน",
+  ver_compatible_android: "Android เวอร์ชันที่ใช้ร่วมกันได้",
   ver_diff_build: "build ไม่ตรงกัน",
 };
 

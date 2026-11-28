@@ -2,18 +2,19 @@
 use anyhow::{Result, bail, ensure};
 use parking_lot::Mutex;
 use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 pub(crate) struct Sessions {
     state: Mutex<State>,
-    pub(crate) lifetime: tokio::sync::Mutex<()>,
 }
 struct State {
-    active: Option<Active>,
+    active: Vec<Active>,
     paused: bool,
     outgoing: Option<OutgoingRequest>,
     next_request: u64,
+    lifetimes: Vec<(String, Arc<tokio::sync::Mutex<()>>)>,
 }
 #[derive(Clone)]
 pub(crate) struct OutgoingRequest {
@@ -27,6 +28,8 @@ pub struct ConnectionControl {
     pub pairing_enabled: bool,
     pub requested_peer_id: Option<String>,
     pub connected_peer_id: Option<String>,
+    pub connected_peer_ids: Vec<String>,
+    pub active_input_peer_id: Option<String>,
     /// Display-only metadata for the saved automatic reconnection target.
     pub selected_peer: Option<SelectedPeer>,
 }
@@ -49,12 +52,12 @@ impl Sessions {
     pub(crate) const fn new() -> Self {
         Self {
             state: Mutex::new(State {
-                active: None,
+                active: Vec::new(),
                 paused: false,
                 outgoing: None,
                 next_request: 0,
+                lifetimes: Vec::new(),
             }),
-            lifetime: tokio::sync::Mutex::const_new(()),
         }
     }
     pub(crate) fn control(&self) -> ConnectionControl {
@@ -65,14 +68,21 @@ impl Sessions {
             pairing_enabled: outgoing.is_some()
                 || state
                     .active
-                    .as_ref()
-                    .is_some_and(|a| a.pairing && !*a.cancel.borrow()),
+                    .iter()
+                    .any(|a| a.pairing && !*a.cancel.borrow()),
             requested_peer_id: outgoing.map(|r| r.peer_id.clone()),
             connected_peer_id: state
                 .active
-                .as_ref()
-                .filter(|a| !a.pairing && !*a.cancel.borrow())
+                .iter()
+                .find(|a| !a.pairing && !*a.cancel.borrow())
                 .map(|a| a.peer_id.clone()),
+            connected_peer_ids: state
+                .active
+                .iter()
+                .filter(|a| !a.pairing && !*a.cancel.borrow())
+                .map(|a| a.peer_id.clone())
+                .collect(),
+            active_input_peer_id: None,
             selected_peer: None,
         }
     }
@@ -81,7 +91,7 @@ impl Sessions {
         state.paused = paused;
         if paused {
             state.outgoing = None;
-            if let Some(active) = &state.active {
+            for active in &state.active {
                 active.cancel.send_replace(true);
             }
         } else {
@@ -96,9 +106,7 @@ impl Sessions {
         );
         let mut state = self.state.lock();
         state.outgoing = None;
-        if let Some(active) = &state.active
-            && active.pairing
-        {
+        for active in state.active.iter().filter(|a| a.pairing) {
             active.cancel.send_replace(true);
         }
         Ok(())
@@ -114,7 +122,7 @@ impl Sessions {
             "a pairing request is already pending"
         );
         ensure!(
-            !state.active.as_ref().is_some_and(|a| a.pairing),
+            !state.active.iter().any(|a| a.pairing),
             "respond to the current pairing request first"
         );
         state.next_request += 1;
@@ -124,9 +132,6 @@ impl Sessions {
             until: Instant::now() + Duration::from_secs(90),
         };
         state.outgoing = Some(request.clone());
-        if let Some(active) = &state.active {
-            active.cancel.send_replace(true);
-        }
         crate::runtime::kick_reconnect();
         Ok(request)
     }
@@ -146,7 +151,7 @@ impl Sessions {
         let mut state = self.state.lock();
         if let Some(request) = state.outgoing.as_ref()
             && request.id == id
-            && state.active.as_ref().is_some_and(|active| {
+            && state.active.iter().any(|active| {
                 active.pairing && active.peer_id == request.peer_id && !*active.cancel.borrow()
             })
         {
@@ -161,11 +166,11 @@ impl Sessions {
     }
     pub(crate) fn can_dial(&self, peer_id: &str, selected_trusted: bool) -> bool {
         let state = self.state.lock();
-        if state.paused || state.active.is_some() {
+        if state.paused || state.active.iter().any(|a| a.peer_id == peer_id) {
             return false;
         }
         match state.outgoing.as_ref().filter(|r| r.until > Instant::now()) {
-            Some(request) => request.peer_id == peer_id,
+            Some(request) => request.peer_id == peer_id || selected_trusted,
             None => selected_trusted,
         }
     }
@@ -195,13 +200,23 @@ impl Sessions {
                 "pairing request was cancelled or expired"
             );
         }
-        if let Some(request) = state.outgoing.as_ref().filter(|r| r.until > Instant::now()) {
+        if let Some(request) = state.outgoing.as_ref().filter(|r| r.until > Instant::now())
+            && pairing
+        {
             ensure!(
                 request.peer_id == peer_id,
                 "a request to another computer is pending"
             );
         }
-        if let Some(old) = state.active.as_ref() {
+        ensure!(
+            !pairing
+                || !state
+                    .active
+                    .iter()
+                    .any(|a| a.pairing && a.peer_id != peer_id),
+            "another pairing request is pending"
+        );
+        if let Some(old) = state.active.iter().find(|a| a.peer_id == peer_id) {
             ensure!(!*old.cancel.borrow(), "previous session is stopping");
             if old.peer != peer || old.peer_id != peer_id || old.preferred || !preferred {
                 bail!("another connection owns the bridge");
@@ -210,7 +225,8 @@ impl Sessions {
         }
         let (cancel, cancelled) = watch::channel(false);
         let token = Arc::new(());
-        state.active = Some(Active {
+        state.active.retain(|a| a.peer_id != peer_id);
+        state.active.push(Active {
             peer: peer.to_vec(),
             peer_id: peer_id.into(),
             preferred,
@@ -236,15 +252,15 @@ impl Claim<'_> {
             .state
             .lock()
             .active
-            .as_ref()
-            .is_some_and(|active| {
-                Arc::ptr_eq(&active.token, &self.token) && !*active.cancel.borrow()
-            })
+            .iter()
+            .any(|active| Arc::ptr_eq(&active.token, &self.token) && !*active.cancel.borrow())
     }
     pub(crate) fn mark_trusted(&self) {
         let mut state = self.sessions.state.lock();
-        if let Some(active) = state.active.as_mut()
-            && Arc::ptr_eq(&active.token, &self.token)
+        if let Some(active) = state
+            .active
+            .iter_mut()
+            .find(|a| Arc::ptr_eq(&a.token, &self.token))
         {
             active.pairing = false;
             state.outgoing = None;
@@ -258,14 +274,35 @@ impl Claim<'_> {
 }
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        let mut state = self.sessions.state.lock();
-        if state
+        self.sessions
+            .state
+            .lock()
             .active
-            .as_ref()
-            .is_some_and(|a| Arc::ptr_eq(&a.token, &self.token))
-        {
-            state.active = None;
+            .retain(|a| !Arc::ptr_eq(&a.token, &self.token));
+    }
+}
+impl Sessions {
+    pub(crate) fn cancel_peer(&self, peer_id: &str) {
+        let mut state = self.state.lock();
+        for active in state.active.iter().filter(|a| a.peer_id == peer_id) {
+            active.cancel.send_replace(true);
         }
+        if state
+            .outgoing
+            .as_ref()
+            .is_some_and(|r| r.peer_id == peer_id)
+        {
+            state.outgoing = None;
+        }
+    }
+    pub(crate) fn lifetime(&self, peer_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut state = self.state.lock();
+        if let Some((_, lifetime)) = state.lifetimes.iter().find(|(id, _)| id == peer_id) {
+            return lifetime.clone();
+        }
+        let lifetime = Arc::new(tokio::sync::Mutex::new(()));
+        state.lifetimes.push((peer_id.into(), lifetime.clone()));
+        lifetime
     }
 }
 
@@ -279,7 +316,7 @@ mod tests {
         assert!(s.set_pairing_enabled(true).is_err());
         let request = s.request("chosen").unwrap();
         assert!(s.can_dial("chosen", false));
-        assert!(!s.can_dial("bystander", true));
+        assert!(s.can_dial("bystander", true));
         assert!(s.claim(b"third", "third", true, true, true, None).is_err());
         let owner = s
             .claim(b"chosen", "chosen", true, false, true, None)
@@ -338,41 +375,30 @@ mod tests {
                 .is_ok()
         );
     }
-    #[tokio::test]
-    async fn an_explicit_switch_waits_for_cleanup_and_duplicate_connections_converge() {
+    #[test]
+    fn incoming_pairing_is_serialized_while_trusted_peers_continue() {
         let s = Sessions::new();
-        let mut old = s.claim(b"old", "old", true, true, false, None).unwrap();
-        let old_workers = s.lifetime.lock().await;
-        let request = s.request("chosen").unwrap();
-        tokio::time::timeout(Duration::from_millis(50), old.cancelled())
-            .await
-            .unwrap();
-        assert!(
-            s.claim(b"chosen", "chosen", true, false, true, None)
-                .is_err()
-        );
-        drop(old_workers);
-        drop(old);
-        let mut fallback = s
-            .claim(b"chosen", "chosen", false, false, true, None)
-            .unwrap();
-        let preferred = s
-            .claim(b"chosen", "chosen", true, false, true, None)
-            .unwrap();
-        fallback.cancelled().await;
-        assert!(
-            !s.finish_request(request.id),
-            "retired outgoing task must not cancel its replacement"
-        );
-        drop(fallback);
-        assert!(
-            s.claim(b"chosen", "chosen", true, false, true, None)
-                .is_err()
-        );
-        drop(preferred);
-        assert!(
-            s.claim(b"chosen", "chosen", true, false, true, None)
-                .is_ok()
-        );
+        let pending = s.claim(b"a", "a", true, false, true, None).unwrap();
+        assert!(s.claim(b"b", "b", true, false, true, None).is_err());
+        let connected = s.claim(b"c", "c", true, true, false, None).unwrap();
+        assert!(connected.is_current());
+        pending.mark_trusted();
+        assert!(s.claim(b"b", "b", true, false, true, None).is_ok());
+    }
+    #[tokio::test]
+    async fn three_peers_coexist_and_replacing_one_cannot_remove_another() {
+        let s = Sessions::new();
+        let one = s.claim(b"a", "a", true, true, false, None).unwrap();
+        let two = s.claim(b"b", "b", false, true, false, None).unwrap();
+        let three = s.claim(b"c", "c", true, true, false, None).unwrap();
+        assert_eq!(s.control().connected_peer_ids.len(), 3);
+        let replacement = s.claim(b"b", "b", true, true, false, None).unwrap();
+        assert!(!two.is_current());
+        drop(two);
+        assert!(one.is_current() && three.is_current() && replacement.is_current());
+        s.request("d").unwrap();
+        assert!(one.is_current() && three.is_current() && replacement.is_current());
+        drop(one);
+        assert_eq!(s.control().connected_peer_ids.len(), 2);
     }
 }

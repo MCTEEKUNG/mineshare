@@ -53,23 +53,7 @@ pub mod virtual_mic_linux;
 /// Audio kind tag — both directions of the bridge ride the same wire,
 /// so the receiver needs to know whether a frame goes to the speakers
 /// (sysout) or to a virtual mic source (mic).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StreamKind {
-    SysOut,
-    Mic,
-}
-
-/// One Opus-encoded 20 ms frame on the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioFrame {
-    pub stream: StreamKind,
-    /// Monotonically increasing per-stream counter — used by the jitter
-    /// buffer to detect drops/reordering. Wraps at u32 max (≈ 24 days
-    /// at 50 fps).
-    pub seq: u32,
-    /// Raw Opus payload. Decoder yields 48 kHz / 2-channel PCM.
-    pub opus: Vec<u8>,
-}
+pub use mineshare_protocol::{AudioFrame, StreamKind};
 
 /// Canonical capture / playback shape — see module docs.
 pub const SAMPLE_RATE: u32 = 48_000;
