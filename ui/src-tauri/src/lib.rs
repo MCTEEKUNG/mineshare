@@ -9,6 +9,7 @@ mod linux_setup;
 mod startup;
 mod state;
 mod tray;
+mod updater;
 mod webview_power;
 
 #[tauri::command]
@@ -26,6 +27,22 @@ async fn configure_linux_setup(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_for_update() -> Result<updater::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(updater::check)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || updater::install(move || app.exit(0)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -410,6 +427,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_linux_setup_status,
             configure_linux_setup,
+            check_for_update,
+            install_update,
             get_startup_status,
             set_startup_enabled,
             get_status,
