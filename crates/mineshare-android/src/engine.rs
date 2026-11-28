@@ -430,42 +430,6 @@ fn mix_audio(audio: &mut HashMap<String, VecDeque<Vec<f32>>>) -> Option<Vec<f32>
     Some(mixed)
 }
 
-#[cfg(test)]
-mod audio_mix_tests {
-    use super::*;
-
-    #[test]
-    fn empty_polls_and_single_source_reuse_the_queued_buffer() {
-        let mut audio = HashMap::new();
-        assert!(mix_audio(&mut audio).is_none());
-        let frame = vec![0.25; FRAME_SAMPLES];
-        let address = frame.as_ptr();
-        audio.insert("phone".into(), VecDeque::from([frame]));
-        let output = mix_audio(&mut audio).unwrap();
-        assert_eq!(
-            output.as_ptr(),
-            address,
-            "single-source mixing must reuse PCM storage"
-        );
-        assert!(output.iter().all(|value| *value == 0.25));
-        assert!(mix_audio(&mut audio).is_none());
-    }
-
-    #[test]
-    fn multiple_sources_mix_clip_and_preserve_the_next_frame() {
-        let mut audio = HashMap::from([
-            (
-                "first".into(),
-                VecDeque::from([vec![0.75, -0.75, 0.2], vec![0.1; 3]]),
-            ),
-            ("second".into(), VecDeque::from([vec![0.75, -0.75, -0.2]])),
-        ]);
-        assert_eq!(mix_audio(&mut audio).unwrap(), vec![1.0, -1.0, 0.0]);
-        assert_eq!(mix_audio(&mut audio).unwrap(), vec![0.1; 3]);
-        assert!(mix_audio(&mut audio).is_none());
-    }
-}
-
 impl Drop for Engine {
     fn drop(&mut self) {
         self.state.stop.send_replace(true);
@@ -1167,4 +1131,40 @@ fn input_event(state: &State, id: &str, event: InputEvent) {
     value["type"] = json!("input");
     value["device_id"] = json!(id);
     state.event(value);
+}
+
+#[cfg(test)]
+mod audio_mix_tests {
+    use super::*;
+
+    #[test]
+    fn empty_polls_and_single_source_reuse_the_queued_buffer() {
+        let mut audio = HashMap::new();
+        assert!(mix_audio(&mut audio).is_none());
+        let frame = vec![0.25; FRAME_SAMPLES];
+        let address = frame.as_ptr();
+        audio.insert("phone".into(), VecDeque::from([frame]));
+        let output = mix_audio(&mut audio).unwrap();
+        assert_eq!(
+            output.as_ptr(),
+            address,
+            "single-source mixing must reuse PCM storage"
+        );
+        assert!(output.iter().all(|value| *value == 0.25));
+        assert!(mix_audio(&mut audio).is_none());
+    }
+
+    #[test]
+    fn multiple_sources_mix_clip_and_preserve_the_next_frame() {
+        let mut audio = HashMap::from([
+            (
+                "first".into(),
+                VecDeque::from([vec![0.75, -0.75, 0.2], vec![0.1; 3]]),
+            ),
+            ("second".into(), VecDeque::from([vec![0.75, -0.75, -0.2]])),
+        ]);
+        assert_eq!(mix_audio(&mut audio).unwrap(), vec![1.0, -1.0, 0.0]);
+        assert_eq!(mix_audio(&mut audio).unwrap(), vec![0.1; 3]);
+        assert!(mix_audio(&mut audio).is_none());
+    }
 }
