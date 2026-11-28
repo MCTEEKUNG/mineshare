@@ -11,8 +11,8 @@ android {
         applicationId = "com.mineshare.mobile"
         minSdk = 34
         targetSdk = 37
-        versionCode = 33
-        versionName = "0.0.33"
+        versionCode = 34
+        versionName = "0.0.34"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

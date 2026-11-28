@@ -14,7 +14,7 @@ strip = "none"
 
 [package]
 name = "mineshare-app"
-version = "0.0.33"
+version = "0.0.34"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -64,6 +64,7 @@ tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "macros", "ne
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

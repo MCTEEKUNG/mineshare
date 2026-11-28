@@ -6,6 +6,7 @@ import { useT } from "../i18n";
 import { ThemeSwitcher } from "../theme";
 import LockEffectSection from "./LockEffect";
 import StartupSection from "./Startup";
+import UpdateSection from "./UpdateSection";
 import WorkspaceLayout from "../components/WorkspaceLayout";
 import Disclosure from "../components/Disclosure";
 import type { Status } from "../types";
@@ -20,6 +21,7 @@ export default function SettingsPage({ status }: { status: Status | null }) {
       <h2 className="text-sm font-semibold">{t("section_appearance")}</h2><ThemeSwitcher />
     </section>
     <StartupSection />
+    <UpdateSection />
     <Disclosure title={t("settings_input")}><InputPrefsCard /></Disclosure>
     <Disclosure title={t("settings_games")}><ManualControls status={status} /></Disclosure>
     <Disclosure title={t("section_hotkeys")}><HotkeysPage /></Disclosure>

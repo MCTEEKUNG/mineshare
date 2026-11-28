@@ -2661,7 +2661,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mineshare-app"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "gio",
@@ -2674,6 +2674,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -2687,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-audio"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2705,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-core"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "parking_lot",
  "serde",
@@ -2716,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-daemon"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2752,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-input"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "enigo",
@@ -2771,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-ipc"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "mineshare-core",
@@ -2783,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-net"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2805,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "mineshare-protocol"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "anyhow",
  "mineshare-core",
